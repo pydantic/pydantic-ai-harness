@@ -21,7 +21,7 @@ import posixpath
 import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 import anyio
 from pydantic_ai.exceptions import UserError
@@ -48,7 +48,13 @@ __all__ = ('ModalSandboxBackend',)
 
 DEFAULT_IMAGE = 'python:3.12-slim'
 DEFAULT_APP_NAME = 'pydantic-ai-harness'
-DEFAULT_SANDBOX_TIMEOUT = 300
+
+
+class _Lifetimes(TypedDict, total=False):
+    """The lifetime arguments of `modal.Sandbox.create` that a backend sets."""
+
+    timeout: int
+    idle_timeout: int
 
 
 _MISSING_MODAL = (
@@ -198,14 +204,13 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     Args:
         workspace: A live `modal.Sandbox` you already have. Whoever created it owns terminating it.
         ref: Identity of an existing workspace to attach to on first use.
-        name: Optional Modal name passed when creating a new sandbox. It is not used to recover a
-            sandbox when `ref` is absent.
         image: Registry tag, or a `modal.Image`, a newly created workspace runs.
         app_name: Modal app a newly created workspace belongs to.
         create_app_if_missing: Create the Modal app when it does not exist yet.
-        sandbox_timeout: How long Modal keeps a newly created workspace alive, in seconds.
+        sandbox_timeout: How long Modal keeps a newly created workspace alive, in seconds;
+            Modal's default when `None`.
         idle_timeout: Seconds without activity after which Modal terminates a newly created
-            workspace; Modal's default (no idle limit) when `None`.
+            workspace; Modal's default when `None`.
         working_dir: Absolute directory commands start in and relative paths resolve against,
             applied to every command, including in an attached workspace; the image's when `None`.
         env: Environment variables every command gets; a command's own `env` is layered on top.
@@ -216,11 +221,10 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         workspace: modal.Sandbox | None = None,
         *,
         ref: WorkspaceRef | None = None,
-        name: str | None = None,
         image: str | modal.Image = DEFAULT_IMAGE,
         app_name: str = DEFAULT_APP_NAME,
         create_app_if_missing: bool = True,
-        sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
+        sandbox_timeout: int | None = None,
         idle_timeout: int | None = None,
         working_dir: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -231,7 +235,6 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             raise ValueError('pass either `workspace` or `ref`, not both')
         self._workspace: modal.Sandbox | None = workspace
         self._ref = ref if workspace is None else WorkspaceRef(provider='modal', id=workspace.object_id)
-        self._name = name
         self._image = image
         self._app_name = app_name
         self._create_app_if_missing = create_app_if_missing
@@ -240,8 +243,8 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         self._working_dir = absolute_path('working_dir', working_dir)
         self._env = dict(env) if env is not None else {}
         self._probed_working_dir: str | None = None
-        # Set once the workspace exists, so an expiry message can say which lifetime ran out.
-        self._created_timeout: int | None = None
+        # Set once this backend creates the workspace, so an expiry message can name its lifetime.
+        self._created = False
         self._lock = anyio.Lock()
 
     async def get_client(self) -> modal.Sandbox:
@@ -344,15 +347,15 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                     if isinstance(self._image, str)
                     else self._image
                 )
+                # Lifetimes are passed only when set, so Modal's own defaults apply otherwise.
+                lifetimes: _Lifetimes = {}
+                if self._sandbox_timeout is not None:
+                    lifetimes['timeout'] = self._sandbox_timeout
+                if self._idle_timeout is not None:
+                    lifetimes['idle_timeout'] = self._idle_timeout
                 variables: dict[str, str | None] | None = dict(self._env) if self._env else None
                 workspace = await modal.Sandbox.create.aio(  # pyright: ignore[reportUnknownMemberType]
-                    app=app,
-                    image=built,
-                    timeout=self._sandbox_timeout,
-                    idle_timeout=self._idle_timeout,
-                    workdir=self._working_dir,
-                    env=variables,
-                    name=self._name,
+                    app=app, image=built, workdir=self._working_dir, env=variables, **lifetimes
                 )
         except Exception as error:
             # Nothing exists yet, so "not found" here is the app or image, not a sandbox.
@@ -369,7 +372,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                 f'Modal sandbox creation did not complete within {_CREATE_TIMEOUT}s; '
                 'the Modal control plane may be unreachable.'
             )
-        self._created_timeout = self._sandbox_timeout
+        self._created = True
         return workspace
 
     async def _attach(self, id: str) -> modal.Sandbox:
@@ -511,14 +514,17 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         return CommandResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
     def _gone_message(self) -> str:
-        if self._created_timeout is None:
-            assert self._ref is not None
-            return _attached_gone_message(self._ref.id)
         assert self._ref is not None
+        if not self._created:
+            return _attached_gone_message(self._ref.id)
+        lifetime = (
+            "Modal's default lifetime"
+            if self._sandbox_timeout is None
+            else f'its sandbox_timeout of {self._sandbox_timeout}s'
+        )
         return (
-            f'The Modal sandbox {self._ref.id!r} is no longer running (it may have reached its '
-            f'sandbox_timeout of {self._created_timeout}s, or been terminated). '
-            'Start a new run, or raise sandbox_timeout for longer work.'
+            f'The Modal sandbox {self._ref.id!r} is no longer running (it may have reached {lifetime}, '
+            'or been terminated). Start a new run, or raise sandbox_timeout for longer work.'
         )
 
     async def _failure(self, error: Exception, context: str, path: str | None = None) -> Exception | None:

@@ -91,7 +91,7 @@ async def resume(ref: WorkspaceRef) -> str:
     return result.output
 ```
 
-An explicit reference takes precedence over message history. Pass `workspace='new'` to `agent.run()` to start a fresh sandbox even when the history names one. Settings on `ModalSandbox` that describe a new sandbox (`image`, `app_name`, `sandbox_timeout`, `idle_timeout`, `name`) do not change one you reattach to; `working_dir` and `env` apply to every command, in a reattached sandbox too.
+An explicit reference takes precedence over message history. Pass `workspace='new'` to `agent.run()` to start a fresh sandbox even when the history names one. Settings on `ModalSandbox` that describe a new sandbox (`image`, `app_name`, `create_app_if_missing`, `sandbox_timeout`, `idle_timeout`) do not change one you reattach to; `working_dir` and `env` apply to every command, in a reattached sandbox too.
 
 ## Manage the sandbox yourself
 
@@ -121,7 +121,7 @@ To terminate the sandbox an agent run created, take the backend from `result.wor
 
 ## Lifetime and cost
 
-A sandbox keeps running, and billing, after the agent run ends: until you terminate it, until `sandbox_timeout` (default 300 seconds) runs out, or, if you set `idle_timeout`, after that many seconds without activity. Pydantic AI never terminates a sandbox; terminating it, and picking lifetimes that reap the ones you lose track of, is the application's job.
+A sandbox keeps running, and billing, after the agent run ends: until you terminate it, or until its lifetime runs out. `sandbox_timeout` and `idle_timeout` set that lifetime; when you leave them unset, [Modal's defaults](https://modal.com/docs/guide/sandbox#timeouts) apply. Pydantic AI never terminates a sandbox; terminating it, and picking lifetimes that reap the ones you lose track of, is the application's job.
 
 - Pass a finite `timeout` to bound a command. Modal counts whole seconds, so fractional timeouts round up; a timed-out command reports the output it produced.
 - Modal has no per-command kill: cancelling a call stops the wait, but the command runs on until its timeout or the sandbox's end.
@@ -146,7 +146,7 @@ Earlier releases shipped a `ModalSandbox` that registered its own `run_command`,
 | --- | --- |
 | `image`, `app_name`, `create_app_if_missing` | Unchanged; they configure a newly created sandbox. `image` also takes a `modal.Image`. |
 | `env` | Unchanged, and now also applied to every command of a reattached sandbox. |
-| `sandbox_timeout` | Unchanged. It also bounds every command, since a command cannot outlive the sandbox. |
+| `sandbox_timeout` | Unchanged, except that Modal's default applies when it is unset. It also bounds every command, since a command cannot outlive the sandbox. |
 | `workdir` | Renamed `working_dir`, which also applies in a reattached sandbox. `workdir=` still works and emits a deprecation warning. |
 | `sandbox_id` | Removed. Use `agent.run(..., workspace=WorkspaceRef(provider='modal', id=sandbox_id))`. |
 | `session` | Removed. Pass `ModalSandboxBackend(workspace=<modal.Sandbox>)` as `workspace=` to `agent.run()`. |

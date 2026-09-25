@@ -15,12 +15,7 @@ from typing_extensions import Never
 
 from pydantic_ai_harness._warn import warn_argument_renamed
 from pydantic_ai_harness._workspace_provider import check_integer, check_working_dir
-from pydantic_ai_harness.modal_sandbox._backend import (
-    DEFAULT_APP_NAME,
-    DEFAULT_IMAGE,
-    DEFAULT_SANDBOX_TIMEOUT,
-    ModalSandboxBackend,
-)
+from pydantic_ai_harness.modal_sandbox._backend import DEFAULT_APP_NAME, DEFAULT_IMAGE, ModalSandboxBackend
 
 if TYPE_CHECKING:
     import modal
@@ -124,20 +119,17 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
     image: str | modal.Image = DEFAULT_IMAGE
     """Image a newly created sandbox runs: a registry tag, or a `modal.Image`, such as one with packages added."""
 
-    name: str | None = None
-    """Optional Modal name used only when creating a sandbox."""
-
     app_name: str = DEFAULT_APP_NAME
     """Modal app used when creating a sandbox."""
 
     create_app_if_missing: bool = True
     """Whether Modal may create the app."""
 
-    sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT
-    """Server-side lifetime for a newly created sandbox, in seconds (Modal's `timeout`)."""
+    sandbox_timeout: int | None = None
+    """Lifetime of a newly created sandbox, in seconds (Modal's `timeout`); Modal's default when `None`."""
 
     idle_timeout: int | None = None
-    """Seconds without activity after which Modal terminates a newly created sandbox; no idle limit when `None`."""
+    """Seconds without activity after which Modal terminates a newly created sandbox; Modal's default when `None`."""
 
     working_dir: str | None = None
     """Absolute directory commands start in and relative paths resolve against; the image's when `None`."""
@@ -159,10 +151,9 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
         description: str | None = None,
         defer_loading: bool = False,
         image: str | modal.Image = DEFAULT_IMAGE,
-        name: str | None = None,
         app_name: str = DEFAULT_APP_NAME,
         create_app_if_missing: bool = True,
-        sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
+        sandbox_timeout: int | None = None,
         idle_timeout: int | None = None,
         working_dir: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -190,14 +181,13 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
             )
         # Checked here rather than when the backend first creates a sandbox, so a bad value fails
         # where it is written instead of at the first workspace operation of some later run.
-        check_integer('sandbox_timeout', sandbox_timeout)
+        check_integer('sandbox_timeout', sandbox_timeout, optional=True)
         check_integer('idle_timeout', idle_timeout, optional=True)
         check_working_dir(working_dir)
         self.id = id
         self.description = description
         self.defer_loading = defer_loading
         self.image = image
-        self.name = name
         self.app_name = app_name
         self.create_app_if_missing = create_app_if_missing
         self.sandbox_timeout = sandbox_timeout
@@ -213,7 +203,6 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
             return None
         return ModalSandboxBackend(
             ref=ref,
-            name=self.name,
             image=self.image,
             app_name=self.app_name,
             create_app_if_missing=self.create_app_if_missing,

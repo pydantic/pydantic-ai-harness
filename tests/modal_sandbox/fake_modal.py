@@ -456,6 +456,13 @@ class FakeSandbox:
         return None
 
 
+class _Unset:
+    """Marks an argument the caller did not pass."""
+
+
+_UNSET = _Unset()
+
+
 class FakeModal:
     """Control surface for the injected fake `modal` module."""
 
@@ -508,23 +515,22 @@ class FakeModal:
             *,
             app: object,
             image: object,
-            timeout: int | None = None,
-            idle_timeout: int | None = None,
+            timeout: int | _Unset = _UNSET,
+            idle_timeout: int | None | _Unset = _UNSET,
             workdir: str | None = None,
             env: dict[str, str | None] | None = None,
-            name: str | None = None,
         ) -> FakeSandbox:
             if control.create_error is not None:
                 raise control.create_error
+            # Lifetimes are recorded only when passed, so a test can tell Modal's default applied.
+            lifetimes = {'timeout': timeout, 'idle_timeout': idle_timeout}
             control.create_kwargs.append(
                 {
                     'app': app,
                     'image': image,
-                    'timeout': timeout,
-                    'idle_timeout': idle_timeout,
                     'workdir': workdir,
                     'env': env,
-                    'name': name,
+                    **{key: value for key, value in lifetimes.items() if value is not _UNSET},
                 }
             )
             control.owned_creates += 1

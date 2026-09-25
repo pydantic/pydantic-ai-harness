@@ -386,20 +386,11 @@ def test_other_missing_names_are_attribute_errors() -> None:
         getattr(modal_sandbox_package, 'ModalSandboxTypo')
 
 
-@pytest.mark.parametrize('sandbox_timeout', [0, -5, 1.5, True])
-def test_sandbox_timeout_must_be_a_positive_integer(sandbox_timeout: Any) -> None:
-    with pytest.raises(
-        UserError, match=rf'sandbox_timeout must be an integer of at least 1, got {sandbox_timeout!r}\.'
-    ):
-        ModalSandbox(sandbox_timeout=sandbox_timeout)
-
-
-@pytest.mark.parametrize('idle_timeout', [0, -5, 1.5, True])
-def test_idle_timeout_must_be_a_positive_integer_or_none(idle_timeout: Any) -> None:
-    with pytest.raises(
-        UserError, match=rf'idle_timeout must be an integer of at least 1 or None, got {idle_timeout!r}\.'
-    ):
-        ModalSandbox(idle_timeout=idle_timeout)
+@pytest.mark.parametrize('field', ['sandbox_timeout', 'idle_timeout'])
+@pytest.mark.parametrize('value', [0, -5, 1.5, True])
+def test_lifetimes_must_be_positive_integers_or_none(field: str, value: Any) -> None:
+    with pytest.raises(UserError, match=rf'{field} must be an integer of at least 1 or None, got {value!r}\.'):
+        ModalSandbox(**{field: value})
 
 
 @pytest.mark.parametrize('working_dir', ['relative/dir', '', 'C:\\work'])

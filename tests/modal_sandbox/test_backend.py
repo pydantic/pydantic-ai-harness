@@ -176,13 +176,13 @@ class TestRun:
         backend = await started()
         fake_modal.exec_error = fake_modal.exception('ConflictError')('Sandbox already finished')
         fake_modal.sandboxes[0].poll_result = 0
-        with pytest.raises(WorkspaceUnavailableError, match='sandbox_timeout of 300s'):
+        with pytest.raises(WorkspaceUnavailableError, match="Modal's default lifetime"):
             await backend.run(['x'])
 
     async def test_shutting_down_conflict_is_terminal(self, fake_modal: FakeModal) -> None:
         # Right after `terminate()`, Modal still polls the sandbox as running but refuses exec
         # with this ConflictError; the sandbox will not come back, so it is not retryable.
-        backend = await started()
+        backend = await started(sandbox_timeout=300)
         fake_modal.exec_error = fake_modal.exception('ConflictError')('Modal Sandbox is shutting down.')
         with pytest.raises(WorkspaceUnavailableError, match='sandbox_timeout of 300s'):
             await backend.run(['x'])
@@ -335,7 +335,9 @@ class TestCreate:
         assert fake_modal.app_lookups[-1] == {'name': 'pydantic-ai-harness', 'create_if_missing': True}
         assert fake_modal.image_tags[-1] == 'python:3.12-slim'
         assert fake_modal.create_kwargs[-1]['env'] is None
-        assert fake_modal.create_kwargs[-1]['idle_timeout'] is None
+        # Lifetimes left unset are not passed, so Modal's own defaults apply.
+        assert 'timeout' not in fake_modal.create_kwargs[-1]
+        assert 'idle_timeout' not in fake_modal.create_kwargs[-1]
 
     @pytest.mark.parametrize(
         ('name', 'expected', 'match'),
