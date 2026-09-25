@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from .step_persistence import StepPersistence
     from .subagents import SubAgent, SubAgents
     from .system_reminders import SystemReminders
+    from .tool_call_judge import ToolCallJudge
     from .tool_output_limits import ToolOutputLimits
     from .trajectory_judge import TrajectoryJudge
     from .warn_on_cache_busts import WarnOnCacheBusts
@@ -121,6 +122,7 @@ __all__ = [
     'SummarizingCompaction',
     'SystemReminders',
     'TieredCompaction',
+    'ToolCallJudge',
     'ToolGuardrail',
     'ToolOutputLimits',
     'TrajectoryJudge',
@@ -173,6 +175,7 @@ _CAPABILITY_EXPORTS = {
     'SummarizingCompaction': 'compaction',
     'SystemReminders': 'system_reminders',
     'TieredCompaction': 'compaction',
+    'ToolCallJudge': 'tool_call_judge',
     'ToolGuardrail': 'guardrails',
     'ToolOutputLimits': 'tool_output_limits',
     'TrajectoryJudge': 'trajectory_judge',
