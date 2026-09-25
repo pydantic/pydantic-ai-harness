@@ -35,7 +35,7 @@ from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxBackend
 
 from .._tool_calls import call_tools
-from .conftest import require_live_credentials
+from .conftest import LIVE_AUTO_STOP_INTERVAL, require_live_credentials
 
 _live_enabled = os.getenv('PYDANTIC_AI_HARNESS_DAYTONA_LIVE') == '1'
 
@@ -66,7 +66,7 @@ async def client() -> AsyncIterator[daytona.AsyncDaytona]:
 @asynccontextmanager
 async def _owned(client: daytona.AsyncDaytona) -> AsyncGenerator[DaytonaSandboxBackend]:
     """Create a sandbox and delete it on the way out, even when the test deleted it already."""
-    backend = DaytonaSandboxBackend(client=client)
+    backend = DaytonaSandboxBackend(client=client, auto_stop_interval=LIVE_AUTO_STOP_INTERVAL)
     native = await backend.get_client()
     try:
         yield backend

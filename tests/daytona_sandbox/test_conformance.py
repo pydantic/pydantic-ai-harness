@@ -17,6 +17,7 @@ from pydantic_ai.workspaces.testing import WorkspaceBackendSuite
 
 from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxBackend
 
+from .conftest import LIVE_AUTO_STOP_INTERVAL
 from .fake_daytona import FakeDaytona
 
 _live_enabled = os.getenv('PYDANTIC_AI_HARNESS_DAYTONA_LIVE') == '1'
@@ -78,7 +79,7 @@ class TestLiveDaytonaSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover 
     @pytest.fixture(scope='class')
     @classmethod
     async def backend(cls) -> AsyncIterator[DaytonaSandboxBackend]:
-        backend = DaytonaSandboxBackend()
+        backend = DaytonaSandboxBackend(auto_stop_interval=LIVE_AUTO_STOP_INTERVAL)
         try:
             yield backend
         finally:

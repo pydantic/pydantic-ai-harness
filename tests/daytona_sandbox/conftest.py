@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 _HAS_DAYTONA = importlib.util.find_spec('daytona') is not None
+
+# CI stops the live job after 15 minutes, before a `finally` can delete what it started.
+# Live tests create sandboxes that Daytona stops after this many idle minutes, so one left
+# behind that way stops running instead of waiting for Daytona's default.
+LIVE_AUTO_STOP_INTERVAL = 5
 collect_ignore = (
     []
     if _HAS_DAYTONA
