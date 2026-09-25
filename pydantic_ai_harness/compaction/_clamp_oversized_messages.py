@@ -58,8 +58,9 @@ class ClampOversizedMessages(AbstractCapability[AgentDepsT]):
 
     Request-side parts (user prompts, tool returns, system prompts) are out of scope: user
     input should not be silently rewritten, and oversized tool *returns* are the job of
-    `ToolOutputLimits`, which reduces a return when the tool produces it. `ClearToolResults`
-    cannot help with a single huge fresh return: it never touches the newest `keep_pairs` results.
+    `ToolOutputLimits`, which reduces a return when the tool produces it. `ClearToolResults` keeps
+    the newest `keep_pairs` results intact, and with `keep_pairs=0` it blanks a fresh return
+    outright rather than shrinking it.
 
     Clamping rewrites message content, so it invalidates the provider's prompt cache from the
     clamped message onward. That is unavoidable here -- the alternative is a failed request.
