@@ -60,6 +60,17 @@ def test_settings_validate_against_plugin_model() -> None:
         host().settings(Options)
 
 
+def test_save_settings_persists_non_default_values() -> None:
+    saved: list[dict[str, JsonValue]] = []
+    plugin = PluginHost[None](name='test', console=Console(file=io.StringIO()), settings={}, persist=saved.append)
+    plugin.save_settings(Options(greeting='hi', loud=False))
+    assert saved == [{'greeting': 'hi'}], 'defaults are left out'
+    assert plugin.settings(Options) == Options(greeting='hi')
+    detached = host(greeting='hi')
+    detached.save_settings(Options(greeting='yo', loud=True))
+    assert detached.settings(Options) == Options(greeting='yo', loud=True), 'without persist, only the host changes'
+
+
 async def test_host_hooks_dispatch_by_event_type() -> None:
     plugin = host()
     seen: list[str] = []

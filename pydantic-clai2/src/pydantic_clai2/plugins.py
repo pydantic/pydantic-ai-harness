@@ -224,11 +224,13 @@ class PluginHost(Generic[DepsT]):
         full_screen: FullScreen = bare_screen,
         conversation: Conversation | None = None,
         status: Status | None = None,
+        persist: Callable[[dict[str, JsonValue]], None] | None = None,
     ) -> None:
         """`settings` is the raw JSON from `plugins add`; validate it with `settings(Model)`.
 
         The shell passes its own `conversation` and `status`; a host built elsewhere gets a
         `Transcript` and a detached status row, so a plugin needs no special case for either.
+        `persist` saves the declaration's settings; without it, `save_settings` changes only this host.
         """
         self.name = name
         self.console = console
@@ -243,6 +245,7 @@ class PluginHost(Generic[DepsT]):
         self.status = status if status is not None else Status()
         self.commands = Commands()
         self._settings = settings
+        self._persist = persist
         self._hooks: Hooks[DepsT] = Hooks()
         self._hooks_used = False
         self._capabilities: list[AgentCapability[DepsT]] = []
@@ -287,6 +290,17 @@ class PluginHost(Generic[DepsT]):
     def settings(self, model: type[ModelT], /) -> ModelT:
         """Validate the JSON given to `plugins add` against the plugin's own model."""
         return model.model_validate(self._settings)
+
+    def save_settings(self, settings: BaseModel, /) -> None:
+        """Save new settings for this plugin's declaration, leaving out defaults; `settings(Model)` returns them.
+
+        The loaded plugin is not reloaded, so apply the change yourself. Settings are plaintext SQLite:
+        keep secrets in `/keys` and save only their names.
+        """
+        data: dict[str, JsonValue] = settings.model_dump(mode='json', exclude_defaults=True)
+        if self._persist is not None:
+            self._persist(data)
+        self._settings = data
 
     def add(self, capability: AgentCapability[DepsT], /) -> None:
         """Give the agent tools, instructions, or a capability chosen per run."""

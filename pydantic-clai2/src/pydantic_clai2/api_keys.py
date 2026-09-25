@@ -15,7 +15,7 @@ from termflow.tui import MenuBuilder, MenuItem  # pyright: ignore[reportMissingT
 from termflow.tui.menu import Menu  # pyright: ignore[reportMissingTypeStubs]
 
 from ._rendering import markdown_style
-from .credential_store import credentials_path, load_codex_credentials, save_codex_credentials
+from .credential_store import credentials_path, delete_credentials, load_codex_credentials, save_codex_credentials
 from .menu_worker import menu_key, run_worker
 
 
@@ -43,6 +43,12 @@ def save_key_connection(*, account: str, token: SecretStr | KeyReference, value:
         if isinstance(token, KeyReference) and token.name not in _load_keys():
             raise UserError('The selected API key no longer exists. Select a saved key again.')
         save_codex_credentials(account=account, value=value)
+
+
+def forget_connection(*, account: str) -> None:
+    """Drop a saved connection, and with it any key reference it held; the keys themselves stay."""
+    with key_transaction():
+        delete_credentials(account=account)
 
 
 class SecretPrompt(Protocol):

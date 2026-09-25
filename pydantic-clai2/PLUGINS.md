@@ -514,44 +514,61 @@ updating accounts, and looking up contacts. It starts disabled;
 `/plugins enable pylon` turns it on. The agent acts as the Pylon user who signed
 in, so only Member and Admin users with Pylon's `MCP Access` role can use it.
 
-The token lives in [`/keys`](#saved-api-keys), not in plugin settings, which are
-plaintext SQLite. Enabling the plugin in a terminal opens the saved-key picker:
-choose an existing key, or choose **Enter a different API key** to type a masked
-token that CLAI saves in `/keys` as `PYLON_ACCESS_TOKEN`, the name harness
-`Pylon` documents. If that name already exists, CLAI asks before replacing it,
-since other connections may use it. `/pylon key` chooses again; bare `/pylon`
-names the key in use. The label is not an environment variable: CLAI does not
-read an exported `PYLON_ACCESS_TOKEN`.
+#### Configuring Pylon
 
-Only the key's name is saved, in the credential store beside the vLLM and
-OpenRouter connections. Each run looks up the key's current value, so replacing it
-in `/keys` takes effect on the next run, with no reload. A key Pylon references
-cannot be renamed in `/keys`, and deleting it makes Pylon runs fail with an error
-naming the key until you restore it or choose another. Until a key is chosen
-(outside a terminal, or after cancelling the picker), runs get no Pylon tools.
-Several connections and plugins can share one named key by pointing at the same
-name: for example, a GitHub plugin and Copilot tooling can both reference
-`GITHUB_TOKEN`, so replacing it once updates both.
+`/pylon` opens a settings menu. Enabling the plugin in a terminal opens it too,
+until a key is chosen. Type to filter the rows. Enter edits a row, `R` restores
+its default, and Esc closes the menu. Each change is saved to the plugin's
+settings as soon as you make it and applies from the next run. You don't need
+to reload or reinstall, and you can reopen `/pylon` at any time to change
+anything, including the key.
 
-Pylon only accepts OAuth access tokens, not its REST API keys. To have CLAI sign
-in for you instead, set `"auth": "browser"`: the first run that uses Pylon opens
-the browser, as `/mcp` servers with OAuth do, and waits up to five minutes for you
-to finish. Those tokens stay in the keyring (account `mcp-plugin_pylon`, or a
-private `0600` file when there is no keyring), are refreshed as needed, and never
-touch `/keys` or plugin settings.
-
-| Key | Default | Does |
+| Row | Default | Does |
 |---|---|---|
-| `auth` | `"key"` | `"key"` connects with the `/keys` entry chosen through `/pylon key`; `"browser"` signs in through the browser |
-| `read_only` | `false` | keep only the tools Pylon's server labels read-only |
+| Sign-in (`auth`) | Named key from /keys (`"key"`) | `"key"` connects with a `/keys` entry. `"browser"` signs in through the browser |
+| Key (/keys) | not chosen | shown only for `"key"`. Enter opens the saved-key picker, and `R` forgets the choice. Stored as a name, not in settings |
+| Read-only tools (`read_only`) | `false` | keep only the tools Pylon's server labels read-only |
+| Server instructions (`include_instructions`) | `true` | pass Pylon's own server instructions to the agent |
+
+`/pylon status` prints the current setup without opening the menu, and
+`/pylon key` goes straight to the key picker. A declaration can also carry the
+settings as JSON, since none of them are secret:
 
 ```text
 /plugins add pylon pydantic_clai2.pylon '{"read_only": true}'
-/plugins add pylon pydantic_clai2.pylon '{"auth": "browser"}'
 ```
 
-Neither setting is secret. The plugin rejects any other key, so a token cannot be
-put in its settings by mistake.
+Pylon's endpoint (`https://mcp.usepylon.com`) is fixed and there is no
+workspace or organization field. The token decides which Pylon organization
+and user the agent acts as.
+
+#### Keys: `/keys` holds the secret, Pylon holds its name
+
+The token lives in [`/keys`](#saved-api-keys), not in plugin settings, which are
+plaintext SQLite. The Key row uses the shared saved-key picker, which is
+searchable, and Esc cancels it. Choose an existing key, or choose **Enter a
+different API key** to type a masked token. CLAI saves that token in `/keys` as
+`PYLON_ACCESS_TOKEN`, the name harness `Pylon` documents. If that name already
+exists, CLAI asks before replacing it, since other connections may use it. The
+name is only a label: CLAI does not read an exported `PYLON_ACCESS_TOKEN`.
+
+Only the key's name is saved, in the credential store beside the vLLM and
+OpenRouter connections. Each run looks up the key's current value, so replacing
+it in `/keys` takes effect on the next run. A key Pylon uses cannot be renamed
+in `/keys`. Deleting it makes Pylon runs fail with an error naming the key until
+you restore it or choose another. Until a key is chosen, runs get no Pylon
+tools. This applies outside a terminal and after cancelling the menu.
+
+Several connections and plugins can share one named key by pointing at the same
+name. For example, a GitHub plugin and Copilot tooling can both reference
+`GITHUB_TOKEN`, so replacing it once updates both.
+
+Pylon only accepts OAuth access tokens, not its REST API keys. With the
+**Browser sign-in** option, CLAI signs in for you: the first run that uses Pylon
+opens the browser, as `/mcp` servers with OAuth do, and waits up to five minutes
+for you to finish. Those tokens stay in the keyring (account `mcp-plugin_pylon`,
+or a private `0600` file when there is no keyring). They are refreshed as
+needed and never touch `/keys` or plugin settings.
 
 ## Managing plugins
 
@@ -936,6 +953,20 @@ Bad or missing values fail at startup with a message naming your plugin.
 CLAI ignores unknown names in its own saved settings and preserves their values for
 other versions or branches. This does not relax validation of plugin declarations
 or `host.settings(Model)`.
+
+### Change your settings from a menu: `host.save_settings(model)`
+
+`host.save_settings(settings)` writes a validated settings model back to the
+plugin's declaration, leaving out default values. The next `host.settings(Model)`
+returns it, and so does the next start. The loaded plugin is not reloaded, so
+read current settings when you use them, for example in a per-run capability
+function passed to `host.add`. Settings are plaintext SQLite: keep secrets in
+`/keys` with `prompt_api_key` and save only the returned `KeyReference` name.
+
+For a settings menu, give `field_menu.run_flow` a `FieldSource` whose `apply`
+calls `host.save_settings`, and run it through `menu_worker.run_worker` from a
+command you register. The built-in [`pylon`](#configuring-pylon) plugin does
+this, including stepping out of the menu worker to run the async key picker.
 
 ### Reach the conversation and the status row: `host.conversation`, `host.status`
 

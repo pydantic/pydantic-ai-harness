@@ -13,6 +13,7 @@ from typing import Generic
 
 from anyio import CancelScope, fail_after
 from anyio.lowlevel import checkpoint
+from pydantic import JsonValue
 from pydantic_ai import AgentStreamEvent
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from rich.console import Console
@@ -231,6 +232,7 @@ class PluginLoader(Generic[DepsT]):
             full_screen=self._full_screen,
             conversation=self._conversation,
             status=self._status,
+            persist=lambda settings: self._save_settings(name, settings),
         )
         try:
             module = self._import(entry, fresh=fresh)
@@ -302,6 +304,10 @@ class PluginLoader(Generic[DepsT]):
                 if isinstance(event, TurnStart):
                     raise PluginError(name, exc) from exc
                 self._console.print(str(PluginError(name, exc)), style=theme.color(theme.ERROR), markup=False)
+
+    def _save_settings(self, name: str, settings: dict[str, JsonValue]) -> None:
+        declaration = self._entry(name).declaration
+        self._store.save_plugin(declaration.model_copy(update={'settings': settings}))
 
     async def enable(self, name: str) -> None:
         """Remember the plugin as enabled and load it now."""
