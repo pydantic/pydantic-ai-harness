@@ -45,7 +45,6 @@ from pydantic_ai_harness.shell._policy import is_interactive_command
 from pydantic_ai_harness.shell._toolset import ShellToolset
 
 from .._tool_calls import call_tool
-from .._workspace import local_workspace
 
 
 def _env_toolset(
@@ -108,7 +107,7 @@ def _run_context(workspace: Workspace) -> RunContext[None]:
 
 def _ctx(working_dir: Path) -> RunContext[None]:
     """A run context whose workspace is this machine, with commands starting in `working_dir`."""
-    return _run_context(Workspace(local_workspace(working_dir)))
+    return _run_context(Workspace(LocalWorkspaceBackend(working_dir)))
 
 
 async def _call_shell_tool(toolset: ShellToolset[None], working_dir: Path, name: str, **tool_args: Any) -> str:
@@ -1358,7 +1357,7 @@ class TestShellCapability:
             pytest.skip('Agent.run() requires asyncio')
         model = TestModel(custom_output_text='done', call_tools=[])
         agent: Agent[None, str] = Agent(model, capabilities=[Shell()])
-        result = await agent.run('run echo hello', workspace=local_workspace(tmp_path))
+        result = await agent.run('run echo hello', workspace=LocalWorkspaceBackend(tmp_path))
         assert result.output == 'done'
 
     async def test_no_workspace_fails_the_run(self) -> None:
@@ -1381,7 +1380,7 @@ async def _tools_offered_to_model(cwd: Path, *, shell_first: bool) -> dict[str, 
     code_mode = CodeMode[object]()
     capabilities: list[AbstractCapability[object]] = [shell, code_mode] if shell_first else [code_mode, shell]
     agent: Agent[None, str] = Agent(FunctionModel(capture), capabilities=capabilities)
-    await agent.run('go', workspace=local_workspace(cwd))
+    await agent.run('go', workspace=LocalWorkspaceBackend(cwd))
     return offered
 
 
@@ -1781,21 +1780,14 @@ class TestEnvControlExecution:
     """End-to-end: the resolved env actually reaches spawned subprocesses."""
 
     async def test_explicit_env_seen_by_command(self, shell_dir: Path) -> None:
-        ts = _env_toolset(shell_dir, env={'MY_TOKEN': 'present', 'PATH': os.environ['PATH']})
+        ts = _env_toolset(shell_dir, env={'MY_TOKEN': 'present'})
         result = await ts.run_command(_ctx(shell_dir), _read_env_var('MY_TOKEN'))
         assert 'present' in result
-
-    async def test_explicit_env_hides_inherited_secret(self, shell_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('OPENROUTER_API_KEY', 'leak-me')
-        ts = _env_toolset(shell_dir, env={'PATH': os.environ['PATH']})
-        result = await ts.run_command(_ctx(shell_dir), _read_env_var('OPENROUTER_API_KEY'))
-        assert 'ABSENT' in result
-        assert 'leak-me' not in result
 
     async def test_host_environment_does_not_reach_commands(
         self, shell_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A local workspace inherits nothing from the host process.
+        # A local workspace passes on only the host's `PATH` and `HOME`.
         monkeypatch.setenv('ANTHROPIC_API_KEY', 'leak-me')
         monkeypatch.setenv('HARNESS_INHERITED', 'yes')
         ts = _env_toolset(shell_dir)
@@ -1813,7 +1805,7 @@ class TestEnvControlExecution:
         # Both set: a pattern strips a key from the explicit env, the rest survives.
         ts = _env_toolset(
             shell_dir,
-            env={'SECRET_KEY': 'leak-me', 'KEEP_VAR': 'kept', 'PATH': os.environ['PATH']},
+            env={'SECRET_KEY': 'leak-me', 'KEEP_VAR': 'kept'},
             denied_env_patterns=['SECRET_*'],
         )
         stripped = await ts.run_command(_ctx(shell_dir), _read_env_var('SECRET_KEY'))
@@ -1823,7 +1815,7 @@ class TestEnvControlExecution:
         assert 'kept' in survived
 
     async def test_background_command_honors_env(self, shell_dir: Path) -> None:
-        ts = _env_toolset(shell_dir, env={'BG_TOKEN': 'bg-present', 'PATH': os.environ['PATH']})
+        ts = _env_toolset(shell_dir, env={'BG_TOKEN': 'bg-present'})
         start_result = await ts.start_command(_ctx(shell_dir), _read_env_var('BG_TOKEN'))
         command_id = _parse_command_id(start_result)
         await anyio.sleep(0.5)
@@ -1883,7 +1875,7 @@ class TestReadOnlyWorkspace:
 
     async def test_get_tools_is_empty(self, tmp_path: Path) -> None:
         ts = _shell_toolset(tmp_path)
-        read_only = _run_context(ReadOnlyWorkspace(Workspace(local_workspace(tmp_path))))
+        read_only = _run_context(ReadOnlyWorkspace(Workspace(LocalWorkspaceBackend(tmp_path))))
         assert await ts.get_tools(read_only) == {}
         assert set(await ts.get_tools(_ctx(tmp_path))) == {
             'run_command',
@@ -1896,7 +1888,7 @@ class TestReadOnlyWorkspace:
         ts = _shell_toolset(tmp_path)
         writable = _ctx(tmp_path)
         tools = await ts.get_tools(writable)
-        read_only = _run_context(ReadOnlyWorkspace(Workspace(local_workspace(tmp_path))))
+        read_only = _run_context(ReadOnlyWorkspace(Workspace(LocalWorkspaceBackend(tmp_path))))
         with pytest.raises(ToolFailed) as exc_info:
             await ts.call_tool('run_command', {'command': 'echo hi'}, read_only, tools['run_command'])
         assert exc_info.value.message == READ_ONLY_FAILURE
@@ -1932,7 +1924,7 @@ class TestDetachedJobRoundTrip:
             [shell],
             'shell',
             {'command': 'exec sleep 300', 'mode': 'background'},
-            workspace=local_workspace(tmp_path),
+            workspace=LocalWorkspaceBackend(tmp_path),
         )
         pid = int(output.split('PID: ')[1].split()[0])
         stop = output.split('use `')[1].split('`')[0]
@@ -1946,7 +1938,7 @@ class TestDetachedJobRoundTrip:
                 [Shell[None](tools=['run_command'], denied_commands=[])],
                 'run_command',
                 {'command': wait, 'timeout_seconds': 10},
-                workspace=local_workspace(tmp_path),
+                workspace=LocalWorkspaceBackend(tmp_path),
             )
             assert 'exit code' not in result and 'timed out' not in result
             assert json.loads(status.read_text()) == {'pid': pid, 'exit_code': 143}

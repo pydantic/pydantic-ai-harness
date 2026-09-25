@@ -6,8 +6,9 @@ from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability, WebFetch, WebSearch
 from pydantic_ai.tools import AgentDepsT
 
+from pydantic_ai_harness._workspace import RequireWorkspace
 from pydantic_ai_harness.subagents import SubAgent, SubAgents
-from pydantic_ai_harness.tool_output_limits import LocalFileStore, ToolOutputLimits
+from pydantic_ai_harness.tool_output_limits import ToolOutputLimits
 
 DEFAULT_RESEARCHER_INSTRUCTIONS = """\
 Search broadly before drawing conclusions.
@@ -19,11 +20,6 @@ Distinguish sourced facts from your own inference.
 """Default instructions for `Researcher`."""
 
 
-def _output_limits() -> ToolOutputLimits[AgentDepsT]:
-    # Research runs need no workspace, so spills stay on this machine.
-    return ToolOutputLimits[AgentDepsT](store=LocalFileStore())
-
-
 def _researcher() -> SubAgent[AgentDepsT]:
     agent = Agent[AgentDepsT](  # pyright: ignore[reportCallIssue, reportArgumentType]
         name='researcher',
@@ -31,7 +27,7 @@ def _researcher() -> SubAgent[AgentDepsT]:
         capabilities=[
             WebSearch[AgentDepsT](local=True),
             WebFetch[AgentDepsT](local=True),
-            _output_limits(),
+            ToolOutputLimits[AgentDepsT](),
         ],
     )
     return SubAgent(agent)
@@ -42,6 +38,10 @@ class Researcher(CombinedCapability[AgentDepsT]):
 
     It comes with concise default instructions. Pass `instructions=` to
     replace them, or `instructions=None` to run with no default instructions.
+
+    Oversized tool results are spilled to files in the run's workspace, so a
+    run needs one: attach `LocalWorkspace('.')` or a sandbox capability. A run
+    without a workspace fails at its start.
     """
 
     def __init__(
@@ -51,7 +51,7 @@ class Researcher(CombinedCapability[AgentDepsT]):
         subagents: Sequence[SubAgent[AgentDepsT]] | None = None,
     ) -> None:
         delegates = [_researcher()] if subagents is None else subagents
-        capabilities: list[AbstractCapability[AgentDepsT]] = []
+        capabilities: list[AbstractCapability[AgentDepsT]] = [RequireWorkspace[AgentDepsT]('Researcher')]
         if instructions is not None:
             capabilities.append(Capability[AgentDepsT](instructions=instructions))
         capabilities.extend(
@@ -62,5 +62,5 @@ class Researcher(CombinedCapability[AgentDepsT]):
         )
         if delegates:
             capabilities.append(SubAgents[AgentDepsT](agents=delegates, agent_folders=None))
-        capabilities.append(_output_limits())
+        capabilities.append(ToolOutputLimits[AgentDepsT]())
         super().__init__(capabilities)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 from pydantic_ai import RunContext
@@ -11,6 +12,7 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset, ToolsetTool
 from pydantic_ai.workspaces import WorkspaceError, WorkspaceTimeoutError
 
+from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored
 from pydantic_ai_harness._workspace import raise_tool_failure, supports_commands
 
 _INSTALL_HINT = (
@@ -128,8 +130,10 @@ class MacroscopeToolset(FunctionToolset[AgentDepsT]):
     fixing the findings is left to the agent's other tools.
     """
 
-    def __init__(self, *, command: str, base: str | None, timeout: float) -> None:
+    def __init__(self, *, command: str, base: str | None, timeout: float, cwd: Path | None = None) -> None:
         super().__init__()
+        if cwd is not None:
+            warn_argument_ignored('MacroscopeToolset', 'cwd', WORKING_DIR_IS_THE_WORKSPACES, stacklevel=3)
         self._command = command
         self._base = base
         self._timeout = timeout

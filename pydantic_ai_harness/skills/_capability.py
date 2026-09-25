@@ -1,32 +1,22 @@
-"""Load Agent Skill instructions from the run's workspace, on demand."""
+"""Load Agent Skill instructions from the run's workspace as deferred capabilities."""
 
 from __future__ import annotations
 
-import unicodedata
 import warnings
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import overload
 
 from pydantic_ai._utils import replace_no_init  # pyright: ignore[reportPrivateUsage]
-from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry
-from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
+from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.workspaces import Workspace, WorkspaceBackend
 
 from pydantic_ai_harness._workspace import require_workspace, secondary_workspace
 from pydantic_ai_harness.skills._loader import SkillDefinition, load_skill_libraries
 
 _MAX_DESCRIPTION_LENGTH = 1024
-
-LOAD_SKILL_TOOL_NAME = 'load_skill'
-
-_CATALOG_PREFIX = (
-    f'The following skills hold specialized instructions. When a task matches one, call `{LOAD_SKILL_TOOL_NAME}` '
-    'with its name and follow the instructions it returns:'
-)
 
 
 @dataclass(frozen=True)
@@ -40,22 +30,38 @@ class _SkillSource:
     """The `workspace=` the libraries are read from, or `None` for the run's workspace."""
 
 
+class _Skill(AbstractCapability[AgentDepsT]):
+    """One skill: its instructions, loaded by the model with `load_capability`.
+
+    Instructions only, with no toolset, so a durable engine accepts it although it is built per run.
+    """
+
+    def __init__(self, skill: SkillDefinition) -> None:
+        self.id = skill.name
+        # Continuation lines are indented so a multiline description doesn't read as separate catalog entries.
+        self.description = skill.description.replace('\n', '\n  ')
+        self.defer_loading = True
+        self.instructions = f'# Skill: {skill.name}\n\n{skill.body}' if skill.body else f'# Skill: {skill.name}'
+
+    def get_instructions(self) -> str:
+        return self.instructions
+
+
 @dataclass(init=False, repr=False)
 class Skills(AbstractCapability[AgentDepsT]):
-    """Offer Agent Skill instructions from the run's workspace, loaded on demand.
+    """Offer Agent Skill instructions from the run's workspace as deferred capabilities.
 
     Skill libraries are directories in the run's workspace (`ctx.workspace`), read at the
     start of every run; relative paths resolve against its working directory. Attach
     `LocalWorkspace` to read directories on this machine, or pass `workspace=` to read them
     from a workspace of their own. A run with neither fails at its start.
 
-    Each selected immediate child containing `SKILL.md` is listed by name and description in
-    the instructions, and the model calls `load_skill` to receive its Markdown body. Bundled
-    files are not loaded or executed. Descriptions longer than the Agent Skills limit are
-    preserved and emit a warning.
+    Each selected immediate child containing `SKILL.md` becomes a deferred capability named after
+    the skill: the model sees its name and description, and loads its Markdown body with
+    `load_capability`. Bundled files are not loaded or executed. Descriptions longer than the
+    Agent Skills limit are preserved and emit a warning.
 
-    Two `Skills` on one agent combine: every library either names stays reachable through
-    one `load_skill` tool.
+    Two `Skills` on one agent combine, so every library either names stays reachable.
     """
 
     directories: tuple[str | Path, ...]
@@ -71,19 +77,10 @@ class Skills(AbstractCapability[AgentDepsT]):
     """Where the libraries live, when not in the run's workspace; see `__init__`."""
 
     id: str | None = 'skills'
-    """One per agent: two `Skills` combine into one catalog behind one `load_skill` tool."""
+    """One per agent: two `Skills` combine into one catalog."""
 
     _sources: tuple[_SkillSource, ...] = field(default=(), init=False, repr=False, compare=False)
     """Every configuration this instance serves: its own, plus those of any `Skills` combined into it."""
-
-    _skills: tuple[SkillDefinition, ...] = field(default=(), init=False, repr=False, compare=False)
-    """This run's selected skills, read in `before_run` on the per-run copy made by `for_run`."""
-
-    _toolset: FunctionToolset[AgentDepsT] = field(init=False, repr=False, compare=False)
-    """The `load_skill` toolset, built with the agent and shared by every run's copy.
-
-    Durable engines register toolsets when the agent is built, so a run can't bring its own.
-    """
 
     @overload
     def __init__(  # pragma: no cover - overload is enforced by static type checking
@@ -133,7 +130,6 @@ class Skills(AbstractCapability[AgentDepsT]):
         self.workspace = workspace
         own = secondary_workspace(workspace, 'Skills')
         self._sources = (_SkillSource(self.directories, self.include, self.exclude, own),)
-        self._toolset = self._make_toolset()
 
     def __repr__(self) -> str:
         """Show only the `Skills` configuration that callers control."""
@@ -166,7 +162,7 @@ class Skills(AbstractCapability[AgentDepsT]):
 
     @classmethod
     def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
-        """Serve every combined configuration's libraries through one catalog and one `load_skill` tool.
+        """Serve every combined configuration's libraries through one catalog.
 
         The field-by-field default would keep only the last configuration's directories, dropping the
         other libraries. A skill name selected by two configurations must name the same `SKILL.md`.
@@ -179,22 +175,19 @@ class Skills(AbstractCapability[AgentDepsT]):
             sources.extend(source for source in capability._sources if source not in sources)
         merged = replace_no_init(first)
         merged._sources = tuple(sources)
-        merged._toolset = merged._make_toolset()
         return merged
 
-    async def for_run(self, ctx: RunContext[AgentDepsT]) -> Skills[AgentDepsT]:
-        """A per-run copy; `before_run` fills it from the run's workspace."""
-        return replace_no_init(self)
-
-    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
+    async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
         """Read the selected skills, from each configuration's `workspace=` or else the run's workspace.
 
-        Raises `UserError` when a configuration without `workspace=` meets a run without a workspace.
+        Returns one deferred capability per skill. Raises `UserError` when a configuration without
+        `workspace=` meets a run without a workspace.
         """
         if any(source.workspace is None for source in self._sources):
             require_workspace(ctx.workspace, 'Skills')
-        self._skills = await self._load(ctx.workspace)
-        self._warn(self._skills)
+        skills = await self._load(ctx.workspace)
+        self._warn(skills)
+        return CombinedCapability([_Skill[AgentDepsT](skill) for skill in skills]) if skills else self
 
     async def _load(self, run_workspace: Workspace) -> tuple[SkillDefinition, ...]:
         by_name: dict[str, tuple[Workspace, SkillDefinition]] = {}
@@ -233,48 +226,3 @@ class Skills(AbstractCapability[AgentDepsT]):
                 UserWarning,
                 stacklevel=3,
             )
-
-    def get_instructions(self) -> Callable[[RunContext[AgentDepsT]], str | None]:
-        """The skill catalog, rendered after `before_run` has read the workspace.
-
-        The same text on every step, and on every run over the same files, so it stays in the cached prefix.
-        """
-        return lambda _ctx: self._render_catalog()
-
-    def _render_catalog(self) -> str | None:
-        if not self._skills:
-            return None
-        # Continuation lines of a multiline description are indented so they don't read as separate entries.
-        entries = '\n'.join(f'- {skill.name}: ' + skill.description.replace('\n', '\n  ') for skill in self._skills)
-        return f'{_CATALOG_PREFIX}\n{entries}'
-
-    def get_toolset(self) -> FunctionToolset[AgentDepsT]:
-        """The `load_skill` toolset, offered on runs that found skills."""
-        return self._toolset
-
-    def _make_toolset(self) -> FunctionToolset[AgentDepsT]:
-        toolset = FunctionToolset[AgentDepsT](id='skills')
-        toolset.add_function(self._load_skill, name=LOAD_SKILL_TOOL_NAME, prepare=self._offer_load_skill)
-        return toolset
-
-    async def _offer_load_skill(self, ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> ToolDefinition | None:
-        """Offer `load_skill` when this run's copy found skills; the copy is registered with the run."""
-        runs = (run for run in ctx.capabilities.values() if isinstance(run, Skills) and run._toolset is self._toolset)
-        return tool_def if any(run._skills for run in runs) else None
-
-    async def _load_skill(self, ctx: RunContext[AgentDepsT], name: str) -> str:
-        """Load a listed skill's instructions.
-
-        Args:
-            ctx: The run context.
-            name: The skill's name, as listed in the instructions.
-        """
-        # Read again rather than kept from `before_run`: under a durable engine this runs in a worker
-        # that has the agent's configuration but not the run's copy.
-        skills = await self._load(ctx.workspace)
-        normalized = unicodedata.normalize('NFKC', name)
-        skill = next((skill for skill in skills if skill.name == normalized), None)
-        if skill is None:
-            available = ', '.join(skill.name for skill in skills)
-            raise ModelRetry(f'Unknown skill {name!r}. Available skills: {available}.')
-        return f'# Skill: {skill.name}\n\n{skill.body}' if skill.body else f'# Skill: {skill.name}'

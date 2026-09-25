@@ -12,13 +12,12 @@ from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
+    LoadCapabilityReturnPart,
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
     TextPart,
     ToolCallPart,
-    ToolReturnPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.workspaces import LocalWorkspaceBackend
@@ -54,12 +53,11 @@ def _write_skill(
 
 @dataclass
 class _Run:
-    """What the model saw on its first step, and what `load_skill` returned."""
+    """What the model saw on its first step, and the instructions `load_capability` returned."""
 
     instructions: str | None = None
     tools: list[str] = field(default_factory=list[str])
     loaded: str | None = None
-    retry: str | None = None
 
 
 def _model(run: _Run, load: str | None) -> FunctionModel:
@@ -70,12 +68,10 @@ def _model(run: _Run, load: str | None) -> FunctionModel:
             run.instructions = request.instructions
             run.tools = [tool.name for tool in info.function_tools]
             if load is not None:
-                return ModelResponse(parts=[ToolCallPart('load_skill', {'name': load}, tool_call_id='load')])
+                return ModelResponse(parts=[ToolCallPart('load_capability', {'id': load}, tool_call_id='load')])
         for part in request.parts:
-            if isinstance(part, ToolReturnPart):
-                run.loaded = part.model_response_str()
-            elif isinstance(part, RetryPromptPart):
-                run.retry = part.model_response()
+            if isinstance(part, LoadCapabilityReturnPart):
+                run.loaded = part.content.get('instructions')
         return ModelResponse(parts=[TextPart('done')])
 
     return FunctionModel(respond)
@@ -90,8 +86,8 @@ async def _run(skills: Skills[Any], workspace: Path, *, load: str | None = None)
 
 def _catalog(*entries: str) -> str:
     return (
-        'The following skills hold specialized instructions. When a task matches one, call `load_skill` '
-        'with its name and follow the instructions it returns:\n' + '\n'.join(entries)
+        'The following capabilities are deferred and can be loaded using the `load_capability` tool. '
+        "A capability's tools stay hidden until it is loaded:\n" + '\n'.join(entries)
     )
 
 
@@ -106,14 +102,14 @@ class TestSkills:
         # Libraries live in the run's workspace, so a missing host path is not an error here.
         Skills(tmp_path / 'missing')
 
-    async def test_catalog_lists_name_and_description_with_a_load_tool(self, tmp_path: Path) -> None:
+    async def test_skills_are_deferred_capabilities_listed_by_name_and_description(self, tmp_path: Path) -> None:
         _write_skill(tmp_path / 'skills', 'beta', description='Beta help.')
         _write_skill(tmp_path / 'skills', 'alpha', description='Alpha help.')
 
         run = await _run(Skills('skills'), tmp_path)
 
         assert run.instructions == _catalog('- alpha: Alpha help.', '- beta: Beta help.')
-        assert run.tools == ['load_skill']
+        assert run.tools == ['load_capability']
 
     async def test_relative_directories_resolve_in_the_workspace(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -191,7 +187,7 @@ class TestSkills:
         await agent.run('go', workspace=LocalWorkspaceBackend(tmp_path))
 
         assert run.instructions == _catalog('- alpha: Alpha help.', '- beta: Beta help.')
-        assert run.tools == ['load_skill']
+        assert run.tools == ['load_capability']
         assert run.loaded == '# Skill: beta\n\nFollow these directions.'
 
     async def test_run_level_skills_combine_with_the_agents(self, tmp_path: Path) -> None:
@@ -260,20 +256,6 @@ class TestSkills:
         run = await _run(Skills('skills'), tmp_path, load='portable')
 
         assert run.loaded == '# Skill: portable\n\nFollow the portable workflow.'
-
-    async def test_loading_an_unknown_skill_asks_the_model_to_retry(self, tmp_path: Path) -> None:
-        _write_skill(tmp_path / 'skills', 'alpha')
-
-        run = await _run(Skills('skills'), tmp_path, load='missing')
-
-        assert run.retry is not None and "Unknown skill 'missing'. Available skills: alpha." in run.retry
-
-    async def test_load_uses_nfkc_normalization(self, tmp_path: Path) -> None:
-        _write_skill(tmp_path / 'skills', 'café', body='Coffee.')
-
-        run = await _run(Skills('skills'), tmp_path, load='café')
-
-        assert run.loaded == '# Skill: café\n\nCoffee.'
 
     @pytest.mark.parametrize(
         ('suffix', 'spec_text'),

@@ -1,4 +1,4 @@
-"""Filesystem capability that provides sandboxed file system access."""
+"""Filesystem capability that provides bounded file system access to the run's workspace."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FilteredToolset
 
-from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored
+from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored, warn_argument_renamed
 from pydantic_ai_harness._workspace import require_workspace
 from pydantic_ai_harness.filesystem._toolset import (
     DEFAULT_TOOL_NAMES,
@@ -22,14 +22,14 @@ from pydantic_ai_harness.filesystem._toolset import (
     root_spelling,
 )
 
-_DEFAULT_PROTECTED: list[str] = [
+_DEFAULT_READ_ONLY: tuple[str, ...] = (
     '.git/*',
     '.env',
     '.env.*',
     '*.pem',
     '*.key',
     '**/secrets*',
-]
+)
 
 
 @dataclass
@@ -43,12 +43,11 @@ class FileSystem(AbstractCapability[AgentDepsT]):
 
     `root_dir` bounds the model's file tools: before each operation, the target
     must be inside it both as written and once the workspace has resolved its
-    symlinks, and `protected_patterns` guard what may be written. This is a
+    symlinks, and `read_only_patterns` guard what may be written. This is a
     guardrail checked before each operation, not isolation: a symlink swapped in
     between the check and the use is not caught, and `Shell` commands are not
-    bounded at all. The workspace is the isolation boundary. Listings show
-    entries by name: a symlink whose target is outside `root_dir` is listed but
-    refused when read or written.
+    bounded at all. The workspace is the isolation boundary. Listings leave out a
+    symlink whose target is outside `root_dir`, and walks do not descend into one.
     """
 
     root_dir: str | Path | None = None
@@ -73,13 +72,13 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     """If non-empty, only paths matching at least one glob pattern are accessible."""
 
     denied_patterns: Sequence[str] = field(default_factory=list[str])
-    """Paths matching any of these glob patterns are rejected."""
+    """Paths matching any of these glob patterns are rejected, even if `allowed_patterns` matches them."""
 
-    protected_patterns: Sequence[str] = field(default_factory=lambda: list(_DEFAULT_PROTECTED))
+    read_only_patterns: Sequence[str] = _DEFAULT_READ_ONLY
     """Paths matching these patterns are read-only (writes are rejected).
 
-    Defaults to protecting `.git/`, `.env`, key files, and secrets.
-    Set to an empty list to disable protection.
+    Defaults to `.git/`, `.env`, key files, and secrets.
+    Set to an empty list to make every path writable.
     """
 
     max_read_lines: int = 2000
@@ -128,12 +127,20 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     `read_only` further narrows the selection to `READ_ONLY_TOOL_NAMES`.
     """
 
+    protected_patterns: Sequence[str] | None = field(default=None, kw_only=True)
+    """Deprecated: renamed to `read_only_patterns`."""
+
     _run_toolset: FileSystemToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
     """This run's toolset, which resolves the boundary on its first operation; `None` outside a run."""
 
     def __post_init__(self) -> None:
         if self.cwd is not None:
             warn_argument_ignored('FileSystem', 'cwd', WORKING_DIR_IS_THE_WORKSPACES)
+        if self.protected_patterns is not None:
+            if self.read_only_patterns is not _DEFAULT_READ_ONLY:
+                raise TypeError('Pass `read_only_patterns` only: `protected_patterns` is its deprecated name.')
+            warn_argument_renamed('FileSystem', 'protected_patterns', 'read_only_patterns', stacklevel=4)
+            self.read_only_patterns, self.protected_patterns = self.protected_patterns, None
         root_spelling(None if self.root_dir is None else Path(self.root_dir))
         # Runtime validation: dataclass field annotations are advisory, not enforced.
         # A config-driven caller could pass a string that would otherwise propagate.
@@ -159,13 +166,12 @@ class FileSystem(AbstractCapability[AgentDepsT]):
         """Fail without a workspace, without touching it: the boundary waits for the first file operation."""
         require_workspace(ctx.workspace, 'FileSystem')
 
-    def file_read_tool(self, ctx: RunContext[Any], path: str, *, max_chars: int) -> str | None:
+    def _file_read_tool(self, ctx: RunContext[Any], path: str, *, max_chars: int) -> str | None:
         """`read_file`, when it reads the file at `path` and returns at most `max_chars` per call.
 
-        Implements [`FileReader`][pydantic_ai_harness.filesystem.FileReader] from configuration
-        alone. The answer is yes when `read_file` is registered, `max_read_chars` is at most
-        `max_chars`, the boundary is the working directory (no `root_dir`), and the patterns allow
-        `path`. With an explicit `root_dir` it is `None`: placing `path` in it needs the workspace.
+        Implements `_FileReader` from configuration alone. The answer is yes when `read_file` is
+        registered, `max_read_chars` is at most `max_chars`, the boundary is the working directory
+        (no `root_dir`), and the patterns allow `path`. With an explicit `root_dir` it is `None`: placing `path` in it needs the workspace.
         """
         del ctx
         relative = posixpath.normpath(path)
@@ -180,7 +186,7 @@ class FileSystem(AbstractCapability[AgentDepsT]):
         ):
             return None
         toolset = self._run_toolset or self._make_toolset()
-        return 'read_file' if toolset.permits_read(relative) else None
+        return 'read_file' if toolset._is_accessible(relative) else None  # pyright: ignore[reportPrivateUsage]
 
     def get_toolset(self) -> FileSystemToolset[AgentDepsT] | FilteredToolset[AgentDepsT]:
         """The filesystem toolset: this run's, once `for_run` has made one."""
@@ -194,7 +200,7 @@ class FileSystem(AbstractCapability[AgentDepsT]):
             root_dir=None if self.root_dir is None else Path(self.root_dir),
             allowed_patterns=self.allowed_patterns,
             denied_patterns=self.denied_patterns,
-            protected_patterns=self.protected_patterns,
+            read_only_patterns=self.read_only_patterns,
             max_read_lines=self.max_read_lines,
             max_read_chars=self.max_read_chars,
             max_list_results=self.max_list_results,

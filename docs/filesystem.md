@@ -8,7 +8,7 @@ description: "Give a Pydantic AI agent tools to read, write, edit, list, and sea
 `FileSystem` gives an agent a fixed set of file tools -- read, write, edit, list,
 search, find, create, and inspect -- all scoped to a single `root_dir` in the
 run's workspace. Every path is resolved, symlinks included, and
-containment-checked before any I/O, and access is filtered through allow / deny / protected glob patterns.
+containment-checked before any I/O, and access is filtered through allow, deny, and read-only glob patterns.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/filesystem/)
 
@@ -20,8 +20,8 @@ Letting an agent touch the filesystem directly is risky: path traversal
 (`../../etc/passwd`), clobbering `.git`, or leaking `.env` secrets. Hand-rolling the guards around every tool call is
 repetitive and easy to get subtly wrong.
 
-`FileSystem` centralizes those guards. It exposes one bounded, sandboxed
-toolset so you configure the boundary once and reuse it across agents.
+`FileSystem` centralizes those guards. It exposes one bounded toolset so you
+configure the boundary once and reuse it across agents.
 
 ## Usage
 
@@ -97,10 +97,8 @@ async def main() -> None:
 `DEFAULT_TOOL_NAMES`, is the eight tools that need only the workspace's
 filesystem. `list_files` and `grep` run the `rg` executable inside the
 workspace, which must be on its `PATH`, so they are opt-in by name. The
-`coder` extra installs `rg` for a local workspace; since a local workspace
-inherits no environment, give it one with `PATH`, as in
-`LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']})`.
-A missing `rg` comes back to the model as a retry that says so.
+`coder` extra installs `rg` for a local workspace, whose commands get the
+host's `PATH`. A missing `rg` comes back to the model as a retry that says so.
 
 ```python
 from pydantic_ai_harness import FileSystem
@@ -149,26 +147,6 @@ These paths can be passed directly to read/write tools. Files outside the
 working directory but inside `root_dir` use `..` components. Containment,
 access patterns, and event paths retain their `root_dir` basis, as does
 `search_files`'s `include_glob` filter.
-
-### Reading files other capabilities keep
-
-Some capabilities keep files in the workspace for the model to read later, such as
-`ToolOutputLimits` spilling an oversized tool result. Rather than add a reader tool of their own,
-they ask whether an active capability implements `FileReader` and can read the file, and if so
-point the model at that tool. `FileSystem` answers with `read_file` when `read_file` is
-registered, `max_read_chars` caps a read at or below what the asker needs, `root_dir` is unset,
-and the patterns allow the path. It answers from configuration alone, without workspace I/O.
-
-A capability of your own can take either side:
-
-```python {test="skip"}
-from pydantic_ai_harness.filesystem import FileReader, find_file_reader
-
-# Asking: the file tool that reads this path (relative to the working directory), if any.
-tool = find_file_reader(ctx, '.my-capability/notes.md', max_chars=50_000)
-
-# Answering: implement `file_read_tool(ctx, path, *, max_chars) -> str | None` on your capability.
-```
 
 ## Events
 
@@ -288,22 +266,22 @@ applies the same rule to absolute symlink targets.
   resolving outside `root_dir` via `..` or an absolute path is rejected. The
   target is checked both as written and once the workspace has resolved its
   symlinks, so a symlink inside the root that points outside it is rejected,
-  and `search_files` skips such files. Listings (`list_directory`,
-  `find_files`) show entries by name: a symlink whose target is outside
-  `root_dir` is listed but refused when read or written. Patterns match the
-  root-relative path, in direct access and in directory walks
+  and the walkers skip such links: `list_directory` and `find_files` leave
+  them out, and no walker descends into a linked directory outside
+  `root_dir`. Patterns match the root-relative path, in direct access and in
+  directory walks
   (`list_directory`, `search_files`, `find_files`, `list_files`, `grep`);
-  `protected_patterns` and `denied_patterns` also match a symlink's target, so
-  a link to `.env` is protected like `.env` itself. `root_dir='/'` turns the
+  `read_only_patterns` and `denied_patterns` also match a symlink's target, so
+  a link to `.env` is read-only like `.env` itself. `root_dir='/'` turns the
   containment checks off, while any access patterns still match a symlink's
   target. This is a guardrail checked before each operation, not isolation: a
   symlink swapped in between the check and the use is not caught, and `Shell`
   commands are not bounded by `root_dir` at all. The workspace is the
-  isolation boundary: use a sandboxed workspace when the agent or the tree is
+  isolation boundary: use a sandbox workspace when the agent or the tree is
   untrusted.
-- **Bounded walks.** The workspace follows symlinked directories and cannot say
-  an entry is a symlink, so a link back to an ancestor is walked again under a
-  longer path. `search_files` and `find_files` stop after listing 10,000
+- **Bounded walks.** The walkers follow symlinked directories inside
+  `root_dir`, so a link back to an ancestor is walked again under a longer
+  path. `search_files` and `find_files` stop after listing 10,000
   directories or collecting 100,000 entries and end their result with a
   `[... walk cut short ...]` line.
 - **Binary detection.** `read_file` returns a placeholder instead of dumping
@@ -338,11 +316,12 @@ need `**`.
 | Field | Effect |
 |---|---|
 | `allowed_patterns` | If non-empty, only matching paths are accessible (allowlist). |
-| `denied_patterns` | Matching paths are always rejected (denylist). |
-| `protected_patterns` | Matching paths are read-only -- reads succeed, writes are rejected. |
+| `denied_patterns` | Matching paths are rejected (denylist), even when `allowed_patterns` matches them. |
+| `read_only_patterns` | Matching paths are read-only: reads succeed, writes are rejected. |
 
-`protected_patterns` defaults to `.git/*`, `.env`, `.env.*`, `*.pem`, `*.key`,
-and `**/secrets*`. Pass an empty list to disable protection.
+`read_only_patterns` defaults to `.git/*`, `.env`, `.env.*`, `*.pem`, `*.key`,
+and `**/secrets*`. Pass an empty list to make every path writable.
+`protected_patterns` is its deprecated name and still works, with a warning.
 
 ```python
 from pydantic_ai import Agent
@@ -379,7 +358,7 @@ The three rules apply at two different granularities:
 So with `allowed_patterns=['*.py']`, `list_directory('.')` succeeds and shows
 only the `.py` entries; `read_file('notes.md')` is rejected.
 
-Matching `protected_patterns` alone does not hide an entry. Protected paths
+Matching `read_only_patterns` alone does not hide an entry. Read-only paths
 that pass the allowed, denied, and dotfile filters remain visible to the
 walkers and directly readable via `read_file`/`file_info`; write operations
 reject them.
@@ -398,7 +377,7 @@ FileSystem(
     root_dir=None,                 # str | Path -- containment boundary (None = the working directory; '/' = no checks)
     allowed_patterns=[],           # allowlist globs (empty = allow all)
     denied_patterns=[],            # denylist globs
-    protected_patterns=[...],      # read-only globs (defaults to secrets/.git)
+    read_only_patterns=[...],      # read-only globs (defaults to secrets/.git)
     max_read_lines=2000,           # cap for a single read_file
     max_read_chars=None,           # optional cap on a whole read_file result, ending on a complete line
     max_list_results=1000,         # cap for list_directory

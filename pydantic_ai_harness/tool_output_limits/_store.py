@@ -76,12 +76,8 @@ class WorkspaceStore:
     directory.
 
     Files are not pruned: they go away with the sandbox, or when the directory is deleted for a
-    local workspace. Set `directory` to place them elsewhere, or `workspace` to keep them in a
-    workspace other than the run's.
+    local workspace. Set `workspace` to keep them in a workspace other than the run's.
     """
-
-    directory: str | None = None
-    """Workspace directory for spilled files, absolute or relative to the working directory."""
 
     workspace: WorkspaceBackend | None = None
     """A workspace to keep spills in instead of the run's, such as `LocalWorkspaceBackend('/var/spills')`.
@@ -101,23 +97,18 @@ class WorkspaceStore:
         `workspace` is the run's; the store's own `workspace`, when set, is used instead.
         """
         workspace = self._workspace or workspace
-        path = posixpath.join(await self._directory(workspace), *_segments(key))
+        path = posixpath.join(await metadata_dir(workspace, 'tool-output'), *_segments(key))
         await workspace.write_bytes(path, data)
         return path
 
     async def read(self, workspace: Workspace, handle: str) -> bytes:
         """Read a payload back; a handle outside the store directory raises `PermissionError`."""
         workspace = self._workspace or workspace
-        directory = await self._directory(workspace)
+        directory = await metadata_dir(workspace, 'tool-output')
         path = posixpath.normpath(posixpath.join(directory, handle))
         if not path.startswith(directory.rstrip('/') + '/'):
             raise PermissionError(f'Handle {handle!r} is outside the store directory.')
         return await workspace.read_bytes(path)
-
-    async def _directory(self, workspace: Workspace) -> str:
-        if self.directory is not None:
-            return await workspace.resolve(self.directory)
-        return await metadata_dir(workspace, 'tool-output')
 
 
 @dataclass
