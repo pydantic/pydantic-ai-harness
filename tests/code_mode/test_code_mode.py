@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import functools
+import re
 import threading
 import warnings as _warnings
 from collections.abc import AsyncIterator
@@ -624,6 +625,23 @@ class TestCodeMode:
         # type checker catches undefined names before execution.
         with pytest.raises(ModelRetry, match=r'x'):
             await wrapper.call_tool('run_code', {'code': 'print(x)', 'restart': True}, ctx, run_code)
+
+    async def test_advertised_modules_match_the_docs_and_import(self) -> None:
+        """The model is told exactly the modules the docs list, and each of them imports."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        description = tools['run_code'].tool_def.description or ''
+        advertised = re.search(r'Importable standard library modules\*\*: (.*?)\. ', description)
+        docs = (Path(__file__).parents[2] / 'docs' / 'code-mode.md').read_text()
+        documented = re.search(r'Allowed stdlib modules: (.*?) \(', docs)
+        assert advertised is not None and documented is not None
+        modules = re.findall(r'`(\w+)`', advertised.group(1))
+        assert modules == re.findall(r'`(\w+)`', documented.group(1))
+        code = '\n'.join(f'import {module}' for module in modules) + '\n"ok"'
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == 'ok'
 
     async def test_run_code_returns_last_expression_value(self) -> None:
         """When the last statement is an expression, its value is returned in `result`."""
