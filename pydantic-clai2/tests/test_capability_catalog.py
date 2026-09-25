@@ -25,6 +25,9 @@ def test_catalog_covers_public_harness_capabilities() -> None:
     bases = {'AbstractCapability', 'CombinedCapability', 'NativeOrLocalTool', 'BaseDurabilityCapability'}
     expected: set[str] = set()
     for path in root.rglob('*.py'):
+        # Modules such as `_workspace.py` at the top hold helpers shared by capabilities, not capabilities.
+        if path.parent == root and path.name.startswith('_'):
+            continue
         for node in ast.walk(ast.parse(path.read_text())):
             if (
                 isinstance(node, ast.ClassDef)

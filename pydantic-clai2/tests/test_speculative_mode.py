@@ -357,7 +357,6 @@ class TestWorkspaceMount:
             SandboxPlugin(tmp_path),
             file_system,
             *sandbox,
-            LocalWorkspace(tmp_path),
         ]
         await Agent(streamed(respond), capabilities=capabilities).run('go')
         assert returned == ['FileNotFoundError FileNotFoundError']
@@ -374,7 +373,7 @@ class Sandbox(LocalWorkspaceBackend):
 
 
 class SandboxPlugin(AbstractCapability[object]):
-    """A plugin that supplies the run's workspace ahead of CLAI's `LocalWorkspace`."""
+    """A plugin that supplies the run's workspace in place of CLAI's `LocalWorkspace`."""
 
     def __init__(self, root: Path) -> None:
         self.root = root

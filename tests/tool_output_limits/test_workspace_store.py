@@ -233,6 +233,29 @@ class TestWorkspaceStore:
         with pytest.raises(PermissionError, match='outside the store directory'):
             await WorkspaceStore().read(workspace, handle)
 
+    async def test_symlink_in_the_store_directory_is_refused(self, tmp_path: Path):
+        (tmp_path / 'secret.txt').write_text('secret')
+        workspace = Workspace(LocalWorkspaceBackend(tmp_path))
+        store = WorkspaceStore()
+        await store.write(workspace, 'run/call.0', b'payload')
+        (tmp_path / '.pydantic-ai-harness' / 'tool-output' / 'leak').symlink_to(tmp_path / 'secret.txt')
+        with pytest.raises(PermissionError, match='outside the store directory'):
+            await store.read(workspace, 'leak')
+
+    async def test_symlinked_store_directory_is_refused(self, tmp_path: Path):
+        outside = tmp_path / 'outside'
+        (outside / 'run').mkdir(parents=True)
+        (outside / 'run' / 'call.0').write_bytes(b'secret')
+        (tmp_path / 'work' / '.pydantic-ai-harness').mkdir(parents=True)
+        (tmp_path / 'work' / '.pydantic-ai-harness' / 'tool-output').symlink_to(outside)
+        workspace = Workspace(LocalWorkspaceBackend(tmp_path / 'work'))
+        store = WorkspaceStore()
+        with pytest.raises(PermissionError, match='outside the store directory'):
+            await store.read(workspace, 'run/call.0')
+        with pytest.raises(PermissionError, match='outside the store directory'):
+            await store.write(workspace, 'run/new.0', b'payload')
+        assert not (outside / 'run' / 'new.0').exists()
+
     async def test_missing_handle_raises_file_not_found(self, tmp_path: Path):
         workspace = Workspace(LocalWorkspaceBackend(tmp_path))
         with pytest.raises(FileNotFoundError):
