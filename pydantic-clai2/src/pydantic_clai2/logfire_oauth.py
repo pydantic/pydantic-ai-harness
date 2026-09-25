@@ -23,7 +23,7 @@ import anyio
 import httpx
 from anyio import to_thread
 from keyring.errors import KeyringError
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 from pydantic_ai.exceptions import UserError
 
 from .credential_store import delete_credentials, load_codex_credentials, save_codex_credentials
@@ -75,8 +75,8 @@ def _load_all() -> dict[str, Tokens]:
     try:
         raw = load_codex_credentials(account=ACCOUNT)
         return _STORE.validate_json(raw) if raw else {}
-    except (UserError, ValidationError, UnicodeDecodeError, KeyringError):
-        return {}  # An unreadable store means signing in again, not a failed connection.
+    except (UserError, ValidationError, UnicodeDecodeError, KeyringError, OSError):
+        return {}  # An unreadable (or concurrently deleted) store means signing in again, not a failed connection.
 
 
 def load(resource: str) -> Tokens | None:
@@ -101,6 +101,7 @@ def forget() -> bool:
 
 
 class _Resource(BaseModel):
+    resource: str
     authorization_servers: list[str] = Field(min_length=1)
     scopes_supported: list[str] = []
 
@@ -126,8 +127,22 @@ class _Device(BaseModel):
 
 class _Granted(BaseModel):
     access_token: str = Field(min_length=1)
+    token_type: str
     refresh_token: str | None = None
     expires_in: float = 3600
+    scope: str | None = None
+    """Absent when the server granted exactly the scopes asked for (RFC 6749 section 5.1)."""
+
+    @field_validator('token_type')
+    @classmethod
+    def _bearer(cls, token_type: str) -> str:
+        # MCP sends tokens as `Authorization: Bearer`; another scheme would be sent wrongly.
+        if token_type.lower() != 'bearer':
+            raise ValueError(f'CLAI needs a Bearer token, not {token_type!r}')
+        return token_type
+
+    def covers(self, scope: str) -> bool:
+        return self.scope is None or set(scope.split()) <= set(self.scope.split())
 
 
 class _Problem(BaseModel):
@@ -152,9 +167,13 @@ def _problem(response: httpx.Response) -> _Problem:
 async def _discover(http: httpx.AsyncClient, resource: str) -> tuple[_Server, list[str]]:
     parts = urlsplit(resource)
     origin = f'{parts.scheme}://{parts.netloc}'
-    response = await http.get(f'{origin}/.well-known/oauth-protected-resource{parts.path.rstrip("/")}')
+    path = '' if parts.path == '/' else parts.path
+    response = await http.get(f'{origin}/.well-known/oauth-protected-resource{path}')
     if response.is_success:
         described = _Resource.model_validate_json(response.content)
+        if described.resource != resource:
+            # RFC 9728 section 3.3: metadata for another resource must not choose where the user signs in.
+            raise SignInError(f'{resource} described itself as {described.resource}; not signing in.')
         issuer, scopes = described.authorization_servers[0].rstrip('/'), described.scopes_supported
     else:
         issuer, scopes = origin, []
@@ -208,7 +227,8 @@ async def sign_in(
         reusable = previous is not None and previous.token_endpoint == server.token_endpoint and not writable
         client_id = previous.client_id if previous is not None and reusable else await _register(http, server, scope)
         verifier, challenge = _pkce()
-        form = {'scope': scope, 'code_challenge': challenge, 'code_challenge_method': 'S256'}
+        # RFC 8707: the token is issued for this MCP URL only, so no other server can reuse it.
+        form = {'scope': scope, 'resource': resource, 'code_challenge': challenge, 'code_challenge_method': 'S256'}
         response = await http.post(server.device_authorization_endpoint, data={**form, 'client_id': client_id})
         if reusable and response.is_error and _problem(response).error == 'invalid_client':
             # The server forgot the client CLAI registered earlier; register again once.
@@ -223,7 +243,11 @@ async def sign_in(
         announce('Approve only the code shown here. You can open the link on another device.')
         if not await to_thread.run_sync(_open, link):
             announce('No browser opened; open the link above yourself.')
-        granted = await _poll(http, server=server, client_id=client_id, device=device, verifier=verifier, sleep=sleep)
+        granted = await _poll(
+            http, server=server, resource=resource, client_id=client_id, device=device, verifier=verifier, sleep=sleep
+        )
+        if writable and not granted.covers(scope):
+            writable = False  # Logfire granted less than asked; write tools will ask again.
     except (httpx.HTTPError, ValidationError) as exc:
         raise SignInError(f'Logfire sign-in failed: {type(exc).__name__}. Run /logfire_mcp login to retry.') from exc
     tokens = Tokens(
@@ -240,22 +264,33 @@ async def sign_in(
 
 
 async def _poll(
-    http: httpx.AsyncClient, *, server: _Server, client_id: str, device: _Device, verifier: str, sleep: Sleep
+    http: httpx.AsyncClient,
+    *,
+    server: _Server,
+    resource: str,
+    client_id: str,
+    device: _Device,
+    verifier: str,
+    sleep: Sleep,
 ) -> _Granted:
     interval = device.interval
     deadline = time.monotonic() + device.expires_in
     while time.monotonic() < deadline:
         await sleep(interval)
         # Logfire requires PKCE on the device flow too, so the verifier goes with the device code.
-        response = await http.post(
-            server.token_endpoint,
-            data={
-                'grant_type': DEVICE_GRANT,
-                'device_code': device.device_code,
-                'client_id': client_id,
-                'code_verifier': verifier,
-            },
-        )
+        try:
+            response = await http.post(
+                server.token_endpoint,
+                data={
+                    'grant_type': DEVICE_GRANT,
+                    'device_code': device.device_code,
+                    'client_id': client_id,
+                    'code_verifier': verifier,
+                    'resource': resource,
+                },
+            )
+        except httpx.TransportError:
+            continue  # A slow or dropped poll is retried; the approval on the Logfire page still stands.
         if response.is_success:
             return _Granted.model_validate_json(response.content)
         problem = _problem(response)
@@ -273,7 +308,12 @@ async def _refresh(http: httpx.AsyncClient, *, resource: str, tokens: Tokens) ->
     try:
         response = await http.post(
             tokens.token_endpoint,
-            data={'grant_type': 'refresh_token', 'refresh_token': tokens.refresh_token, 'client_id': tokens.client_id},
+            data={
+                'grant_type': 'refresh_token',
+                'refresh_token': tokens.refresh_token,
+                'client_id': tokens.client_id,
+                'resource': resource,
+            },
         )
         if response.is_error:
             return None

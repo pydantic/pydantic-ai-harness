@@ -380,6 +380,12 @@ any device.
   so self-hosted Logfire works too. CLAI registers itself as a client
   ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591)) and uses PKCE. It
   registers again if the server has forgotten the earlier registration.
+- **Binding:** every request names the Destination URL as the token's resource
+  ([RFC 8707](https://datatracker.ietf.org/doc/html/rfc8707)), and the
+  discovered metadata must describe that same URL. A token is only issued for
+  the MCP server you configured, so another endpoint that names Logfire as its
+  authorization server cannot receive one. Logfire rejects unknown resources
+  with `invalid_target`.
 - **Scopes:** read-only tools ask only for `project:read`. With Tools set to read
   and write, CLAI asks for every scope the MCP server lists (on Logfire's hosted
   servers that includes `organization:create_project`). Switching Tools to read

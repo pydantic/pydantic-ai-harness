@@ -28,7 +28,10 @@ class Logfire:
 
     def __init__(self) -> None:
         offered: list[JsonValue] = [*OFFERED]
-        self.resource: Reply = (200, {'authorization_servers': [ORIGIN], 'scopes_supported': offered})
+        self.resource: Reply = (
+            200,
+            {'resource': RESOURCE, 'authorization_servers': [ORIGIN], 'scopes_supported': offered},
+        )
         self.metadata: JsonValue = {
             'device_authorization_endpoint': f'{ORIGIN}/api/oauth/device/code',
             'token_endpoint': f'{ORIGIN}/api/oauth/token',
@@ -46,16 +49,18 @@ class Logfire:
                 'interval': 0,
             },
         )
-        self.polls: list[Reply] = [(200, {'access_token': 'access-1', 'refresh_token': 'refresh-1'})]
+        self.polls: list[Reply] = [granted('access-1', refresh='refresh-1')]
         self.refreshes: list[Reply] = []
         self.valid = {'access-1'}
         self.registered: list[JsonValue] = []
         self.forms: list[dict[str, str]] = []
         self.bearers: list[str] = []
+        self.discovered: list[str] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == '/.well-known/oauth-protected-resource/mcp':
+        if path.startswith('/.well-known/oauth-protected-resource'):
+            self.discovered.append(path)
             return httpx.Response(self.resource[0], json=self.resource[1])
         if path == '/.well-known/oauth-authorization-server':
             return httpx.Response(200, json=self.metadata)
@@ -75,6 +80,13 @@ class Logfire:
 
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(self.handle))
+
+
+def granted(access: str, *, refresh: str | None = None, **extra: JsonValue) -> Reply:
+    body: dict[str, JsonValue] = {'access_token': access, 'token_type': 'Bearer', **extra}
+    if refresh is not None:
+        body['refresh_token'] = refresh
+    return 200, body
 
 
 def pending(error: str = 'authorization_pending') -> Reply:
@@ -145,6 +157,8 @@ class TestSignIn:
         }
         device, *polls = logfire.forms
         assert (device['scope'], device['code_challenge_method']) == ('project:read', 'S256')
+        assert {form['resource'] for form in logfire.forms} == {RESOURCE}
+        assert logfire.discovered == ['/.well-known/oauth-protected-resource/mcp']
         assert {poll['code_verifier'] for poll in polls} != {''}
         tokens = load(RESOURCE)
         assert tokens is not None
@@ -195,6 +209,47 @@ class TestSignIn:
         assert lines[0] == f'Sign in to Logfire (new users can sign up there): open {ORIGIN}/auth/oauth-device'
         assert 'No browser opened; open the link above yourself.' in lines
 
+    async def test_fewer_scopes_than_asked_are_not_treated_as_write_access(self) -> None:
+        logfire = Logfire()
+        logfire.polls = [granted('access-1', scope='project:read')]
+        await run_sign_in(logfire, read_only=False)
+        tokens = load(RESOURCE)
+        assert tokens is not None and not tokens.writable
+        logfire.polls = [granted('access-1', scope=' '.join(OFFERED))]
+        await run_sign_in(logfire, read_only=False)
+        tokens = load(RESOURCE)
+        assert tokens is not None and tokens.writable
+
+    async def test_a_dropped_poll_keeps_waiting_for_approval(self) -> None:
+        logfire = Logfire()
+        handle = logfire.handle
+        dropped: list[bool] = []
+
+        def drop_first_poll(request: httpx.Request) -> httpx.Response:
+            if b'grant_type=urn' in request.content and not dropped:
+                dropped.append(True)
+                raise httpx.ReadTimeout('slow', request=request)
+            return handle(request)
+
+        logfire.handle = drop_first_poll
+        assert (await run_sign_in(logfire))[-1] == 'Signed in to Logfire.'
+        assert dropped == [True]
+
+    @pytest.mark.parametrize(
+        ('resource', 'metadata_path'),
+        [
+            (f'{ORIGIN}/tenant/mcp/', '/.well-known/oauth-protected-resource/tenant/mcp/'),
+            (f'{ORIGIN}/', '/.well-known/oauth-protected-resource'),
+        ],
+    )
+    async def test_metadata_is_found_at_the_exact_resource_path(self, resource: str, metadata_path: str) -> None:
+        logfire = Logfire()
+        logfire.resource = (200, {'resource': resource, 'authorization_servers': [ORIGIN]})
+        async with logfire.client() as http:
+            await sign_in(resource=resource, read_only=True, announce=lambda line: None, http=http, sleep=anyio.sleep)
+        assert logfire.discovered == [metadata_path]
+        assert load(resource) is not None
+
     async def test_servers_without_resource_metadata_are_their_own_issuer(self) -> None:
         logfire = Logfire()
         logfire.resource = (404, None)
@@ -214,6 +269,8 @@ class TestSignIn:
             ('odd-error', 'Logfire refused browser sign-in: HTTP 400'),
             ('unreachable', 'Logfire sign-in failed: ConnectError. Run /logfire_mcp login to retry.'),
             ('malformed', 'Logfire sign-in failed: ValidationError.'),
+            ('not-bearer', 'Logfire sign-in failed: ValidationError.'),
+            ('other-resource', f'{RESOURCE} described itself as https://logfire-us.pydantic.dev/mcp; not signing in.'),
         ],
     )
     async def test_failures_explain_how_to_retry_and_save_nothing(self, change: str, message: str) -> None:
@@ -236,6 +293,13 @@ class TestSignIn:
             logfire.device = (400, ['not', 'an', 'object'])
         elif change == 'malformed':
             logfire.polls = [(200, {'access_token': ''})]
+        elif change == 'not-bearer':
+            logfire.polls = [granted('access-1', token_type='DPoP')]
+        elif change == 'other-resource':
+            logfire.resource = (
+                200,
+                {'resource': 'https://logfire-us.pydantic.dev/mcp', 'authorization_servers': [ORIGIN]},
+            )
         if change == 'unreachable':
 
             def refuse(request: httpx.Request) -> httpx.Response:
@@ -289,7 +353,7 @@ class TestDeviceAuth:
         remember(stored(expires_in=-10))
         logfire = Logfire()
         logfire.valid = {'access-2', 'access-3'}
-        logfire.refreshes = [(200, {'access_token': 'access-2'}), (200, {'access_token': 'access-3'})]
+        logfire.refreshes = [granted('access-2'), granted('access-3')]
         assert await self.mcp(logfire) == 200
         tokens = load(RESOURCE)
         assert tokens is not None
@@ -298,13 +362,14 @@ class TestDeviceAuth:
         assert await self.mcp(logfire) == 200
         assert logfire.bearers == ['access-2', 'access-2', 'access-3']
         assert [form['refresh_token'] for form in logfire.forms] == ['refresh-1', 'refresh-1']
+        assert {form['resource'] for form in logfire.forms} == {RESOURCE}
 
     @pytest.mark.parametrize('refresh', [None, 'broken', 'unreachable', 'rejected'])
     async def test_a_failed_refresh_signs_in_again(self, refresh: str | None, opened: list[str]) -> None:
         remember(stored(expires_in=-10, refresh=None if refresh is None else 'refresh-1'))
         logfire = Logfire()
         if refresh == 'broken':
-            logfire.refreshes = [(200, {'no': 'token'})]
+            logfire.refreshes = [granted('access-2', token_type='MAC')]
         elif refresh == 'rejected':
             logfire.refreshes = [pending('invalid_grant')]
         elif refresh == 'unreachable':
