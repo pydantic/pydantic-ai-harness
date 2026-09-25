@@ -128,7 +128,7 @@ def _changed(base: str, head: str) -> list[str]:
     # the old head unreachable; neither gives a base to compare, so every provider runs.
     if set(base) <= {'0'} or _git('cat-file', '-e', f'{base}^{{commit}}').returncode != 0:
         return present_providers()
-    diff = _git('diff', '--name-only', base, head)
+    diff = _git('diff', '--name-only', '--no-renames', base, head)
     if diff.returncode != 0:
         raise SystemExit(diff.stderr)
     base_lock = _git('show', f'{base}:uv.lock').stdout
