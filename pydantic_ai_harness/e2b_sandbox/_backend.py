@@ -291,7 +291,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
 
         The call is shielded: E2B may create the sandbox before its response arrives, and a
         cancellation then would lose the only handle to a billed sandbox. `_CREATE_TIMEOUT`
-        still bounds it, so cancellation and command deadlines wait at most that long.
+        still bounds it, so cancellation waits at most that long.
         """
         with anyio.move_on_after(_CREATE_TIMEOUT, shield=True):
             async with self._sdk_errors('Could not start E2B sandbox'):
@@ -352,12 +352,12 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         cwd = absolute_path('cwd', cwd)
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
-        sandbox: e2b.AsyncSandbox | None = None
+        # Acquiring the sandbox has its own bound; the timeout is the command's alone.
+        sandbox = await self.get_client()
         handle: e2b.AsyncCommandHandle | None = None
         result: e2b.CommandResult | None = None
         try:
             with anyio.move_on_after(timeout):
-                sandbox = await self.get_client()
                 handle = await sandbox.commands.run(
                     line,
                     background=True,
@@ -378,7 +378,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         except e2b.CommandExitException as error:
             return CommandResult(exit_code=error.exit_code, stdout=error.stdout, stderr=error.stderr)
         except BaseException as error:
-            if handle is not None and sandbox is not None:
+            if handle is not None:
                 # Cleanup must not replace a timeout, cancellation, or SDK failure.
                 with anyio.CancelScope(shield=True):
                     with anyio.move_on_after(_INTERNAL_EXEC_TIMEOUT):

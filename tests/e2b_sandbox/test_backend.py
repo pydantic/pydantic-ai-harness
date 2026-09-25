@@ -552,23 +552,19 @@ def test_missing_e2b_extra_has_an_install_hint() -> None:
     assert 'Install `pydantic-ai-harness[e2b]`' in result.stderr
 
 
-async def test_command_timeout_counts_initial_provisioning(fake_e2b: FakeE2B) -> None:
-    # Creation is not interrupted (that could lose the sandbox), but its time counts against the
-    # command's deadline, so a deadline spent on creation raises once the sandbox is recorded.
+async def test_command_timeout_starts_once_the_sandbox_is_acquired(fake_e2b: FakeE2B) -> None:
     fake_e2b.create_response_held = held = anyio.Event()
     backend = E2BSandboxBackend()
 
-    async def release_after_the_deadline() -> None:
-        await anyio.sleep(0.05)
+    async def release() -> None:
+        # Creating the sandbox outlasts the timeout; the command itself fits in it comfortably.
+        await anyio.sleep(1.1)
         held.set()
 
     async with anyio.create_task_group() as tg:
-        tg.start_soon(release_after_the_deadline)
-        with pytest.raises(WorkspaceTimeoutError) as exc:
-            await backend.run(['echo', 'ready'], timeout=0.01)
-        assert exc.value.timeout == 0.01
-    assert backend.ref == WorkspaceRef(provider='e2b', id='sbx-1')
-    assert not fake_e2b.sandboxes[0].commands.calls
+        tg.start_soon(release)
+        result = await backend.run(['echo', 'ready'], timeout=1)
+        assert (result.exit_code, result.stdout) == (0, 'echo ready\n')
 
 
 async def test_filesystem_first_use_preserves_auth_error(fake_e2b: FakeE2B) -> None:
