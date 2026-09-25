@@ -42,8 +42,8 @@ def test_foreign_reference_is_rejected() -> None:
     ('settings', 'message'),
     [
         ({'working_dir': 'repo'}, "working_dir must be an absolute POSIX path or None, got 'repo'"),
-        ({'sandbox_timeout': 0}, 'sandbox_timeout must be an integer of at least 1 or None, got 0'),
-        ({'sandbox_timeout': 1.5}, 'sandbox_timeout must be an integer of at least 1 or None, got 1.5'),
+        ({'sandbox_timeout': 0}, 'sandbox_timeout must be an integer of at least 1, got 0'),
+        ({'sandbox_timeout': 1.5}, 'sandbox_timeout must be an integer of at least 1, got 1.5'),
         ({'defer_loading': True, 'id': 'e2b'}, '`defer_loading` is not supported on `E2BSandbox`'),
     ],
 )
@@ -125,7 +125,7 @@ async def test_explicit_ref_uses_attach_even_with_creation_options(fake_e2b: Fak
     backend = capability.get_workspace(ctx, ref=WorkspaceRef(provider='e2b', id='existing'))
     assert isinstance(backend, E2BSandboxBackend)
     await backend.get_client()
-    assert fake_e2b.connect_calls == [('existing', None)]
+    assert fake_e2b.connect_calls == [('existing', 86_400)]
     assert not fake_e2b.create_calls
 
 
@@ -242,7 +242,7 @@ async def test_agent_history_attaches_same_workspace(fake_e2b: FakeE2B) -> None:
     assert tool_results == ['created', 'persisted']
     assert len(fake_e2b.sandboxes) == 1
     assert first.workspace.ref is not None
-    assert fake_e2b.connect_calls == [('sbx-1', None)]
+    assert fake_e2b.connect_calls == [('sbx-1', 86_400)]
 
 
 async def test_coder_works_in_the_sandbox(fake_e2b: FakeE2B, tmp_path: Path) -> None:

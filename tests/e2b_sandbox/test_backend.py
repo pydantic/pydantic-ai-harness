@@ -101,10 +101,41 @@ class TestCreate:
     async def test_defaults(self, fake_e2b: FakeE2B) -> None:
         await started()
         call = fake_e2b.create_calls[-1]
-        # A lifetime left unset is not passed, so E2B's own default applies.
-        assert (call.template, call.timeout, call.envs) == (None, None, None)
+        # E2B's maximum lifetime, pausing rather than killing at the end of it.
+        assert (call.template, call.timeout, call.envs, call.lifecycle) == (None, 86_400, None, {'on_timeout': 'pause'})
         # Passed explicitly: it decides whether the sandbox is reachable without its token.
         assert (call.secure, call.allow_internet_access) == (True, True)
+
+    @pytest.mark.parametrize(
+        ('error', 'message'),
+        [
+            (
+                SandboxException('404: template xyz not found', status_code=404),
+                'Could not start E2B sandbox: 404: template xyz not found',
+            ),
+            (
+                SandboxException('400: Timeout cannot be greater than 1 hours', status_code=400),
+                'Hobby plans allow at most 3600 seconds; pass `E2BSandbox(sandbox_timeout=3600)`.',
+            ),
+        ],
+    )
+    async def test_a_refused_create_is_unavailable(self, fake_e2b: FakeE2B, error: Exception, message: str) -> None:
+        # A refused request fails the same way on every retry, so it ends the run.
+        fake_e2b.create_error = error
+        with pytest.raises(WorkspaceUnavailableError, match=re.escape(message)) as exc:
+            await started()
+        assert exc.value.__cause__ is error
+
+    @pytest.mark.parametrize(
+        'error',
+        [SandboxException('500: internal', status_code=500), SandboxException('no status')],
+        ids=['server-error', 'no-status'],
+    )
+    async def test_an_unrefused_create_failure_is_an_operation_error(self, fake_e2b: FakeE2B, error: Exception) -> None:
+        fake_e2b.create_error = error
+        with pytest.raises(WorkspaceError, match='Could not start E2B sandbox') as exc:
+            await started()
+        assert not isinstance(exc.value, WorkspaceUnavailableError)
 
     async def test_hanging_create_does_not_hang_the_caller(
         self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
@@ -128,7 +159,7 @@ class TestConnect:
         # E2B resumes a paused sandbox on connect, so no separate liveness probe is needed:
         # a sandbox that is really gone raises instead of handing back a dead handle.
         backend = await started(ref=WorkspaceRef(provider='e2b', id='sbx-keep'))
-        assert fake_e2b.connect_calls == [('sbx-keep', None)]
+        assert fake_e2b.connect_calls == [('sbx-keep', 86_400)]
         assert backend.ref == WorkspaceRef(provider='e2b', id='sbx-keep')
 
     async def test_connect_to_a_missing_sandbox_fails(self, fake_e2b: FakeE2B) -> None:
@@ -256,22 +287,14 @@ class TestRun:
         with pytest.raises(TimeoutException, match='slow'):
             await backend.run(['x'])
 
-    @pytest.mark.parametrize(
-        ('settings', 'lifetime'),
-        [({}, "E2B's default lifetime"), ({'sandbox_timeout': 300}, 'sandbox_timeout of 300s')],
-    )
-    async def test_a_gone_sandbox_names_itself_and_its_lifetime(
-        self, fake_e2b: FakeE2B, settings: dict[str, Any], lifetime: str
-    ) -> None:
+    async def test_a_gone_sandbox_names_itself_and_its_lifetime(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.run_error = fake_e2b.ambiguous_type('unavailable')
         fake_e2b.sandbox_is_running = False
-        backend = await started(**settings)
-        with pytest.raises(WorkspaceUnavailableError, match=f"'sbx-1' is no longer running .* {lifetime}"):
+        backend = await started()
+        with pytest.raises(WorkspaceUnavailableError, match="'sbx-1' is no longer running: .*`sandbox_timeout`"):
             await backend.run(['x'])
 
     async def test_an_attached_sandbox_names_itself_when_gone(self, fake_e2b: FakeE2B) -> None:
-        # A connected backend does not know the lifetime it was created with, so it points at
-        # the sandbox instead of quoting a `sandbox_timeout` it never set.
         backend = await started(ref=WorkspaceRef(provider='e2b', id='sbx-keep'))
         fake_e2b.run_error = fake_e2b.sandbox_gone_type('gone')
         with pytest.raises(WorkspaceUnavailableError, match="'sbx-keep' is no longer running"):
@@ -307,13 +330,13 @@ class TestKilledSandbox:
     async def test_a_command_on_a_killed_sandbox_is_unavailable(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         await (await backend.get_client()).kill()
-        with pytest.raises(WorkspaceUnavailableError, match='or been killed'):
+        with pytest.raises(WorkspaceUnavailableError, match='it was killed'):
             await backend.run(['true'])
 
     async def test_a_filesystem_call_on_a_killed_sandbox_is_unavailable(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         await (await backend.get_client()).kill()
-        with pytest.raises(WorkspaceUnavailableError, match='or been killed'):
+        with pytest.raises(WorkspaceUnavailableError, match='it was killed'):
             await backend.read_bytes('/tmp/a.txt')
 
     async def test_a_backend_attached_before_the_kill_is_unavailable(self, fake_e2b: FakeE2B) -> None:
@@ -425,19 +448,19 @@ class TestFilesystem:
         (tmp_path / 'to-dir').symlink_to('pkg')
         (tmp_path / 'dangling').symlink_to('missing')
         entries = await E2BSandboxBackend().list_dir(str(tmp_path))
-        assert {entry.name: (entry.is_dir, entry.size, entry.is_symlink) for entry in entries} == {
-            'dangling': (False, None, True),
-            'data.txt': (False, 5, False),
-            'pkg': (True, None, False),
-            'to-dir': (True, None, True),
-            'to-file': (False, 5, True),
+        assert {entry.name: (entry.is_dir, entry.size) for entry in entries} == {
+            'dangling': (False, None),
+            'data.txt': (False, 5),
+            'pkg': (True, None),
+            'to-dir': (True, None),
+            'to-file': (False, 5),
         }
 
     async def test_symlink_whose_target_is_gone_reads_as_dangling(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         fake_e2b.sandboxes[0].files.symlinks['/srv/link'] = '/srv/removed'
         entry = await backend.stat('/srv/link')
-        assert (entry.is_dir, entry.size, entry.is_symlink) == (False, None, True)
+        assert (entry.is_dir, entry.size) == (False, None)
 
     async def test_remove_deletes_a_directory_tree(self, fake_e2b: FakeE2B) -> None:
         # One call covers both halves of the protocol's `remove`: E2B deletes a file or a

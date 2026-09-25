@@ -11,27 +11,33 @@ from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 
 from pydantic_ai_harness._workspace_provider import check_integer, check_working_dir
-from pydantic_ai_harness.e2b_sandbox._backend import E2BSandboxBackend
+from pydantic_ai_harness.e2b_sandbox._backend import DEFAULT_SANDBOX_TIMEOUT, E2BSandboxBackend
 
 
 @dataclass(kw_only=True)
 class E2BSandbox(AbstractCapability[AgentDepsT]):
-    """Supply an isolated [E2B](https://e2b.dev) sandbox through `ctx.workspace`.
+    """Supply an isolated [E2B](https://e2b.dev) sandbox as the run's workspace.
 
     A run with no reference creates a fresh sandbox. Pass a `WorkspaceRef` supplied by the
     application to attach to an environment managed elsewhere.
 
     This capability supplies execution only. Compose it with tools or
-    capabilities that consume
-    [`RunContext.workspace`][pydantic_ai.tools.RunContext.workspace].
+    capabilities that use the workspace, such as `Coder`, `Shell`, or `FileSystem`.
     Shell commands run under `sh -c` in the sandbox's login shell environment.
     """
 
     template: str | None = None
-    """E2B template name or ID for a newly created workspace."""
+    """E2B template name or ID for a newly created sandbox; E2B's default when `None`.
 
-    sandbox_timeout: int | None = None
-    """Lifetime of a newly created sandbox, in seconds; E2B's default when `None`."""
+    An unknown template raises `WorkspaceUnavailableError` on first use.
+    """
+
+    sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT
+    """Total lifetime of the sandbox in seconds, applied on create and on attach.
+
+    When it runs out, E2B pauses the sandbox and attaching resumes it. The default is E2B's
+    maximum, 24 hours; Hobby plans allow 3600.
+    """
 
     working_dir: str | None = None
     """Absolute directory commands start in and relative paths resolve against; `None` uses the sandbox's own."""
@@ -48,7 +54,7 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
                 '`defer_loading` is not supported on `E2BSandbox`: a run never takes its workspace '
                 'from a deferred capability, so the sandbox would never be used.'
             )
-        check_integer('sandbox_timeout', self.sandbox_timeout, optional=True)
+        check_integer('sandbox_timeout', self.sandbox_timeout)
         check_working_dir(self.working_dir)
 
     def get_workspace(self, ctx: RunContext[AgentDepsT], *, ref: WorkspaceRef | None) -> WorkspaceBackend | None:

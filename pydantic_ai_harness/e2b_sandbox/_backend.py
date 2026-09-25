@@ -1,8 +1,9 @@
 """An E2B sandbox behind Pydantic AI's `WorkspaceBackend` protocol.
 
 SDK assumptions verified 2026-09-09 against E2B 2.46.4 and 2.34.0: `connect` resumes
-paused workspaces using its default 300-second lifetime; commands use `/bin/bash -l -c`, the SDK
-command timeout does not kill the process, and command handles accumulate output. Re-check
+paused workspaces, with a 300-second lifetime unless it is given `timeout`; commands use
+`/bin/bash -l -c`, the SDK command timeout does not kill the process, and command handles
+accumulate output. `create(lifecycle=...)` exists from 2.48.0, the package floor. Re-check
 https://github.com/e2b-dev/E2B/blob/main/packages/python-sdk/e2b/sandbox_async/main.py and
 https://github.com/e2b-dev/E2B/blob/main/packages/python-sdk/e2b/sandbox_async/commands/command.py
 before changing acquisition or deadline behavior.
@@ -11,7 +12,8 @@ Exception types verified 2026-09-25 against E2B 2.51.0
 (https://github.com/e2b-dev/E2B/blob/main/packages/python-sdk/e2b/exceptions.py): a missing key or
 a 401 is `AuthenticationException`; a gone sandbox is `SandboxNotFoundException` from the control
 plane and a `TimeoutException` from envd (its proxy's 502); a 429 is `RateLimitException`, a
-`SandboxException` subclass; a 503 is `ServiceBusyException` (new in 2.48.0, hence the floor),
+`SandboxException` subclass; a create the API refuses is a `SandboxException` carrying its 4xx
+`status_code`; a 503 is `ServiceBusyException` (new in 2.48.0, hence the floor),
 which is not. envd types only a missing path; its other path failures arrive as a 400
 (`InvalidArgumentException`) or a 500 (`SandboxException`) whose message carries envd's wording
 or Go's errno text, which `_path_error` reads.
@@ -64,6 +66,9 @@ _PATH_ERRORS: tuple[tuple[str, type[OSError]], ...] = (
     ('is a directory', IsADirectoryError),
 )
 
+# E2B's maximum sandbox lifetime (Pro plans); Hobby plans allow 3_600.
+DEFAULT_SANDBOX_TIMEOUT = 86_400
+
 # Bound the sandbox-create call so a wedged control plane cannot hang acquisition.
 _CREATE_TIMEOUT = 120
 
@@ -77,13 +82,10 @@ _SDK_STREAM_UNBOUNDED = 0
 
 
 def _command_line(command: WorkspaceCommand, shell: bool) -> str:
-    """Turn a protocol command into the single string E2B executes.
+    """The single string E2B runs: `commands.run` takes only a string, which it hands to `/bin/bash -l -c`.
 
-    E2B has no argv form: `commands.run` hands its string to `/bin/bash -l -c`, so the argv is
-    quoted with `shlex.join` first. The shell still parses the result, but the quoting makes each
-    element exactly one word, which is the guarantee argv callers rely on. A `shell=True` string
-    runs as `/bin/sh -c <string>`, so it is interpreted by `sh` as on every other workspace, while
-    the login shell around it still sets up `PATH`.
+    The argv is joined with `shlex.join` so each element stays one word. A `shell=True` string
+    becomes `/bin/sh -c <string>`, so it runs under `sh` as on every other backend.
     """
     return shlex.join(command_argv(command, shell))
 
@@ -116,9 +118,21 @@ async def _file_entry(sandbox: e2b.AsyncSandbox, entry: e2b.EntryInfo) -> FileEn
     # A directory's reported size is an implementation detail of the underlying filesystem
     # rather than a content length, so report none for it, like the built-in backends.
     size = None if target is None or is_dir else target.size
-    return FileEntry(
-        name=entry.name, path=entry.path, is_dir=is_dir, size=size, is_symlink=entry.symlink_target is not None
+    return FileEntry(name=entry.name, path=entry.path, is_dir=is_dir, size=size)
+
+
+def _unavailable_message(sandbox_id: str) -> str:
+    return (
+        f'The E2B sandbox {sandbox_id!r} is no longer running: it was killed, or it was paused when its '
+        '`sandbox_timeout` ran out. Attaching to it again resumes a paused sandbox.'
     )
+
+
+def _create_refused_message(error: e2b.SandboxException) -> str:
+    message = f'Could not start E2B sandbox: {error}'
+    if 'timeout' in str(error).lower():
+        message += ' Hobby plans allow at most 3600 seconds; pass `E2BSandbox(sandbox_timeout=3600)`.'
+    return message
 
 
 class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
@@ -147,9 +161,11 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     Args:
         workspace: A live `e2b.AsyncSandbox` you already have. Whoever created it owns killing it.
         ref: Identity of an existing sandbox to attach to on first use.
-        template: E2B template name or id a newly created sandbox runs; E2B's default when `None`.
-        sandbox_timeout: How long E2B keeps a newly created sandbox alive, in seconds; E2B's default
-            when `None`.
+        template: E2B template name or ID a newly created sandbox runs; E2B's default when `None`.
+            An unknown template raises `WorkspaceUnavailableError` on first use.
+        sandbox_timeout: Total lifetime of the sandbox in seconds, applied when it is created and
+            again when attaching to it. When it runs out, E2B pauses the sandbox rather than
+            killing it, and attaching resumes it. The default is E2B's maximum; Hobby plans allow 3600.
         working_dir: Absolute directory commands start in and relative paths resolve against.
             E2B has no create-time working directory, so this is applied per command, including
             on an attached sandbox; `None` uses the sandbox's own default, discovered with
@@ -165,7 +181,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         *,
         ref: WorkspaceRef | None = None,
         template: str | None = None,
-        sandbox_timeout: int | None = None,
+        sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
         working_dir: str | None = None,
         env: Mapping[str, str] | None = None,
         allow_internet_access: bool = True,
@@ -174,38 +190,37 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'e2b'")
         if workspace is not None and ref is not None:
             raise ValueError('pass either `workspace` or `ref`, not both')
-        self._workspace = workspace
         self._ref = ref if workspace is None else WorkspaceRef(provider='e2b', id=workspace.sandbox_id)
+        self._sandbox = workspace
+        self._working_dir = absolute_path('working_dir', working_dir)
+        # `working_dir()` must return a canonical absolute path: the configured one, or the
+        # sandbox's default, resolved once with `pwd -P`.
+        self._resolved_working_dir: str | None = None
+        self._lock = anyio.Lock()
         self._template = template
         self._sandbox_timeout = sandbox_timeout
         self._env = dict(env) if env is not None else None
         self._allow_internet_access = allow_internet_access
-        self._canonical_working_dir: str | None = None
-        self._working_dir = absolute_path('working_dir', working_dir)
-        # Set once this backend creates the sandbox, so an expiry message can name its lifetime.
-        self._created = False
-        self._lock = anyio.Lock()
 
     async def get_client(self) -> e2b.AsyncSandbox:
         """Return the typed `e2b.AsyncSandbox`, creating or attaching to it on first use.
 
-        The only place `_workspace` is read, so nothing can reach an unacquired handle:
-        it stays optional and every other method comes through here. The lock serializes
-        concurrent first uses -- two callers each creating a sandbox would leave the loser
-        billed and unreferenced. A caller cancelled while E2B creates the sandbox still records
+        Every operation takes the handle from here, so none reaches an unacquired one. The lock
+        serializes concurrent first uses -- two callers each creating a sandbox would leave the
+        loser billed and unreferenced. A caller cancelled while E2B creates the sandbox still records
         it before the cancellation propagates, so `ref` names it and a retry reuses it.
         Attaching by `ref` to a sandbox that no longer exists raises
         `WorkspaceUnavailableError`; it does not create a replacement.
         """
         async with self._lock:
-            if (workspace := self._workspace) is not None:
-                return workspace
+            if (sandbox := self._sandbox) is not None:
+                return sandbox
             ref = self._ref
-            workspace = await self._attach(ref.id) if ref is not None else await self._create()
-            self._workspace = workspace
-            self._ref = WorkspaceRef(provider='e2b', id=workspace.sandbox_id)
+            sandbox = await self._attach(ref.id) if ref is not None else await self._create()
+            self._sandbox = sandbox
+            self._ref = WorkspaceRef(provider='e2b', id=sandbox.sandbox_id)
         await anyio.lowlevel.checkpoint_if_cancelled()
-        return workspace
+        return sandbox
 
     @property
     def ref(self) -> WorkspaceRef | None:
@@ -213,30 +228,31 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         return self._ref
 
     @asynccontextmanager
-    async def _sdk_errors(self, context: str, path: str | None = None) -> AsyncGenerator[None]:
+    async def _sdk_errors(self, sandbox_id: str | None, context: str, path: str | None = None) -> AsyncGenerator[None]:
         """Raise E2B's exceptions as the protocol's typed failures; see `_translate`."""
         try:
             yield
         except Exception as error:
-            translated = await self._translate(error, context, path)
+            translated = await self._translate(error, context, path, sandbox_id)
             if translated is error:
                 raise
             raise translated from error
 
-    async def _translate(self, error: Exception, context: str, path: str | None) -> Exception:
+    async def _translate(self, error: Exception, context: str, path: str | None, sandbox_id: str | None) -> Exception:
         """Map one E2B exception onto the protocol's typed failures, or return it unchanged.
 
-        Rejected credentials and a gone sandbox end the run. A `TimeoutException` is ambiguous --
-        E2B raises it both for a request the sandbox never answered and for one aborted because
-        the sandbox died -- so an acquired sandbox is asked whether it still runs. Other SDK
+        Rejected credentials and a gone sandbox end the run. E2B types an unanswered envd request
+        as `TimeoutException` (the SDK's command timeout is disabled); after a liveness probe, a
+        gone sandbox is unavailable, anything else is transient. It is not a
+        `WorkspaceTimeoutError`, which is reserved for a command's own `timeout=`. Other SDK
         errors mean the operation failed. Rate limits, a busy service, transport failures, and
         anything E2B does not type come back unchanged to propagate as transient, for durable
         engines to retry.
         """
         if isinstance(error, e2b.AuthenticationException):
             return WorkspaceUnavailableError(_AUTH_MESSAGE)
-        if isinstance(error, e2b.SandboxNotFoundException):
-            return WorkspaceUnavailableError(self._gone_message())
+        if isinstance(error, e2b.SandboxNotFoundException) and sandbox_id is not None:
+            return WorkspaceUnavailableError(_unavailable_message(sandbox_id))
         if isinstance(error, e2b.FileNotFoundException):
             return FileNotFoundError(f'No such file or directory in the E2B sandbox: {path!r}')
         if (
@@ -246,57 +262,44 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         ):
             return path_error
         if isinstance(error, e2b.TimeoutException):
-            if self._workspace is not None and not await _is_running(self._workspace):
-                return WorkspaceUnavailableError(self._gone_message())
+            sandbox = self._sandbox
+            if sandbox is not None and not await _is_running(sandbox):
+                return WorkspaceUnavailableError(_unavailable_message(sandbox.sandbox_id))
             return error
         if isinstance(error, e2b.SandboxException) and not isinstance(error, e2b.RateLimitException):
             return WorkspaceError(f'{context}: {error}')
         return error
 
-    def _gone_message(self) -> str:
-        assert self._ref is not None
-        if not self._created:
-            return (
-                f'The E2B sandbox {self._ref.id!r} is no longer running '
-                '(it does not exist, was killed, or expired at its configured lifetime). '
-                'Attach to a live sandbox, or create a new one.'
-            )
-        lifetime = (
-            "E2B's default lifetime"
-            if self._sandbox_timeout is None
-            else f'its sandbox_timeout of {self._sandbox_timeout}s'
-        )
-        return (
-            f'The E2B sandbox {self._ref.id!r} is no longer running (it may have reached {lifetime}, '
-            'or been killed). Start a new run, or raise sandbox_timeout for longer work.'
-        )
-
     async def read_bytes(self, path: str) -> bytes:
-        async with self._sdk_errors(f'Could not read {path!r}', path):
-            return bytes(await (await self.get_client()).files.read(path, 'bytes'))
+        sandbox = await self.get_client()
+        async with self._sdk_errors(sandbox.sandbox_id, f'Could not read {path!r}', path):
+            return bytes(await sandbox.files.read(path, 'bytes'))
 
     async def write_bytes(self, path: str, data: bytes) -> None:
-        async with self._sdk_errors(f'Could not write {path!r}', path):
-            await (await self.get_client()).files.write(path, data)  # pyright: ignore[reportUnknownMemberType]
+        sandbox = await self.get_client()
+        async with self._sdk_errors(sandbox.sandbox_id, f'Could not write {path!r}', path):
+            await sandbox.files.write(path, data)  # pyright: ignore[reportUnknownMemberType]
 
     async def stat(self, path: str) -> FileEntry:
-        async with self._sdk_errors(f'Could not stat {path!r}', path):
-            sandbox = await self.get_client()
+        sandbox = await self.get_client()
+        async with self._sdk_errors(sandbox.sandbox_id, f'Could not stat {path!r}', path):
             return await _file_entry(sandbox, await sandbox.files.get_info(path))
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
-        async with self._sdk_errors(f'Could not list {path!r}', path):
-            sandbox = await self.get_client()
+        sandbox = await self.get_client()
+        async with self._sdk_errors(sandbox.sandbox_id, f'Could not list {path!r}', path):
+            # `depth=1` is E2B's non-recursive listing, as the protocol asks.
             entries = await sandbox.files.list(path, depth=1)
             return [await _file_entry(sandbox, entry) for entry in entries]
 
     async def make_dir(self, path: str) -> None:
-        async with self._sdk_errors(f'Could not create directory {path!r}', path):
-            await (await self.get_client()).files.make_dir(path)
+        sandbox = await self.get_client()
+        async with self._sdk_errors(sandbox.sandbox_id, f'Could not create directory {path!r}', path):
+            await sandbox.files.make_dir(path)
 
     async def remove(self, path: str) -> None:
-        async with self._sdk_errors(f'Could not remove {path!r}', path):
-            sandbox = await self.get_client()
+        sandbox = await self.get_client()
+        async with self._sdk_errors(sandbox.sandbox_id, f'Could not remove {path!r}', path):
             # envd removes with `os.RemoveAll`, which succeeds on a missing path; the protocol
             # reports that as `FileNotFoundError`.
             if not await sandbox.files.exists(path):
@@ -304,28 +307,36 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             await sandbox.files.remove(path)
 
     async def exists(self, path: str) -> bool:
-        async with self._sdk_errors(f'Could not check {path!r}', path):
-            return await (await self.get_client()).files.exists(path)
+        sandbox = await self.get_client()
+        async with self._sdk_errors(sandbox.sandbox_id, f'Could not check {path!r}', path):
+            return await sandbox.files.exists(path)
 
     async def _create(self) -> e2b.AsyncSandbox:
         """Provision a fresh E2B sandbox.
 
         The call is shielded: E2B may create the sandbox before its response arrives, and a
         cancellation then would lose the only handle to a billed sandbox. `_CREATE_TIMEOUT`
-        still bounds it, so cancellation waits at most that long.
+        still bounds it, so cancellation waits at most that long. A request E2B refuses (an
+        unknown template, a lifetime over the plan's limit) is `WorkspaceUnavailableError`:
+        retrying it cannot succeed.
         """
         with anyio.move_on_after(_CREATE_TIMEOUT, shield=True):
-            async with self._sdk_errors('Could not start E2B sandbox'):
-                sandbox = await e2b.AsyncSandbox.create(
-                    template=self._template,
-                    # `None` leaves the lifetime to E2B's default.
-                    timeout=self._sandbox_timeout,
-                    envs=dict(self._env) if self._env is not None else None,
-                    secure=True,
-                    allow_internet_access=self._allow_internet_access,
-                )
-            self._created = True
-            return sandbox
+            async with self._sdk_errors(None, 'Could not start E2B sandbox'):
+                try:
+                    return await e2b.AsyncSandbox.create(
+                        template=self._template,
+                        timeout=self._sandbox_timeout,
+                        envs=dict(self._env) if self._env is not None else None,
+                        secure=True,
+                        allow_internet_access=self._allow_internet_access,
+                        # Pause at the end of the lifetime instead of killing, so the files survive.
+                        lifecycle={'on_timeout': 'pause'},
+                    )
+                except e2b.SandboxException as error:
+                    refused = error.status_code is not None and 400 <= error.status_code < 500
+                    if not refused or isinstance(error, e2b.RateLimitException):
+                        raise
+                    raise WorkspaceUnavailableError(_create_refused_message(error)) from error
         # A transient failure like any unreachable service: it propagates for durable engines to
         # retry, with a message that says what did not answer.
         raise TimeoutError(
@@ -341,23 +352,24 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         a dead environment. Nothing is recreated in its place; a run that expected files there
         must be told they are gone, not handed an empty workspace.
         """
-        async with self._sdk_errors(f'Could not connect to E2B sandbox {id!r}'):
-            # Let E2B apply its default lifetime when connecting or resuming.
-            return await e2b.AsyncSandbox.connect(id)
+        async with self._sdk_errors(id, f'Could not connect to E2B sandbox {id!r}'):
+            # Without `timeout`, a resumed sandbox gets E2B's 300 seconds; a running one keeps
+            # the longer of its current and the given lifetime.
+            return await e2b.AsyncSandbox.connect(id, timeout=self._sandbox_timeout)
 
     async def working_dir(self) -> str:
         """The sandbox's default working directory (absolute POSIX path)."""
-        if self._canonical_working_dir is None:
+        if self._resolved_working_dir is None:
             result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.removesuffix('\n')
             if result.exit_code != 0 or not posixpath.isabs(printed):
-                assert self._ref is not None
+                sandbox = await self.get_client()
                 raise WorkspaceError(
-                    f'Could not determine the working directory of E2B sandbox {self._ref.id}: '
+                    f'Could not determine the working directory of E2B sandbox {sandbox.sandbox_id}: '
                     f'`pwd -P` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
                 )
-            self._canonical_working_dir = printed
-        return self._canonical_working_dir
+            self._resolved_working_dir = printed
+        return self._resolved_working_dir
 
     async def run(
         self,
@@ -413,7 +425,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
                     if handle is None
                     else 'Could not read the command result (the command may still be running)'
                 )
-                translated = await self._translate(error, context, None)
+                translated = await self._translate(error, context, None, sandbox.sandbox_id)
                 if translated is not error:
                     raise translated from error
             raise
