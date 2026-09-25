@@ -12,7 +12,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from pydantic_ai_harness.filesystem import FileSystem
-from pydantic_ai_harness.tool_output_limits import READ_TOOL_NAME, Band, Spill, ToolOutputLimits, WorkspaceStore
+from pydantic_ai_harness.tool_output_limits import READ_TOOL_NAME, Band, Spill, ToolOutputLimits
 
 from .._workspace import HOST_ENV
 
@@ -35,14 +35,12 @@ def _returns(messages: Sequence[ModelMessage], tool_name: str) -> list[ToolRetur
     ]
 
 
-def _agent(
-    work: Path, model: FunctionModel, *capabilities: AbstractCapability[None], store: WorkspaceStore | None = None
-) -> Agent[None, str]:
+def _agent(work: Path, model: FunctionModel, *capabilities: AbstractCapability[None]) -> Agent[None, str]:
     agent = Agent(
         model,
         deps_type=type(None),
         capabilities=[
-            ToolOutputLimits(bands=[Band(over=100, action=Spill())], store=store),
+            ToolOutputLimits(bands=[Band(over=100, action=Spill())]),
             LocalWorkspace(work, env=HOST_ENV),
             *capabilities,
         ],
@@ -68,11 +66,7 @@ def _call_big_tool_once(offered: list[set[str]]) -> Callable[[list[ModelMessage]
 
 
 class TestFileReader:
-    @pytest.mark.parametrize(
-        'store',
-        [pytest.param(None, id='default-directory'), pytest.param(WorkspaceStore(directory='spills'), id='relative')],
-    )
-    async def test_read_file_replaces_read_tool_result(self, tmp_path: Path, store: WorkspaceStore | None):
+    async def test_read_file_replaces_read_tool_result(self, tmp_path: Path):
         offered: list[set[str]] = []
 
         def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -86,9 +80,7 @@ class TestFileReader:
                 )
             return ModelResponse(parts=[ToolCallPart('big_tool', {})])
 
-        result = await _agent(tmp_path, FunctionModel(respond), FileSystem(max_read_chars=10_000), store=store).run(
-            'go'
-        )
+        result = await _agent(tmp_path, FunctionModel(respond), FileSystem(max_read_chars=10_000)).run('go')
 
         [spilled] = _returns(result.all_messages(), 'big_tool')
         assert spilled.metadata is not None
@@ -101,26 +93,22 @@ class TestFileReader:
         assert '\tline 250\n' in result.output
 
     @pytest.mark.parametrize(
-        ('file_system', 'store'),
+        'file_system',
         [
-            pytest.param(None, None, id='no-file-tool'),
-            pytest.param(FileSystem[None](), None, id='uncapped-reads'),
+            pytest.param(None, id='no-file-tool'),
+            pytest.param(FileSystem[None](), id='uncapped-reads'),
             pytest.param(
-                FileSystem[None](max_read_chars=10_000, denied_patterns=['.pydantic-ai-harness/**']),
-                None,
-                id='denied',
+                FileSystem[None](max_read_chars=10_000, denied_patterns=['.pydantic-ai-harness/**']), id='denied'
             ),
-            pytest.param(FileSystem[None](max_read_chars=10_000), 'absolute', id='absolute-directory'),
         ],
     )
     async def test_read_tool_result_without_a_file_tool_that_reads_spills(
-        self, tmp_path: Path, file_system: FileSystem[None] | None, store: str | None
+        self, tmp_path: Path, file_system: FileSystem[None] | None
     ):
         offered: list[set[str]] = []
         extra = [] if file_system is None else [file_system]
-        spills = None if store is None else WorkspaceStore(directory=str(tmp_path / 'spills'))
 
-        result = await _agent(tmp_path, FunctionModel(_call_big_tool_once(offered)), *extra, store=spills).run('go')
+        result = await _agent(tmp_path, FunctionModel(_call_big_tool_once(offered)), *extra).run('go')
 
         [spilled] = _returns(result.all_messages(), 'big_tool')
         assert f'Read it with {READ_TOOL_NAME}(' in str(spilled.content).splitlines()[0]

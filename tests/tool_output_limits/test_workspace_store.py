@@ -209,7 +209,7 @@ class TestDefaultStore:
         assert result.output.startswith("[No stored tool result for handle 'call-1'.")
 
     async def test_workspace_failure_on_read_is_a_failed_tool_call(self, tmp_path: Path):
-        toolset = ToolOutputLimits(store=WorkspaceStore(directory='spills')).get_toolset()
+        toolset = ToolOutputLimits(store=WorkspaceStore()).get_toolset()
         assert toolset is not None
         tool = toolset.tools[READ_TOOL_NAME]  # type: ignore[union-attr]
         ctx = _Ctx(workspace=Workspace(_FailingRead(tmp_path)))
@@ -218,26 +218,27 @@ class TestDefaultStore:
 
 
 class TestWorkspaceStore:
-    async def test_directory_relative_to_working_dir(self, tmp_path: Path):
+    async def test_keys_become_paths_in_the_store_directory(self, tmp_path: Path):
         workspace = Workspace(local_workspace(tmp_path))
-        store = WorkspaceStore(directory='spills')
+        store = WorkspaceStore()
+        directory = f'{tmp_path.resolve()}/.pydantic-ai-harness/tool-output'
         handle = await store.write(workspace, 'run-1/../call 1.0', b'payload')
-        assert handle == f'{tmp_path.resolve()}/spills/run-1/_/call_1.0'
+        assert handle == f'{directory}/run-1/_/call_1.0'
         assert await store.read(workspace, handle) == b'payload'
         assert await store.read(workspace, 'run-1/_/call_1.0') == b'payload'
-        assert await store.write(workspace, '', b'empty') == f'{tmp_path.resolve()}/spills/_'
+        assert await store.write(workspace, '', b'empty') == f'{directory}/_'
 
     @pytest.mark.parametrize('handle', ['../secret.txt', '/etc/passwd', '.'])
     async def test_read_outside_directory_is_refused(self, tmp_path: Path, handle: str):
         (tmp_path / 'secret.txt').write_text('secret')
         workspace = Workspace(local_workspace(tmp_path))
         with pytest.raises(PermissionError, match='outside the store directory'):
-            await WorkspaceStore(directory='spills').read(workspace, handle)
+            await WorkspaceStore().read(workspace, handle)
 
     async def test_missing_handle_raises_file_not_found(self, tmp_path: Path):
         workspace = Workspace(local_workspace(tmp_path))
         with pytest.raises(FileNotFoundError):
-            await WorkspaceStore(directory='spills').read(workspace, 'run/missing.0')
+            await WorkspaceStore().read(workspace, 'run/missing.0')
 
     async def test_filesystem_only_workspace_uses_working_dir(self, tmp_path: Path):
         workspace = Workspace(_FilesystemOnly(tmp_path))

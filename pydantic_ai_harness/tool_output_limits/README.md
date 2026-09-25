@@ -243,19 +243,12 @@ too; `read_tool_result` only reads handles inside the store directory.
 
 Files go under `.pydantic-ai-harness/tool-output` in the workspace's working directory.
 `.pydantic-ai-harness/` gets a `.gitignore` holding `*`, so the files stay out of `git status`.
-Pass `directory` to choose another location in the workspace, or `workspace` to keep spills in a
-different workspace than the run's:
+Pass `workspace` to keep spills in a different workspace than the run's:
 
 ```python
-from pydantic_ai import Agent
-from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.workspaces import LocalWorkspaceBackend
 from pydantic_ai_harness.tool_output_limits import ToolOutputLimits, WorkspaceStore
 
-agent = Agent(
-    'anthropic:claude-sonnet-5',
-    capabilities=[LocalWorkspace('.'), ToolOutputLimits(store=WorkspaceStore(directory='/data/spills'))],
-)
 spills_elsewhere = ToolOutputLimits(store=WorkspaceStore(workspace=LocalWorkspaceBackend('/var/spills')))
 ```
 
@@ -310,9 +303,8 @@ qualifies when `read_file` is registered, `max_read_chars` is at most 50,000, it
   `FileSystem` was loaded, `read_tool_result` stays offered for the rest of the run.
 
 The check uses configuration only, so it does no workspace I/O and never starts a sandbox.
-Spills kept in a store with its own `workspace`, in an absolute `directory`, or in another kind
-of store keep `read_tool_result`. A capability of your own that reads workspace files takes the
-same role by implementing [`FileReader`](../filesystem/README.md#reading-files-other-capabilities-keep).
+Spills kept in a store with its own `workspace`, or in another kind of store, keep
+`read_tool_result`.
 
 ## Usage accounting
 
