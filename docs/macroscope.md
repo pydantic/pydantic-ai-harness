@@ -40,9 +40,9 @@ result = agent.run_sync('Run a Macroscope review and fix any real findings.')
 print(result.output)
 ```
 
-The review runs in the run's workspace (`ctx.workspace`), in its working
-directory, which should be the repository: your machine with `LocalWorkspace`,
-or the sandbox when the run uses one. A run without a workspace fails at its
+The review runs in the agent's [workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/),
+in its working directory, which should be the repository: your machine with
+`LocalWorkspace`, or the sandbox when the run uses one. A run without a workspace fails at its
 start. The `macroscope` CLI must be installed and authenticated in the
 workspace first:
 

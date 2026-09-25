@@ -51,7 +51,7 @@ It is literally these capabilities combined, in this order:
 
 Pass `subagents=[]` to disable delegation, or supply your own `SubAgent` entries.
 
-Oversized tool results are stored in the run's [workspace](https://pydantic.dev/docs/ai/workspace/), under `.pydantic-ai-harness/tool-output/` (git-ignored), so a run without one fails at its start. `LocalWorkspace('.')` keeps them in the current directory and a sandbox capability keeps them in the sandbox. To store them elsewhere, build the [blown-out equivalent](#blown-out-equivalent) with [`ToolOutputLimits(store=...)`](tool-output-limits.md).
+Oversized tool results are stored in the run's [workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/), under `.pydantic-ai-harness/tool-output/` (git-ignored), so a run without one fails at its start. `LocalWorkspace('.')` keeps them in the current directory and a sandbox capability keeps them in the sandbox. To store them elsewhere, build the [blown-out equivalent](#blown-out-equivalent) with [`ToolOutputLimits(store=...)`](tool-output-limits.md).
 
 ### Instructions
 

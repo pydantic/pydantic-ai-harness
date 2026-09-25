@@ -49,8 +49,8 @@ description: Review a change for correctness and repository conventions.
 Inspect the change and report findings by severity.
 ```
 
-Then add the library to your agent. Libraries are read from the run's
-[workspace](https://pydantic.dev/docs/ai/workspace/), so attach one:
+Then add the library to your agent, with a
+[workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/) to read it from:
 
 ```python {test="skip"}
 from pydantic_ai import Agent
@@ -58,7 +58,7 @@ from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import Skills
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[LocalWorkspace('.'), Skills('.agents/skills')],
 )
 ```
@@ -85,12 +85,9 @@ Loading a skill returns a `# Skill: <name>` heading followed by the skill's Mark
 body. The catalog is the same on every run over the same files, so it stays in the
 cached prefix; a new or renamed skill appears in it on the next run.
 
-Under a durable engine such as Temporal, the libraries are read through the durable
-workspace, so no skill file is read in workflow code.
-
 A run without a workspace fails at its start. To read skills from somewhere
-other than the run's workspace, such as skills shipped with your application
-while the agent works in a sandbox, pass a workspace backend as `workspace=`:
+else, such as skills shipped with your application while the agent works in a
+sandbox, pass a workspace backend:
 
 ```python
 from pydantic_ai.workspaces import LocalWorkspaceBackend
@@ -99,9 +96,9 @@ from pydantic_ai_harness import Skills
 skills = Skills('skills', workspace=LocalWorkspaceBackend('/app'))
 ```
 
-`workspace=` takes a backend, not the `LocalWorkspace` capability. In this
-release it is read in-process only: a durable engine does not route it through
-its workflow.
+`workspace=` takes a backend, not the `LocalWorkspace` capability. Under a
+durable engine such as Temporal, a `workspace=` backend is read in-process, not
+through the workflow.
 
 ## Choose which skills to expose
 
@@ -227,7 +224,7 @@ are also accepted.
 [YAML and JSON agent specs](https://pydantic.dev/docs/ai/core-concepts/agent-spec/):
 
 ```yaml
-model: anthropic:claude-sonnet-5
+model: anthropic:claude-opus-5-5
 capabilities:
   - Skills:
       directories: .agents/skills
@@ -287,7 +284,7 @@ Skills(
 Pass at least one library directory, not the path of an individual skill
 package. Malformed frontmatter, invalid or mismatched names, duplicate selected
 names, unknown selections, missing libraries, and non-directory library paths
-fail at run start. Combining `include` and `exclude` fails at construction.
+fail at run start.
 
 Two `Skills` on one agent combine into one catalog.
 
@@ -295,5 +292,5 @@ Two `Skills` on one agent combine into one catalog.
 
 - [Agent Skills specification](https://agentskills.io/specification)
 - [Adding skills support to an agent](https://agentskills.io/client-implementation/adding-skills-support)
-- [Pydantic AI workspaces](https://pydantic.dev/docs/ai/workspace/)
+- [Pydantic AI workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/)
 - [Pydantic AI capabilities overview](https://pydantic.dev/docs/ai/capabilities/overview/)

@@ -86,7 +86,7 @@ class Shell(AbstractCapability[AgentDepsT]):
     """Maximum characters of output returned to the model. Must be positive."""
 
     max_file_bytes: int | None = field(default=None, kw_only=True)
-    """Optional per-file size limit for run-scoped commands, not total disk usage.
+    """Optional per-file size limit for `run_command` and `start_command` commands, not total disk usage.
 
     Must be positive. Applied with the workspace shell's `ulimit -f`, rounded up to whole
     blocks (512 bytes in POSIX `sh`, 1 KiB in bash). `persist_cwd` and the persistent
@@ -121,10 +121,10 @@ class Shell(AbstractCapability[AgentDepsT]):
     tools: Sequence[str] = RUN_SCOPED_TOOL_NAMES
     """Which tools to register, from `SHELL_TOOL_NAMES`.
 
-    The default is the run-scoped family: `run_command`, `start_command`,
-    `check_command`, and `stop_command`, whose processes are killed when the run
-    ends. Name `shell` to register the persistent tool instead: its commands
-    outlive the run, a foreground call waits at most `default_timeout` seconds
+    The default is `run_command`, `start_command`, `check_command`, and
+    `stop_command`; a background command keeps running across runs until it
+    exits, is stopped, or the workspace ends. Name `shell` to register the
+    persistent tool instead: a foreground call waits at most `default_timeout` seconds
     (capped at 270) before returning handles to the still-running process, and
     the model reads the returned log and status files with its other tools.
     `persist_cwd` does not apply to `shell`; each command starts in the working directory.
