@@ -16,6 +16,7 @@ from pydantic_ai.workspaces.testing import WorkspaceBackendSuite
 
 from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
 
+from .conftest import LIVE_IDLE_TIMEOUT, LIVE_SANDBOX_TIMEOUT
 from .fake_modal import FakeModal
 
 
@@ -60,7 +61,9 @@ class TestLiveModalSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover - 
     @pytest.fixture(scope='class')
     @classmethod
     async def backend(cls) -> AsyncIterator[ModalSandboxBackend]:
-        backend = ModalSandboxBackend(image='python:3.12-slim')
+        backend = ModalSandboxBackend(
+            image='python:3.12-slim', sandbox_timeout=LIVE_SANDBOX_TIMEOUT, idle_timeout=LIVE_IDLE_TIMEOUT
+        )
         yield backend
         if backend.ref is not None:
             import modal  # noqa: PLC0415 - optional extra, absent on slim installs

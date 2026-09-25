@@ -28,13 +28,15 @@ from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.modal_sandbox import ModalSandbox, ModalSandboxBackend
 
 from .._tool_calls import call_tools
+from .conftest import LIVE_IDLE_TIMEOUT, LIVE_SANDBOX_TIMEOUT
 
 pytestmark = [pytest.mark.anyio(backends=['asyncio']), pytest.mark.modal_live]
 
 
 @asynccontextmanager
 async def owned_backend(**settings: object) -> AsyncGenerator[ModalSandboxBackend, None]:
-    backend = ModalSandboxBackend(image='python:3.12-slim', **settings)  # type: ignore[arg-type]
+    limits = {'sandbox_timeout': LIVE_SANDBOX_TIMEOUT, 'idle_timeout': LIVE_IDLE_TIMEOUT}
+    backend = ModalSandboxBackend(image='python:3.12-slim', **(limits | settings))  # type: ignore[arg-type]
     native = await backend.get_client()
     try:
         yield backend
@@ -109,7 +111,15 @@ async def test_coder_tools_run_in_the_sandbox_modal_sandbox_supplies() -> None:
     image = modal.Image.debian_slim(python_version='3.12').apt_install('git', 'ripgrep')
     try:
         results = await call_tools(
-            [RecordingModalSandbox(image=image, working_dir='/tmp'), Coder()],
+            [
+                RecordingModalSandbox(
+                    image=image,
+                    working_dir='/tmp',
+                    sandbox_timeout=LIVE_SANDBOX_TIMEOUT,
+                    idle_timeout=LIVE_IDLE_TIMEOUT,
+                ),
+                Coder(),
+            ],
             [
                 ('write_file', {'path': 'hello.py', 'content': "print('hello from modal')\n"}),
                 ('shell', {'command': 'python hello.py && git --version'}),

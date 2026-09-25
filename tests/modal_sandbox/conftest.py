@@ -12,6 +12,11 @@ import pytest
 
 from .fake_modal import FakeModal
 
+# CI stops the live job after 15 minutes, before a `finally` can terminate what it started.
+# Live tests create sandboxes with these limits so one left behind that way ends on its own.
+LIVE_SANDBOX_TIMEOUT = 900
+LIVE_IDLE_TIMEOUT = 300
+
 
 class _PoisonedModal(types.ModuleType):
     """A `modal` stand-in that fails loudly on any attribute access.
