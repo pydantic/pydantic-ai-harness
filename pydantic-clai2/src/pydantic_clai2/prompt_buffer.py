@@ -26,7 +26,13 @@ class PromptBuffer:
         self._pastes.clear()
 
     def replace_range(self, start: int, end: int, text: str) -> None:
-        """Replace an editing range, revealing overlapping pastes."""
+        """Replace an editing range, revealing overlapping pastes.
+
+        An edit that changes text ends a recall walk, so the edited text becomes the draft the
+        next walk restores. A no-op deletion at either end keeps the walk going.
+        """
+        if text or start != end:
+            self.history_index = None
         shift = len(text) - (end - start)
         self._pastes = [
             (left, right) if right <= start else (left + shift, right + shift)
@@ -42,7 +48,6 @@ class PromptBuffer:
         text = ''.join(char for char in text if char.isprintable() or char in ('\n', '\t'))
         start = self.cursor
         self.replace_range(start, start, text)
-        self.history_index = None
         if paste and (len(text.splitlines()) >= 5 or len(text) >= 1000):
             self._pastes.append((start, self.cursor))
             self._pastes.sort()

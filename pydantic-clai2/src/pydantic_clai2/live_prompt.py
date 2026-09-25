@@ -302,7 +302,6 @@ class LivePrompt:
         item = self._completions[self._selection]
         start = max(0, self.buffer.cursor + item.start_position)
         self.buffer.replace_range(start, self.buffer.cursor, item.text)
-        self.buffer.history_index = None
         self.dismiss_completions()
 
     def dismiss_completions(self) -> None:

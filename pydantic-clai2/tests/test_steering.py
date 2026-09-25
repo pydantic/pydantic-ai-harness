@@ -342,6 +342,19 @@ async def test_edited_queued_draft_survives_a_second_walk() -> None:
         assert live.queued_messages == ('a', 'bx')
 
 
+async def test_deleting_from_a_recalled_queued_prompt_survives_navigation() -> None:
+    async with editor() as (live, _, _):
+        queue(live, 'a', 'bc')
+        live.feed('up')
+        live.feed('backspace')
+        live.feed('up')
+        assert live.buffer.text == 'bc'
+        live.feed('down')
+        assert live.buffer.text == 'b'
+        live.feed('enter')
+        assert live.queued_messages == ('a', 'b')
+
+
 async def test_clearing_a_recalled_queued_prompt_removes_it() -> None:
     async with editor() as (live, _, _):
         queue(live, 'only')
