@@ -115,7 +115,31 @@ async def delete_sprite(ref: WorkspaceRef) -> None:
     await backend.aclose()
 ```
 
-`get_client()` returns the `sprites.AsyncSprite`, and `aclose()` closes the Sprites client the backend opened. If a run fails before it returns, you never get the ref: find leftover Sprites (named `pydantic-ai-...`) with `AsyncSpritesClient.list_all_sprites()` and delete them with `AsyncSpritesClient.delete_sprite(name)`. See [Sprite lifecycle](https://docs.sprites.dev/concepts/lifecycle/).
+`get_client()` returns the `sprites.AsyncSprite`, and `aclose()` closes the Sprites client the backend opened. See [Sprite lifecycle](https://docs.sprites.dev/concepts/lifecycle/).
+
+A failed run returns no result, so there is no ref to store. To terminate its sandbox, clean up in an `on_run_error` hook; `after_run` doesn't run when a run fails:
+
+```python
+from typing import Any
+
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import Hooks
+from pydantic_ai.run import AgentRunResult
+from pydantic_ai_harness.coder import Coder
+from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
+
+hooks = Hooks()
+
+
+@hooks.on.run_error
+async def terminate_failed_run(ctx: RunContext[None], *, error: BaseException) -> AgentRunResult[Any]:
+    if ctx.workspace.ref is not None:
+        await delete_sprite(ctx.workspace.ref)
+    raise error
+
+
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[SpritesSandbox(), Coder(), hooks])
+```
 
 ## Configuration
 
@@ -134,16 +158,17 @@ Under [Temporal](https://pydantic.dev/docs/ai/capabilities/durable_execution/tem
 import os
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
 from sprites import AsyncSpritesClient
 
 
 async def run_worker() -> None:
     async with AsyncSpritesClient(token=os.environ['SPRITE_TOKEN']) as client:
-        agent = Agent('anthropic:claude-opus-5-5', capabilities=[SpritesSandbox(client=client), Coder()])
+        agent = Agent('anthropic:claude-opus-5-5', capabilities=[SpritesSandbox(client=client)])
         ...  # wrap `agent` for Temporal and start the worker
 ```
+
+`Coder`, `Shell`, and `FileSystem` work under DBOS, but not yet under Temporal or Prefect.
 
 See [Workspaces: Durable execution](https://pydantic.dev/docs/ai/core-concepts/workspace/#durable-execution) for how workspaces work under durable engines.
 
