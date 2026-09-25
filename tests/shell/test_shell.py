@@ -1433,7 +1433,7 @@ class TestStopEscalation:
         command_id = _parse_command_id(start)
         with anyio.fail_after(10):
             while not ready.exists() or not ready.read_text().strip():
-                await anyio.sleep(0.01)
+                await anyio.sleep(0.01)  # pragma: lax no cover
         pid = int(ready.read_text())
         with patch('pydantic_ai_harness.shell._jobs._KILL_GRACE_PERIOD', 0.2):
             result = await ts.stop_command(_ctx(shell_dir), command_id)
@@ -1447,7 +1447,7 @@ class TestStopEscalation:
         bg = ts._background[command_id]
         with anyio.fail_after(10):
             while (await bg.job.status())[0]:
-                await anyio.sleep(0.01)
+                await anyio.sleep(0.01)  # pragma: lax no cover
         bg.job.pgid = None
         bg.job.pid = 2**22 + 12345  # beyond any live PID, so `kill` finds no process
         await bg.job.kill()
