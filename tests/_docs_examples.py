@@ -13,11 +13,13 @@ Then it answers in text. Each run the model finishes is returned as a `ScriptedR
 `ScriptedRun.used_sandbox` says whether the tools came back with what they should have.
 
 Sandboxes a block creates keep running after it, so `run_block` passes every workspace ref
-the model saw to the provider's `cleanup`, even when the block fails.
+the model saw to the provider's `cleanup`, even when the block fails. `documented_cleanup` takes
+that cleanup from the page itself.
 """
 
 from __future__ import annotations
 
+import inspect
 import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -108,6 +110,23 @@ def run_block(
             for ref in refs:
                 anyio.run(cleanup, ref)
     return namespace, runs
+
+
+def documented_cleanup(examples: list[CodeExample], name: str) -> Callable[[WorkspaceRef], Awaitable[None]]:
+    """The async `name(ref)` a docs page defines to clean up a sandbox, to pass to `run_block`.
+
+    Cleaning up every other block's sandboxes with it checks that the documented cleanup works.
+    """
+    (example,) = [example for example in examples if f'async def {name}(' in example.source]
+    documented = run_block(example)[0][name]
+    assert callable(documented)
+
+    async def cleanup(ref: WorkspaceRef) -> None:
+        done = documented(ref)
+        assert inspect.isawaitable(done)
+        await done
+
+    return cleanup
 
 
 def _script(
