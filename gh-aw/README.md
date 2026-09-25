@@ -52,14 +52,20 @@ of the AWF api-proxy serves the request. The proxy holds the credentials, so a
 workflow supplies none. `anthropic/` is served over the Anthropic Messages API,
 because that backend forwards the request path to `api.anthropic.com` unchanged and
 does not translate Chat Completions into Messages; the other three are
-OpenAI-shaped and use Chat Completions.
+OpenAI-shaped and use Chat Completions. `copilot/` selects Pydantic AI's
+`github-copilot:` provider, which repairs Copilot response envelopes, reads
+`reasoning_text`, and selects the model family's profile. The engine retains the
+Claude dotted-alias rewrite, such as `claude-sonnet-4-5` to `claude-sonnet-4.5`.
+It sets `GITHUB_COPILOT_BASE_URL` to the discovered proxy endpoint and
+`GITHUB_COPILOT_API_KEY` to a placeholder, and removes `COPILOT_GITHUB_TOKEN`
+from the child environment. The proxy, not the agent, authenticates upstream.
+`PAI_BASE_URL` overrides still use `openai-chat:` and preserve the model ID.
 
 ## What actually runs
 
-`pai -a` takes one target and its agent-spec format cannot name harness
-capabilities, so the engine writes the composition as `gh_aw_agent.py` in a
-private directory it creates inside the sandbox, puts that directory on
-`PYTHONPATH`, and passes `-a gh_aw_agent:agent`. The CLI and its
+The engine passes `-a pydantic_ai_harness.coder:coder_agent`, the packaged
+model-less `Agent(name="coder", capabilities=[Coder()])`. It generates no agent
+module and adds no default directory to `PYTHONPATH`. The CLI and its
 dependencies are installed before the agent starts, with
 `pip install --user "pydantic-ai-harness[cli]==<engine version>"
 "pydantic-ai-slim[anthropic,openai,mcp,spec]>=2.44.0"`. The pinned harness version is
@@ -67,7 +73,8 @@ dependencies are installed before the agent starts, with
 refuses a pull request whose pin is not on PyPI. `pai --mcp-config` arrived in 2.36.0;
 the floor is 2.44.0 because that is where `Agent.from_spec()` stopped requiring a
 `model:`, which is what lets a `PAI_AGENT` spec omit one. The `anthropic` extra is what
-an `anthropic/` model runs on.
+an `anthropic/` model runs on. The existing 2.44.0 floor also includes
+`GitHubCopilotProvider`; no dependency bump is needed.
 
 The CLI itself is started by the interpreter that owns that install, which imports
 the agent target and then runs `pydantic_ai` as `__main__`, rather than by spawning
@@ -75,8 +82,8 @@ the agent target and then runs `pydantic_ai` as `__main__`, rather than by spawn
 runs it. Two things follow. An agent that raises on import fails the step with its
 traceback, instead of the single line `pai` prints for a failed `-a` load. And
 `load_agent`, which prepends the checkout to `sys.path` before it resolves the
-target, finds the module already in `sys.modules`, so a repository file named
-`gh_aw_agent.py` cannot stand in for the generated one. That insert still applies to
+target, finds the installed module already in `sys.modules`, so a repository
+package cannot replace the default agent during target loading. That insert still applies to
 everything imported after it, which is how the CLI behaves for all of its users.
 
 MCP servers arrive as `${RUNNER_TEMP}/gh-aw/mcp-config/mcp-servers.json` in the
@@ -90,7 +97,7 @@ that file in the `Start MCP Gateway` step on the host runner, next to the file t
 built-in Claude engine gets, and the agent step mounts `${RUNNER_TEMP}/gh-aw`
 read-only.
 
-Neither file is in the checkout, and that is deliberate. A file committed at a path
+The MCP config is not in the checkout, and that is deliberate. A file committed at a path
 the engine reads is repository-controlled input to a process that runs with the
 gateway's credentials: an MCP config could name a stdio server for the CLI to spawn,
 and a package under a directory the engine puts on `PYTHONPATH` would shadow an
@@ -258,15 +265,36 @@ configure no endpoint.
 
 ## gh-aw compatibility
 
-This definition requires the gh-aw action/runtime at
-[v0.86.3](https://github.com/github/gh-aw/releases/tag/v0.86.3) or newer. Its
-endpoint discovery uses `deriveBaseUrlFromModelsURL`, which that release exports for
-converting the reflected `/models` URL into the chat-completions base URL while
-preserving the firewall host bridge.
+This definition requires gh-aw CLI and action/runtime
+[v0.89.0](https://github.com/github/gh-aw/releases/tag/v0.89.0) or newer.
+It declares `engine.detection-engine: copilot`; v0.88.x rejects that key during
+compilation. Endpoint discovery also uses `deriveBaseUrlFromModelsURL`, available
+since v0.86.3.
 
 Existing workflows must be recompiled with a compatible gh-aw pin and have their
 generated lockfile committed. Installing a newer `gh aw` CLI locally does not alter
 an already committed lockfile or the action/runtime it pins.
+
+## Threat detection
+
+The engine declares `detection-engine: copilot`, so safe-output threat detection
+runs on the built-in Copilot engine, separately from the Pydantic AI agent. Supply
+that engine's `COPILOT_GITHUB_TOKEN` credential even when the agent uses another
+provider. Without an explicit detection engine, gh-aw v0.89.0 falls back to Copilot
+for custom engines and emits a compile-time warning. This declaration avoids that
+fallback warning; it does not disable detection.
+
+To disable AI analysis while retaining the detection job's other processing, set:
+
+```yaml
+safe-outputs:
+  threat-detection:
+    engine: false
+```
+
+Recompile workflows after upgrading. A demo that previously used this opt-out can
+remove it once both compilation and runtime use v0.89.0 or newer and the Copilot
+credential is configured.
 
 ## Pointing the engine at your own endpoint
 
