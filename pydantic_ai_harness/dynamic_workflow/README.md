@@ -460,10 +460,11 @@ worth knowing where the edges are:
 
 - No third-party libraries.
 - Importable standard-library modules include `sys`, `typing`, `asyncio`, `math`, `json`, `re`,
-  `unicodedata`, `datetime`, `os`, and `pathlib`. Import what you use. Filesystem, environment, and
-  clock operations are not configured for workflow scripts.
-- No wall-clock or timing primitives. There is no `asyncio.sleep`, no
-  `datetime.datetime.now()`, no `datetime.date.today()`, and no `time` module.
+  `unicodedata`, `datetime`, `time`, `random`, `os`, and `pathlib`. Import what you use.
+  Filesystem, environment, and clock operations are not configured for workflow scripts.
+- No clock or randomness: `datetime.datetime.now()`, `datetime.date.today()`, `time.time()`, and
+  unseeded `random` fail. `time.sleep` and `asyncio.sleep` really wait; with `max_duration_secs` set,
+  a script may sleep for at most that long in total.
 - `asyncio.gather(...)` runs sub-agents concurrently with positional awaitables but no keyword
   arguments, including `return_exceptions=True`. Other task creation and wait APIs are unavailable.
 

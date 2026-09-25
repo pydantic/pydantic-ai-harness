@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import inspect
 import keyword
 import math
@@ -35,7 +34,7 @@ from pydantic_ai.tool_manager import ParallelExecutionMode, ToolManager
 from pydantic_ai.tools import AgentDepsT, ToolDenied, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
 from pydantic_core import PydanticSerializationError, to_json, to_jsonable_python
-from typing_extensions import NotRequired, Self, TypedDict
+from typing_extensions import NotRequired, Self, TypedDict, TypeIs
 
 try:
     from pydantic_ai.toolsets._tool_search import _SEARCH_TOOLS_NAME  # pyright: ignore[reportPrivateUsage]
@@ -51,6 +50,7 @@ try:
         MontyTypingError,
         MountDir,
         OsFunction,
+        OsHandler,
         ResourceLimits,
     )
 except ImportError as _import_error:  # pragma: no cover
@@ -64,15 +64,16 @@ from pydantic_ai_harness._monty_exec import (
     in_temporal_workflow,
     is_sandbox_panic,
 )
+from pydantic_ai_harness._warn import HarnessDeprecationWarning
 
 if TYPE_CHECKING:
     from pydantic_ai_harness.code_mode._speculation import SpeculationCoordinator
 
-# A raw OS callback. Return `pydantic_monty.NOT_HANDLED` to defer the call to the
-# sandbox's default, which leaves it unavailable.
+# Deprecated: a positional `(name, args, kwargs)` OS callback. Pass Monty's keyword-only `OsHandler`
+# instead; this form is still accepted and will be removed in the next breaking release.
 CodeModeOSCallback = Callable[[OsFunction, tuple[object, ...], dict[str, object]], object]
-# Accepted by `CodeMode.os_access`: a ready-made OS implementation or a raw callback.
-CodeModeOS = AbstractOS | CodeModeOSCallback
+# Accepted by `CodeMode.os_access`: a ready-made OS implementation or a handler that decides each call.
+CodeModeOS = AbstractOS | OsHandler | CodeModeOSCallback
 # Accepted by `CodeMode.mount`: one or more host-directory mounts.
 CodeModeMount = MountDir | list[MountDir]
 
@@ -105,6 +106,56 @@ def _check_monty_sandbox_url(url: str) -> None:
         raise UserError(f'`monty_sandbox_url` must be a `ws://` or `wss://` URL, not scheme {scheme!r}.')
 
 
+def _is_os_handler(os_access: CodeModeOS) -> TypeIs[AbstractOS | OsHandler]:
+    """Whether `os_access` takes Monty's keyword call, rather than the deprecated positional one.
+
+    Only a callable that takes `(name, args, kwargs)` positionally and cannot take Monty's keyword
+    call counts as positional. Anything else is passed to Monty unchanged, so a malformed handler
+    gets Monty's own error rather than a deprecation warning.
+    """
+    if isinstance(os_access, AbstractOS):
+        return True
+    try:
+        signature = inspect.signature(os_access)
+    except (TypeError, ValueError):  # pragma: no cover - builtins and some C callables have no signature
+        return True
+    return not (
+        _binds(signature, 'os.getenv', (), {})
+        and not _binds(signature, name='os.getenv', args=(), kwargs={}, is_async=False)
+    )
+
+
+def _binds(signature: inspect.Signature, *args: object, **kwargs: object) -> bool:
+    try:
+        signature.bind(*args, **kwargs)
+    except TypeError:
+        return False
+    return True
+
+
+def as_os_handler(os_access: CodeModeOS | None) -> AbstractOS | OsHandler | None:
+    """Return `os_access` in the keyword-only shape Monty calls, warning once for the positional form.
+
+    Called from the `__post_init__` of the dataclasses that take `os_access`, which store the result:
+    their per-run copies re-run `__post_init__` and then see a handler that needs no warning.
+    """
+    if os_access is None or _is_os_handler(os_access):
+        return os_access
+    warnings.warn(
+        'A positional `os_access(name, args, kwargs)` callback is deprecated. Accept keyword arguments '
+        'instead, as `pydantic_monty.OsHandler` does: `def handler(*, name, args, kwargs, **_): ...`. '
+        'The positional form will be removed in the next breaking release.',
+        category=HarnessDeprecationWarning,
+        stacklevel=4,  # this function, `__post_init__`, the dataclass `__init__`, then the caller
+    )
+    callback: Callable[..., object] = os_access
+
+    def handler(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> object:
+        return callback(name, args, kwargs)
+
+    return handler
+
+
 def in_durable_execution(ctx: RunContext[object]) -> bool:
     """Whether a durable executor is active, where streamed execution tiers must stay disabled."""
     return any(
@@ -122,8 +173,8 @@ def _exhausted_sandbox_limit(error: MontyRuntimeError) -> str | None:
     This gates the started-call summary, so it deliberately errs toward inclusion and matches on
     Monty's wording alone. A nested tool that fails with one of these phrases in its own message is
     misread, and that costs nothing: the summary only states which calls really started, which is
-    true regardless of why the snippet ended. The restart guidance cannot afford the same
-    looseness and uses `_is_duration_exhausted` instead.
+    true regardless of why the snippet ended. The session reset cannot afford the same looseness
+    and uses `_is_duration_exhausted` instead.
     """
     message = error.display(format='msg')
     for limit, marker in _SANDBOX_LIMIT_MARKERS.items():
@@ -133,10 +184,10 @@ def _exhausted_sandbox_limit(error: MontyRuntimeError) -> str | None:
 
 
 def _is_duration_exhausted(error: MontyRuntimeError) -> bool:
-    """Whether this runtime error is Monty's spent `max_duration_secs` allowance.
+    """Whether this runtime error is Monty stopping the snippet at `max_duration_secs`.
 
-    Stricter than `_exhausted_sandbox_limit` because it gates advice to restart, and a wrong
-    restart discards REPL state the session could still use. A missed one only costs the hint.
+    Stricter than `_exhausted_sandbox_limit` because it gates a session reset, and a wrong reset
+    discards REPL state the session could still use.
 
     The empty traceback is the structural signal: the duration limit interrupts execution rather
     than failing at a particular operation, and Monty attaches no frame to it, measured at top
@@ -149,8 +200,8 @@ def _is_duration_exhausted(error: MontyRuntimeError) -> bool:
     carries a frame from the allocation that tripped it. Keeping both means neither has to be
     sound alone.
 
-    Callers must read `False` as "add nothing", not as "not a timeout". A miss leaves the ordinary
-    runtime-error message intact, which is the behaviour that shipped before the hint existed.
+    Callers must read `False` as "not known to be a timeout". A miss keeps the session and the
+    ordinary runtime-error message.
     """
     return not error.traceback() and _exhausted_sandbox_limit(error) == 'max_duration_secs'
 
@@ -238,14 +289,13 @@ def _describe_started_calls(calls: dict[str, ToolCallPart], returns: dict[str, T
 
 
 class CodeModeResourceLimits(TypedDict, total=False):
-    """Caps on the sandbox code executed by `run_code`.
-
-    Monty enforces these per session. Consecutive `run_code` calls therefore share one duration
-    allowance, and anything that resets the session starts a fresh one, so the bound that holds
-    throughout is per snippet: no single snippet runs longer than `max_duration_secs`.
-    """
+    """Caps on the sandbox code executed by `run_code`."""
 
     max_duration_secs: float
+    """Sandbox execution time allowed to each `run_code` snippet; time awaiting tools does not count.
+
+    Sleeping is not execution time, so each snippet may also sleep for up to this long in total.
+    """
     max_memory: int
     max_suspensions: int
     """Cumulative host-interaction budget per session, not a per-snippet tool-call count.
@@ -278,7 +328,7 @@ def _resolve_resource_limits(
         # make the original run and replay take different branches, which Temporal cannot record.
         max_duration_secs = None
     return {
-        'max_duration_secs': max_duration_secs,
+        'max_feed_duration_secs': max_duration_secs,
         'max_memory': max_memory,
         'max_suspensions': max_suspensions,
     }
@@ -366,22 +416,21 @@ The sandbox uses Monty, a subset of Python. Key restrictions:
 # a `mount` only exposes filesystem paths, while environment and clock calls
 # require an `os` handler.
 _NO_OS_RESTRICTION = (
-    '- **No filesystem, environment, or timing primitives**: `pathlib.Path` I/O, '
-    '`os.getenv`/`os.environ`, `datetime.datetime.now()`, `datetime.date.today()`, `asyncio.sleep`, '
-    'and the `time` module are unavailable here (no filesystem mount or OS handler is configured). '
-    '`os` and `pathlib` import successfully, but their I/O operations are not supported in this '
-    'configuration.'
+    '- **No filesystem, environment, or clock**: `pathlib.Path` I/O, `os.getenv`/`os.environ`, '
+    '`datetime.datetime.now()`, `datetime.date.today()`, and `time.time()` are unavailable here '
+    '(no filesystem mount or OS handler is configured). `os` and `pathlib` import successfully, but '
+    'their I/O operations are not supported in this configuration. `time.sleep` and `asyncio.sleep` really wait.'
 )
 _MOUNT_ONLY_NOTE = (
     '- **Mounted filesystem access**: `pathlib.Path` operations under the configured mount '
     'point(s) are routed to the host. `os.getenv`/`os.environ`, `datetime.datetime.now()`, '
-    '`datetime.date.today()`, `asyncio.sleep`, and the `time` module remain unavailable.'
+    '`datetime.date.today()`, and `time.time()` remain unavailable. `time.sleep` and `asyncio.sleep` really wait.'
 )
 _OS_ENABLED_NOTE = (
     '- **Configured OS access**: `pathlib.Path` operations, `os.getenv`/`os.environ`, '
-    '`datetime.datetime.now()`, and `datetime.date.today()` are routed to the OS handler '
-    'configured for this agent (availability depends on that configuration). `asyncio.sleep` and '
-    'the `time` module remain unavailable.'
+    '`datetime.datetime.now()`, `datetime.date.today()`, and `time.time()` are routed to the OS '
+    'handler configured for this agent (availability depends on that configuration). '
+    '`time.sleep` and `asyncio.sleep` really wait.'
 )
 _MOUNT_LIFETIME_NOTE = (
     "- **Mount write lifetime**: writes through a `mode='overlay'` mount last only for the current "
@@ -704,14 +753,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     """
 
     resource_limits: CodeModeResourceLimits | Literal['unlimited'] | None = field(default=None, kw_only=True)
-    """Sandbox execution limits, applied per Monty session.
+    """Sandbox execution limits.
 
-    `None` applies a 30-second execution and 256 MiB heap backstop. The guarantee is per snippet:
-    no single `run_code` snippet runs longer than `max_duration_secs`. It is not a run-wide budget,
-    since consecutive calls share one session allowance and any reset of the session (`restart:
-    true`, a crash, a type error, a host-side failure) starts a fresh one. `'unlimited'` removes
-    the time and memory caps, but Monty's finite suspension budget still applies. Set
-    `max_suspensions` to bound cumulative host interactions across consecutive snippets.
+    `None` applies a 30-second execution and 256 MiB heap backstop. `max_duration_secs` is per
+    snippet: no single `run_code` snippet runs longer than it, and it is not a run-wide budget.
+    `'unlimited'` removes the time and memory caps, but Monty's finite suspension budget still
+    applies. Set `max_suspensions` to bound cumulative host interactions across consecutive snippets.
     """
 
     os_access: CodeModeOS | None = None
@@ -763,6 +810,10 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     # Tracks deferred-tool names we've already warned about so we don't spam the
     # logs every step. Reset on `for_run` because each run gets a fresh instance.
     _warned_deferred: set[str] = field(default_factory=set[str], init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # Converted once here, so the copies `for_run` and `for_run_step` make do not warn again.
+        self.os_access = as_os_handler(self.os_access)
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
         """Return a fresh toolset instance with isolated REPL state for this agent run."""
@@ -1078,11 +1129,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             return f'\n\n{_describe_started_calls(execution.nested_calls, execution.nested_returns)}'
 
         in_workflow = in_temporal_workflow(ctx)
+        limits = _resolve_resource_limits(self.resource_limits, in_temporal_workflow=in_workflow)
         try:
             session = await run_state.get_session(
                 type_check=type_check,
                 type_check_stubs=type_check_stubs,
-                limits=_resolve_resource_limits(self.resource_limits, in_temporal_workflow=in_workflow),
+                limits=limits,
                 in_temporal_workflow=in_workflow,
             )
             try:
@@ -1092,13 +1144,16 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                     sequential_names=sequential_tools,
                     global_sequential=global_sequential,
                     portal=run_state.portal,
+                    # The configured limit, kept inside a Temporal workflow too: Monty's elapsed-time
+                    # check is dropped there for replay, but sleeps are charged what they request.
+                    max_sleep_secs=_resolve_resource_limits(self.resource_limits).get('max_feed_duration_secs'),
                 ).run(
                     partial(
                         session.feed_start,
                         code,
                         print_callback=capture.callback,
-                        # Monty calls OS handlers from its own thread; run them in the caller's context.
-                        os=None if self.os_access is None else partial(contextvars.copy_context().run, self.os_access),
+                        # Already converted in `__post_init__`; this narrows the field's type.
+                        os=as_os_handler(self.os_access),
                         mount=self.mount,
                         skip_type_check=not type_check,
                     )
@@ -1139,19 +1194,17 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 # calls already started. Without them the model reruns their side effects when
                 # it retries. Asking which limit tripped, rather than testing one flag per limit,
                 # is what keeps a newly added limit from quietly losing this. It matters most on
-                # the duration path, where the advice is to restart, which discards the REPL state
-                # the model would otherwise reconstruct from.
+                # the duration path, which resets the session and with it the REPL state the model
+                # would otherwise reconstruct from.
                 message += started_calls()
             if duration_spent:
-                # This error keeps the session, so every later call fails on arrival too. Left
-                # alone it reads like an ordinary runtime error, which points the model at
-                # rewriting the snippet -- the one move that cannot work.
+                # The limit stops the sandbox mid-operation, and Monty makes no promise about the
+                # heap it leaves behind, so the session is discarded rather than fed again.
+                await run_state.reset()
                 message += (
-                    '\n\nThe sandbox session has spent its whole `max_duration_secs` allowance, '
-                    'which every `run_code` call in the session shares, so later calls fail on '
-                    'arrival too and revising this code will not help. Pass `restart: true` to '
-                    'start a fresh session; that discards REPL state, so recreate anything you '
-                    'still need.'
+                    '\n\nThe code ran longer than `max_duration_secs` and was stopped, so the '
+                    'session was reset. Re-run any imports, recreate any state you need, and make '
+                    'the code do less work per call.'
                 )
             if isinstance(e.exception(), RuntimeError) and re.fullmatch(
                 r'suspension limit [0-9]+ exceeded', e.display(format='msg')
@@ -1340,7 +1393,7 @@ def _model_safe_result(value: object) -> object:
     """Render the parts of a snippet's result that have no JSON form as their `repr`.
 
     Monty hands some sandbox values back as host objects: `type(x)` and `ValueError` arrive
-    as `type` objects, `len` as a builtin function, a bare exception instance as itself.
+    as `type` objects, `len` as a `MontyStdTypeProxy`, a bare exception instance as itself.
     None of them serialize, so the tool return would abort the run in whichever layer
     renders it first (`ToolOutputLimits`, or pydantic-ai building the model request). The
     `repr` is what the snippet's author would have seen in a Python REPL. Non-finite floats

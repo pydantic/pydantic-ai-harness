@@ -66,7 +66,7 @@ from pydantic_core import SchemaValidator, core_schema
 from pydantic_monty import NOT_HANDLED, AsyncMonty, MountDir, OSAccess, OsFunction
 from typing_extensions import Never, TypedDict
 
-from pydantic_ai_harness import CodeMode, ToolOutputLimits
+from pydantic_ai_harness import CodeMode, HarnessDeprecationWarning, ToolOutputLimits
 from pydantic_ai_harness.code_mode import CodeModeResourceLimits, CodeModeToolset
 from pydantic_ai_harness.code_mode._capability import (
     _extract_discovered_names,  # pyright: ignore[reportPrivateUsage]
@@ -639,7 +639,7 @@ class TestCodeMode:
         ('code', 'expected'),
         [
             pytest.param("type('a')", "<class 'str'>", id='type'),
-            pytest.param('len', '<built-in function len>', id='builtin'),
+            pytest.param('len', "MontyStdTypeProxy(kind='function', name='len')", id='builtin'),
             pytest.param("ValueError('boom')", "ValueError('boom')", id='exception'),
             pytest.param('...', 'Ellipsis', id='ellipsis'),
             pytest.param("[float('nan'), float('-inf'), 1.5]", ['nan', '-inf', 1.5], id='non-finite-float'),
@@ -909,13 +909,13 @@ class TestCodeMode:
         with pytest.raises(UserError, match='`max_suspensions` must be at least 1'):
             await wrapper.__aenter__()
 
-    async def test_duration_exhaustion_points_at_restart(self) -> None:
-        """A spent duration allowance tells the model to restart, not to rewrite the snippet.
+    async def test_duration_exhaustion_resets_the_session(self) -> None:
+        """A snippet stopped at `max_duration_secs` resets the session and tells the model so.
 
-        The allowance is per session and this error keeps the session, so every later call fails
-        on arrival; only `restart: true` recovers it. Detection matches Monty's rendered timeout
-        text, so this drives a real exhausted session rather than a fixed string: if Monty rewords
-        the message, this test fails instead of the hint quietly disappearing.
+        Monty leaves no guarantees about a heap a time limit interrupted, so the session is not fed
+        again. Detection matches Monty's rendered timeout text, so this drives a real timeout rather
+        than a fixed string: if Monty rewords the message, this test fails instead of the reset
+        quietly disappearing.
         """
         wrapper = CodeMode[object](resource_limits={'max_duration_secs': 0.3}).get_wrapper_toolset(
             _build_function_toolset(add)
@@ -923,27 +923,25 @@ class TestCodeMode:
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
+        await wrapper.call_tool('run_code', {'code': 'saved = 42'}, ctx, tools['run_code'])
         spend_it = 'y = 0\nfor i in range(100_000_000):\n    y += i\ny'
 
         with pytest.raises(ModelRetry) as exc_info:
             await wrapper.call_tool('run_code', {'code': spend_it}, ctx, tools['run_code'])
-        assert '`restart: true`' in exc_info.value.message
+        assert 'the session was reset' in exc_info.value.message
 
-        # The session is kept, so a later trivial snippet fails on arrival and needs the same hint.
-        with pytest.raises(ModelRetry) as later:
-            await wrapper.call_tool('run_code', {'code': '1 + 1'}, ctx, tools['run_code'])
-        assert '`restart: true`' in later.value.message
-
-        # And restarting really does clear it, which is what the hint promises.
-        result = await wrapper.call_tool('run_code', {'code': '1 + 1', 'restart': True}, ctx, tools['run_code'])
+        # The next snippet runs in a fresh session with a full allowance, and the old state is gone.
+        result = await wrapper.call_tool('run_code', {'code': '1 + 1'}, ctx, tools['run_code'])
         assert result.return_value == 2
+        with pytest.raises(ModelRetry, match="name 'saved' is not defined"):
+            await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
 
     async def test_tool_error_resembling_a_timeout_is_not_treated_as_exhaustion(self) -> None:
-        """A nested tool failing with the sandbox's timeout wording must not trigger the hint.
+        """A nested tool failing with the sandbox's timeout wording must not reset the session.
 
         Monty re-raises a tool's exception at the sandbox call site keeping its message, so text
-        alone cannot tell the two apart. A false positive is worse than a miss here: it tells the
-        model to restart, discarding REPL state the session is still perfectly able to use.
+        alone cannot tell the two apart. A false positive is worse than a miss here: it discards
+        REPL state the session is still perfectly able to use.
         """
 
         def boom() -> str:
@@ -961,17 +959,17 @@ class TestCodeMode:
         with pytest.raises(ModelRetry) as exc_info:
             await wrapper.call_tool('run_code', {'code': 'await boom()'}, ctx, tools['run_code'])
         assert 'time limit exceeded' in exc_info.value.message
-        assert 'restart' not in exc_info.value.message
+        assert 'session was reset' not in exc_info.value.message
 
         # The session was never exhausted, so its REPL state is still there to use.
         kept = await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
         assert kept.return_value == 42
 
     async def test_duration_exhaustion_reports_calls_already_made(self) -> None:
-        """Restarting discards REPL state, so the retry has to say what already ran.
+        """A timeout resets the session, so the retry has to say what already ran.
 
-        Otherwise the advice is to throw away the only record of the work while giving the model
-        nothing to reconstruct it from.
+        Otherwise the reset throws away the only record of the work while giving the model nothing
+        to reconstruct it from.
         """
         wrapper = CodeMode[object](resource_limits={'max_duration_secs': 0.3}).get_wrapper_toolset(
             _build_function_toolset(add)
@@ -989,15 +987,15 @@ class TestCodeMode:
             )
 
         message = exc_info.value.message
-        assert '`restart: true`' in message
+        assert 'the session was reset' in message
         assert '1 nested tool calls started' in message
         assert "add({'a': 1, 'b': 2}) returned 3" in message
 
-    async def test_memory_exhaustion_reports_calls_without_advising_restart(self) -> None:
-        """Exceeding `max_memory` reports what already ran, but is not a reason to restart.
+    async def test_memory_exhaustion_reports_calls_without_resetting(self) -> None:
+        """Exceeding `max_memory` reports what already ran, but keeps the session.
 
-        The session still has its duration allowance and later calls work, so the restart advice
-        would be wrong here even though the summary is just as necessary.
+        The allocation failed at a known point and later calls work, so a reset would discard
+        usable state even though the summary is just as necessary.
         """
         wrapper = CodeMode[object](resource_limits={'max_memory': 8 * 1024 * 1024}).get_wrapper_toolset(
             _build_function_toolset(add)
@@ -1017,7 +1015,7 @@ class TestCodeMode:
         message = exc_info.value.message
         assert 'memory limit exceeded' in message
         assert "add({'a': 1, 'b': 2}) returned 3" in message
-        assert 'restart' not in message
+        assert 'session was reset' not in message
 
     async def test_every_resource_limit_reports_started_calls_when_exhausted(self) -> None:
         """Exhausting any option a caller can set still reports the calls that already ran.
@@ -3687,7 +3685,7 @@ class TestDynamicCatalog:
         assert result.output == 'got 7'
 
 
-def _unused_os_callback(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+def _unused_os_callback(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
     """An `os` callback for tests that only assert description/forwarding, never run code."""
     return NOT_HANDLED  # pragma: no cover - never invoked by these tests
 
@@ -3702,7 +3700,7 @@ class TestCodeModeOSAccess:
         assert isinstance(wrapper, CodeModeToolset)
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
         assert description is not None
-        assert 'No filesystem, environment, or timing primitives' in description
+        assert 'No filesystem, environment, or clock' in description
         assert 'their I/O operations are not supported in this configuration' in description
 
     async def test_description_with_os_callback_notes_host_access(self) -> None:
@@ -3742,8 +3740,8 @@ class TestCodeModeOSAccess:
         """The `os` captured at `feed_start` answers OS-call snapshots via `resume_auto()`,
         so OS calls still dispatch after a tool-call suspend/resume round-trip."""
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-            if fn == 'os.getenv':
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            if name == 'os.getenv':
                 return 'envval'
             return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
 
@@ -3761,8 +3759,8 @@ class TestCodeModeOSAccess:
         """`os` is supplied on every `feed_start`, so OS access still works on a later
         `run_code` call that reuses the persisted (non-fresh) REPL."""
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-            if fn == 'os.getenv':
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            if name == 'os.getenv':
                 return 'persisted'
             return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
 
@@ -3780,7 +3778,7 @@ class TestCodeModeOSAccess:
         """Monty calls OS handlers from its own thread; they still see the run's contextvars."""
         run_value: contextvars.ContextVar[str] = contextvars.ContextVar('run_value', default='unset')
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
             return run_value.get()
 
         wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
@@ -3790,6 +3788,142 @@ class TestCodeModeOSAccess:
         run_value.set('from the run')
         result = await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('A')"}, ctx, tools['run_code'])
         assert result.return_value == 'from the run'
+
+    @pytest.mark.parametrize(
+        'code',
+        [
+            pytest.param('import datetime\ndatetime.datetime.now()', id='datetime'),
+            pytest.param('import time\ntime.time()', id='time'),
+            pytest.param('import random\nrandom.random()', id='random'),
+        ],
+    )
+    async def test_clock_and_entropy_need_os_access(self, code: str) -> None:
+        """Without `os_access` sandbox code has no clock or entropy, so a replay sees the same run."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        with pytest.raises(ModelRetry, match='is not supported in this environment'):
+            await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+
+    async def test_os_callback_answers_the_clock(self) -> None:
+        seen: list[str] = []
+
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            seen.append(name)
+            return 1_000_000.0
+
+        wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        result = await wrapper.call_tool('run_code', {'code': 'import time\ntime.time()'}, ctx, tools['run_code'])
+        assert result.return_value == 1_000_000.0
+        assert seen == ['time.time']
+
+    @pytest.mark.parametrize(
+        'code',
+        [
+            pytest.param('import time\ntime.sleep(0.01)', id='time.sleep'),
+            pytest.param('import asyncio\nawait asyncio.sleep(0.01)', id='asyncio.sleep'),
+        ],
+    )
+    async def test_sleep_is_not_routed_to_os_access(self, code: str) -> None:
+        """The harness waits for sleeps itself, so they never reach `os_access`, where `OSAccess` would
+        sleep outside the `max_duration_secs` allowance."""
+        seen: list[str] = []
+
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            seen.append(name)  # pragma: no cover
+
+        wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        result = await wrapper.call_tool('run_code', {'code': f'{code}\n"awake"'}, ctx, tools['run_code'])
+        assert result.return_value == 'awake'
+        assert seen == []
+
+    async def test_sleeps_are_charged_to_max_duration_secs(self) -> None:
+        """Sleep time is outside Monty's execution-time limit, so it gets the same allowance separately.
+
+        The over-long sleep fails before waiting, and the session survives it: it is an ordinary
+        exception in the sandbox, not Monty's time limit.
+        """
+        wrapper = CodeMode[object](resource_limits={'max_duration_secs': 1}).get_wrapper_toolset(
+            _build_function_toolset(add)
+        )
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        run_code = tools['run_code']
+
+        await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, run_code)
+        with pytest.raises(ModelRetry, match=r'TimeoutError: sleeping 5s would exceed the 1s this code may sleep'):
+            await wrapper.call_tool('run_code', {'code': 'import time\ntime.sleep(5)'}, ctx, run_code)
+        result = await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
+        assert result.return_value == 1
+
+    async def test_os_access_answers_unseeded_random(self) -> None:
+        wrapper = CodeMode[object](os_access=OSAccess()).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = 'import random\nx = random.random()\n0 <= x < 1'
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value is True
+
+    async def test_async_os_handler_is_awaited(self) -> None:
+        async def os_handler(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            await asyncio.sleep(0)
+            return f'{name}{args}'
+
+        wrapper = CodeMode[object](os_access=os_handler).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        result = await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('A')"}, ctx, tools['run_code'])
+        assert result.return_value == "os.getenv('A', None)"
+
+    async def test_positional_os_callback_is_deprecated_but_still_works(self) -> None:
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            return f'positional {fn}'
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            returns = [p for m in messages for p in m.parts if isinstance(p, ToolReturnPart)]
+            if returns:
+                return ModelResponse(parts=[TextPart(str(returns[-1].content))])
+            return ModelResponse(parts=[ToolCallPart('run_code', {'code': "import os\nos.getenv('A')"})])
+
+        with pytest.warns(HarnessDeprecationWarning, match='positional `os_access') as caught:
+            agent = Agent(FunctionModel(model_fn), capabilities=[CodeMode(os_access=os_cb, dynamic_catalog=True)])
+            # Two runs: the per-run copies must not warn again.
+            first = await agent.run('go')
+            await agent.run('go')
+        deprecations = [w for w in caught if issubclass(w.category, HarnessDeprecationWarning)]
+        assert len(deprecations) == 1
+        assert deprecations[0].filename == __file__
+        assert 'positional os.getenv' in first.output
+
+        with pytest.warns(HarnessDeprecationWarning, match='positional `os_access'):
+            CodeModeToolset[object](wrapped=_build_function_toolset(add), os_access=os_cb)
+
+    async def test_keyword_os_callback_missing_is_async_is_not_taken_as_positional(self) -> None:
+        """A keyword-only handler that forgot `is_async` is a broken handler, not the deprecated positional
+        form: it gets Monty's error about the missing argument, without a deprecation warning."""
+
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            return 'unreachable'  # pragma: no cover
+
+        # Deliberately malformed: type checkers reject it too.
+        wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(  # pyright: ignore[reportArgumentType]
+            _build_function_toolset(add)
+        )
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        with pytest.raises(ModelRetry, match='is_async'):
+            await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('X')"}, ctx, tools['run_code'])
 
     async def test_abstract_os_instance_dispatches_inside_run_code(self) -> None:
         """An `AbstractOS` instance is accepted as the `os` value and dispatches OS calls."""
@@ -3806,7 +3940,7 @@ class TestCodeModeOSAccess:
         """A raising `os` callback surfaces as a `ModelRetry`, like any other sandbox runtime
         error -- it must not crash the agent loop."""
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
             raise ValueError('boom from os')
 
         wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
@@ -3825,8 +3959,8 @@ class TestCodeModeOSAccess:
         """
         allowed = {'API_KEY': 'sk-xxx'}
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-            if fn == 'os.getenv':
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            if name == 'os.getenv':
                 return allowed.get(args[0])
             return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
 
@@ -3846,7 +3980,7 @@ class TestCodeModeOSAccess:
         answering `None`, and using it for a key the model expects will burn retries.
         """
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
             return NOT_HANDLED
 
         wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))

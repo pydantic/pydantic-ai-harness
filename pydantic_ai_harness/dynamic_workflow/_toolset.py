@@ -72,7 +72,8 @@ class WorkflowResourceLimits(TypedDict, total=False):
     nor a concurrent `asyncio.gather` batch, because during that wait the script is suspended on
     the host, not running sandbox code. There is no default cap. Set one to bound a pure-CPU
     `while True` loop, which would otherwise burn a core and block the event loop -- the one
-    runaway the sub-agent budgets do not catch."""
+    runaway the sub-agent budgets do not catch. Sleeping is not execution time either, so when set,
+    the script may also sleep for up to this long in total."""
 
     max_memory: int
     """Maximum sandbox memory, in bytes."""
@@ -111,7 +112,12 @@ def _resolve_resource_limits(limits: WorkflowResourceLimits | Literal['unlimited
         raise UserError(
             f'Unknown `resource_limits` key(s): {sorted(unknown)}. Valid keys are {sorted(_RESOURCE_LIMIT_KEYS)}.'
         )
-    return {**_default_resource_limits(), **limits}
+    resolved = _default_resource_limits()
+    if 'max_memory' in limits:
+        resolved['max_memory'] = limits['max_memory']
+    if 'max_duration_secs' in limits:
+        resolved['max_feed_duration_secs'] = limits['max_duration_secs']
+    return resolved
 
 
 class _WorkflowArguments(TypedDict):
@@ -140,10 +146,11 @@ done -- instead of delegating to one sub-agent at a time.
 The sandbox uses Monty, a subset of Python. Key restrictions:
 - **No third-party libraries**.
 - **Importable standard-library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`,
-  `unicodedata`, `datetime`, `os`, and `pathlib`. Import what you use at the top of the script.
-  Filesystem, environment, and clock operations are not configured for workflow scripts.
-- **No wall-clock or timing primitives** (`asyncio.sleep`, `datetime.datetime.now()`,
-  `datetime.date.today()`, the `time` module).
+  `unicodedata`, `datetime`, `time`, `random`, `os`, and `pathlib`. Import what you use at the top
+  of the script. Filesystem, environment, and clock operations are not configured for workflow
+  scripts.
+- **No clock or randomness**: `datetime.datetime.now()`, `datetime.date.today()`, `time.time()`,
+  and unseeded `random` fail. `time.sleep` and `asyncio.sleep` really wait.
 
 Each sub-agent below is an async function. Await it and pass `task` by keyword:
 `result = await reviewer(task="...")`, not `reviewer("...")`; all parameters are keyword-only. A
@@ -742,9 +749,12 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             # which does not interleave with `call_tool`), so it is a stable name registry for
             # the whole script. Sub-agents always run concurrently (the executor's defaults);
             # durable ordering (global_sequential) lands with durability.
-            completed = await MontyExecutor(dispatch=dispatch, valid_names=self._by_name, portal=monty.portal).run(
-                partial(session.feed_start, code, print_callback=capture.callback)
-            )
+            completed = await MontyExecutor(
+                dispatch=dispatch,
+                valid_names=self._by_name,
+                portal=monty.portal,
+                max_sleep_secs=limits.get('max_feed_duration_secs'),
+            ).run(partial(session.feed_start, code, print_callback=capture.callback))
         except MontyTypingError as e:
             raise ModelRetry(f'Type error in workflow:\n{capture.prepend_to(e.display())}') from e
         except MontySyntaxError as e:  # pragma: no cover -- backstop; the type checker parses first

@@ -362,10 +362,11 @@ done -- instead of delegating to one sub-agent at a time.
 The sandbox uses Monty, a subset of Python. Key restrictions:
 - **No third-party libraries**.
 - **Importable standard-library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`,
-  `unicodedata`, `datetime`, `os`, and `pathlib`. Import what you use at the top of the script.
-  Filesystem, environment, and clock operations are not configured for workflow scripts.
-- **No wall-clock or timing primitives** (`asyncio.sleep`, `datetime.datetime.now()`,
-  `datetime.date.today()`, the `time` module).
+  `unicodedata`, `datetime`, `time`, `random`, `os`, and `pathlib`. Import what you use at the top
+  of the script. Filesystem, environment, and clock operations are not configured for workflow
+  scripts.
+- **No clock or randomness**: `datetime.datetime.now()`, `datetime.date.today()`, `time.time()`,
+  and unseeded `random` fail. `time.sleep` and `asyncio.sleep` really wait.
 
 Each sub-agent below is an async function. Await it and pass `task` by keyword:
 `result = await reviewer(task="...")`, not `reviewer("...")`; all parameters are keyword-only. A
@@ -464,6 +465,26 @@ async def test_single_sub_agent_call() -> None:
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent('looks good', 'reviewer')])
     out = await _run_script(ts, "await reviewer(task='check')")
     assert out == 'looks good'
+
+
+@pytest.mark.parametrize(
+    'code',
+    [
+        pytest.param('import time\ntime.sleep(0.01)', id='time.sleep'),
+        pytest.param('import asyncio\nawait asyncio.sleep(0.01)', id='asyncio.sleep'),
+    ],
+)
+async def test_sleep_completes_without_an_os_handler(code: str) -> None:
+    """Workflows have no OS handler; the executor answers sleeps itself instead of reporting them unsupported."""
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
+    out = await _run_script(ts, f'{code}\n"awake"')
+    assert out == 'awake'
+
+
+async def test_sleeps_are_charged_to_max_duration_secs() -> None:
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], resource_limits={'max_duration_secs': 1})
+    with pytest.raises(ModelRetry, match=r'TimeoutError: sleeping 5s would exceed the 1s this code may sleep'):
+        await _run_script(ts, 'import time\ntime.sleep(5)')
 
 
 async def test_parallel_fan_out() -> None:

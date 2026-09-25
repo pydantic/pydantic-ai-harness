@@ -172,25 +172,16 @@ Reserve `print()` for supplementary logging: printed text is surfaced separately
 Printed output is limited to 10 MiB. Exceeding the limit makes `run_code` return a model retry.
 
 Sandbox execution is bounded by `resource_limits`, which defaults to 30 seconds of execution time
-and a 256 MiB heap. What this guarantees is a per-snippet ceiling: no single `run_code` snippet runs
-longer than `max_duration_secs` of sandbox time, which is what stops a runaway loop. Time spent
-awaiting a nested tool is excluded from that timer.
+and a 256 MiB heap. `max_duration_secs` applies to each `run_code` snippet: each snippet gets at most that much
+sandbox time, which is what stops a runaway loop. Time spent awaiting a nested tool is
+excluded. A snippet that hits the limit is stopped and its session is reset, so any variables,
+imports, and definitions have to be recreated. The retry `run_code` returns says so and reports the
+nested calls the snippet already made.
 
-It is not a run-wide CPU budget, and it cannot be relied on as one. Monty applies the limits per
-sandbox session, so consecutive `run_code` calls draw down one shared allowance and each new session
-starts with a full one. Sessions are replaced by `restart: true` and by the failures that reset the
-REPL: a worker crash, a type error, a host-side failure, and a syntax error before any code has run.
-Each of those renews the allowance without the model asking for a restart. An ordinary exception
-inside a snippet is not one of them.
-
-Once a session's duration allowance is spent, every later `run_code` call fails on arrival, including
-snippets that would cost almost nothing, because they reuse the same session. Rewriting the code
-does not help. `restart: true` is what recovers it, at the cost of the REPL state that session was
-holding, so any variables, imports, and definitions have to be recreated. `run_code` says as much
-in the retry it returns, and that retry also reports the nested calls the snippet already made, so
-restarting does not throw away the only record of them. The behaviour is worth knowing when
-choosing `max_duration_secs`: set it low and a long agent run will spend it on ordinary work and
-pay a restart to continue.
+Sleeping is not execution time, so it has its own allowance of the same length: a snippet may sleep
+for at most `max_duration_secs` in total. A sleep that would go past it raises `TimeoutError` in the
+sandbox without waiting, and the session is kept. The allowance still applies inside a Temporal
+workflow, where the execution-time limit is off; only `resource_limits='unlimited'` removes it.
 
 Monty also limits cumulative suspensions with `max_suspensions` (default 1,000 per session).
 External calls, OS callbacks, name lookups and future resolutions each consume this budget, so
@@ -260,8 +251,10 @@ and one combined result. Hooks on `fetch_item` and other tools called by the cod
 Hooks around `run_code` itself run only after the model has finished writing the call, so
 they cannot approve or change lines that eager mode has already run.
 
-Configured Monty resource limits still apply. Eager fragments and the remaining code share
-the same session duration and memory allowances.
+Configured Monty resource limits still apply, but `max_duration_secs` and the sleep allowance
+count per fragment: each eager fragment and the remaining code get their own, so an eager
+call can run longer in total than the same code without eager mode. Memory is shared by the
+session.
 
 Keep these limitations in mind:
 
@@ -471,7 +464,8 @@ agent = Agent(
 
 The URL points to a server that connects each WebSocket to one Monty worker, such as
 [Full Monty](https://pydantic.dev/docs/monty/commercial-support/server/). Use `wss://` unless the
-server is on a private network: the connection carries your tool results and file contents.
+server is on a network you trust. The connection carries the tool calls your agent executes and
+their results, so anyone who can intercept it can choose what your tools run.
 
 Only code execution moves to the worker. Your tools, `mount` directories, `os_access`, and `print`
 output are still handled by the agent's process, and REPL state persists across `run_code` calls
@@ -619,8 +613,8 @@ from pydantic_ai_harness import CodeMode
 allowed_env = {'API_KEY': 'sk-...'}
 
 
-def my_os(fn, args, kwargs):
-    if fn == 'os.getenv':
+def my_os(*, name, args, kwargs, **_):
+    if name == 'os.getenv':
         # Answer the call: allow-listed keys resolve, every other key reads back
         # as None -- absent, exactly like a real unset variable.
         return allowed_env.get(args[0])
@@ -630,6 +624,9 @@ def my_os(fn, args, kwargs):
 
 agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[CodeMode(os_access=my_os)])
 ```
+
+The callback takes keyword arguments and may be `async`. The older positional form, `my_os(name, args, kwargs)`,
+still works but is deprecated and will be removed in the next breaking release.
 
 Your callback's return value decides the call's fate, and the two outcomes are easy to confuse:
 
@@ -646,9 +643,9 @@ Your callback's return value decides the call's fate, and the two outcomes are e
 
 Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python subset. Key restrictions:
 
-- No third-party imports. Allowed stdlib modules: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `unicodedata`, `datetime`, `os`, `pathlib` (each must be imported before use).
+- No third-party imports. Allowed stdlib modules: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `unicodedata`, `datetime`, `time`, `random`, `os`, `pathlib` (each must be imported before use).
 - `asyncio.gather(...)` accepts positional awaitables but no keyword arguments. Other task creation and wait APIs are unavailable.
-- No wall-clock or timing primitives by default: `asyncio.sleep`, `datetime.datetime.now()`, `datetime.date.today()`, and the `time` module. `datetime.datetime.now()` / `datetime.date.today()` become available when an `os_access` handler implements them (the built-in `OSAccess` does); `asyncio.sleep` and `time` never do.
+- No clock or randomness by default: `datetime.datetime.now()`, `datetime.date.today()`, `time.time()`, and unseeded `random` fail. They become available when an `os_access` handler implements them (the built-in `OSAccess` does). `time.sleep` and `asyncio.sleep` really wait, up to the allowance described under resource limits; inside a Temporal workflow a sleep is a durable timer.
 - No `import *`.
 - Filesystem I/O needs an `os_access` handler or a `mount`; `os.getenv` / `os.environ` need an `os_access` handler.
 - Tools requiring approval or with deferred (`CallDeferred`) execution are sandboxed like any other tool; without a `HandleDeferredToolCalls` (or equivalent) capability on the agent to resolve them inline, calling one from `run_code` raises an error that surfaces to the model as a retry.
