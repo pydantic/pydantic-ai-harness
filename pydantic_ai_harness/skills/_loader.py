@@ -13,6 +13,15 @@ from pydantic_ai.workspaces import Workspace, WorkspaceFileEntry
 
 from pydantic_ai_harness._workspace import workspace_path
 
+# Imported with the module rather than on first parse: a durable engine such as Temporal parses skills in
+# workflow code, where importing a module for the first time fails the workflow task.
+try:
+    import yaml
+except ImportError as _import_error:  # pragma: no cover
+    raise ImportError(
+        'PyYAML is required to load Agent Skills. Install it with: pip install "pydantic-ai-harness[skills]"'
+    ) from _import_error
+
 # These fields affect invocation, permissions, model selection, execution, or
 # prompt rendering in clients that implement them. Skills accepts their files
 # for compatibility but reports that the behavior is not active.
@@ -85,13 +94,6 @@ def _extract_frontmatter(text: str, source: str) -> tuple[str, str]:
 
 
 def _parse_frontmatter(frontmatter: str, source: str) -> _SkillFrontmatter:
-    try:
-        import yaml
-    except ImportError:  # pragma: no cover - exercised in an environment without the skills extra
-        raise ImportError(
-            'PyYAML is required to load Agent Skills. Install it with: pip install "pydantic-ai-harness[skills]"'
-        ) from None
-
     # Agent Skills frontmatter fields are strings. BaseLoader preserves valid
     # scalar names such as `123` and `on` instead of applying YAML implicit types.
     # PyYAML otherwise also accepts duplicate mapping keys and keeps the last value.

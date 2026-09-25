@@ -78,8 +78,13 @@ At the start of every run, `Skills`:
    registers a `load_skill(name)` tool.
 
 `load_skill` returns a `# Skill: <name>` heading followed by the skill's Markdown
-body. The catalog is the same on every run over the same files, so it stays in
-the cached prefix. Edits to a library take effect on the next run.
+body, read from the workspace when the model calls it. The catalog is the same on
+every run over the same files, so it stays in the cached prefix; a new or renamed
+skill appears in it on the next run.
+
+Under a durable engine such as Temporal, the catalog is read at run start through
+the durable workspace and `load_skill` runs as an activity, so no skill file is
+read in workflow code.
 
 A run without a workspace fails at its start. To read skills from somewhere
 other than the run's workspace, such as skills shipped with your application

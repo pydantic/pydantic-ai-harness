@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import posixpath
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -157,6 +158,29 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Fail without a workspace, without touching it: the boundary waits for the first file operation."""
         require_workspace(ctx.workspace, 'FileSystem')
+
+    def file_read_tool(self, ctx: RunContext[Any], path: str, *, max_chars: int) -> str | None:
+        """`read_file`, when it reads the file at `path` and returns at most `max_chars` per call.
+
+        Implements [`FileReader`][pydantic_ai_harness.filesystem.FileReader] from configuration
+        alone. The answer is yes when `read_file` is registered, `max_read_chars` is at most
+        `max_chars`, the boundary is the working directory (no `root_dir`), and the patterns allow
+        `path`. With an explicit `root_dir` it is `None`: placing `path` in it needs the workspace.
+        """
+        del ctx
+        relative = posixpath.normpath(path)
+        if (
+            'read_file' not in self.tools
+            or self.max_read_chars is None
+            or self.max_read_chars > max_chars
+            or self.root_dir is not None
+            or posixpath.isabs(relative)
+            or relative == '..'
+            or relative.startswith('../')
+        ):
+            return None
+        toolset = self._run_toolset or self._make_toolset()
+        return 'read_file' if toolset.permits_read(relative) else None
 
     def get_toolset(self) -> FileSystemToolset[AgentDepsT] | FilteredToolset[AgentDepsT]:
         """The filesystem toolset: this run's, once `for_run` has made one."""

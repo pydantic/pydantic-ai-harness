@@ -589,6 +589,10 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             return False
         return True
 
+    def permits_read(self, path: str) -> bool:
+        """Whether the allow/deny patterns let `read_file` read `path`, given relative to the root."""
+        return self._is_accessible(path)
+
     def _walk_entry(self, scope: _Scope, path: str) -> str | None:
         """Authorize one entry of a directory walk: its root-relative path, or `None` to skip it.
 
