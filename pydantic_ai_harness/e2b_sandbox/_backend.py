@@ -98,11 +98,28 @@ def _path_error(error: Exception, path: str) -> OSError | None:
     return None
 
 
-def _file_entry(entry: e2b.EntryInfo) -> FileEntry:
-    is_dir = entry.type is e2b.FileType.DIR
+async def _file_entry(sandbox: e2b.AsyncSandbox, entry: e2b.EntryInfo) -> FileEntry:
+    """The protocol entry for `entry`, with `is_dir` and `size` following a symlink.
+
+    envd describes a symlink with the link's own size and, as `symlink_target`, the path it
+    resolves to, so a symlink entry is completed by stat-ing that target. A dangling link, which
+    envd reports with itself as the target, reads as a file with no size.
+    """
+    target: e2b.EntryInfo | None = entry
+    if entry.symlink_target is not None:
+        try:
+            target = await sandbox.files.get_info(posixpath.join(posixpath.dirname(entry.path), entry.symlink_target))
+        except e2b.FileNotFoundException:
+            target = None
+        if target is not None and target.symlink_target is not None:
+            target = None
+    is_dir = target is not None and target.type is e2b.FileType.DIR
     # A directory's reported size is an implementation detail of the underlying filesystem
     # rather than a content length, so report none for it, like the built-in backends.
-    return FileEntry(name=entry.name, path=entry.path, is_dir=is_dir, size=None if is_dir else entry.size)
+    size = None if target is None or is_dir else target.size
+    return FileEntry(
+        name=entry.name, path=entry.path, is_dir=is_dir, size=size, is_symlink=entry.symlink_target is not None
+    )
 
 
 class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
@@ -262,12 +279,14 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
 
     async def stat(self, path: str) -> FileEntry:
         async with self._sdk_errors(f'Could not stat {path!r}', path):
-            return _file_entry(await (await self.get_client()).files.get_info(path))
+            sandbox = await self.get_client()
+            return await _file_entry(sandbox, await sandbox.files.get_info(path))
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
         async with self._sdk_errors(f'Could not list {path!r}', path):
-            entries = await (await self.get_client()).files.list(path, depth=1)
-        return [_file_entry(entry) for entry in entries]
+            sandbox = await self.get_client()
+            entries = await sandbox.files.list(path, depth=1)
+            return [await _file_entry(sandbox, entry) for entry in entries]
 
     async def make_dir(self, path: str) -> None:
         async with self._sdk_errors(f'Could not create directory {path!r}', path):

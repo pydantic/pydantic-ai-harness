@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -405,6 +406,28 @@ class TestFilesystem:
             ('a.py', '/srv/a.py', False, 8),
             ('pkg', '/srv/pkg', True, None),
         ]
+
+    async def test_symlinks_report_their_target(self, fake_e2b: FakeE2B, tmp_path: Path) -> None:
+        fake_e2b.host_root = tmp_path
+        (tmp_path / 'data.txt').write_bytes(b'12345')
+        (tmp_path / 'pkg').mkdir()
+        (tmp_path / 'to-file').symlink_to('data.txt')
+        (tmp_path / 'to-dir').symlink_to('pkg')
+        (tmp_path / 'dangling').symlink_to('missing')
+        entries = await E2BSandboxBackend().list_dir(str(tmp_path))
+        assert {entry.name: (entry.is_dir, entry.size, entry.is_symlink) for entry in entries} == {
+            'dangling': (False, None, True),
+            'data.txt': (False, 5, False),
+            'pkg': (True, None, False),
+            'to-dir': (True, None, True),
+            'to-file': (False, 5, True),
+        }
+
+    async def test_symlink_whose_target_is_gone_reads_as_dangling(self, fake_e2b: FakeE2B) -> None:
+        backend = await started()
+        fake_e2b.sandboxes[0].files.symlinks['/srv/link'] = '/srv/removed'
+        entry = await backend.stat('/srv/link')
+        assert (entry.is_dir, entry.size, entry.is_symlink) == (False, None, True)
 
     async def test_remove_deletes_a_directory_tree(self, fake_e2b: FakeE2B) -> None:
         # One call covers both halves of the protocol's `remove`: E2B deletes a file or a

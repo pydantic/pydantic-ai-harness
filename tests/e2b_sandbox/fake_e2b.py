@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import posixpath
 import shutil
+import stat
 import subprocess
 import tempfile
 import types
@@ -88,6 +89,7 @@ class FakeEntryInfo:
     path: str
     type: FileType | None
     size: int
+    symlink_target: str | None = None
 
 
 class FakeCommandHandle:
@@ -210,6 +212,8 @@ class FakeFilesystem:
         self.listed: list[str] = []
         # Paths the sandbox user may not touch, the way a root-owned `/etc` refuses envd's user.
         self.denied: set[str] = set()
+        # Symlinks by path, each reported with the target a test gives it.
+        self.symlinks: dict[str, str] = {}
 
     async def read(
         self,
@@ -307,6 +311,10 @@ class FakeFilesystem:
         return path in self.files or path in self.directories
 
     def _entry(self, path: str) -> FakeEntryInfo:
+        if (target := self.symlinks.get(path)) is not None:
+            return FakeEntryInfo(
+                name=posixpath.basename(path), path=path, type=None, size=len(target), symlink_target=target
+            )
         if path in self.directories:
             return FakeEntryInfo(name=posixpath.basename(path), path=path, type=FileType.DIR, size=0)
         if path not in self.files:
@@ -518,9 +526,20 @@ class _HostFilesystem(FakeFilesystem):
             Path(path).unlink(missing_ok=True)
 
     def _host_entry(self, path: str) -> FakeEntryInfo:
-        info = Path(path).stat()
-        kind = FileType.DIR if Path(path).is_dir() else FileType.FILE
-        return FakeEntryInfo(name=posixpath.basename(path), path=path, type=kind, size=info.st_size)
+        # Like envd: the link's own size, and for a symlink the fully resolved target (the link
+        # itself when that fails) and the target's type (none when the target is missing).
+        info = Path(path).lstat()
+        kind: FileType | None = FileType.DIR if stat.S_ISDIR(info.st_mode) else FileType.FILE
+        target = None
+        if stat.S_ISLNK(info.st_mode):
+            try:
+                target = str(Path(path).resolve(strict=True))
+            except (OSError, RuntimeError):
+                target = path
+            kind = (FileType.DIR if Path(target).is_dir() else FileType.FILE) if Path(target).exists() else None
+        return FakeEntryInfo(
+            name=posixpath.basename(path), path=path, type=kind, size=info.st_size, symlink_target=target
+        )
 
 
 class FakeSandbox:
@@ -712,6 +731,9 @@ if TYPE_CHECKING:
 
         @property
         def size(self) -> int: ...
+
+        @property
+        def symlink_target(self) -> str | None: ...
 
     class _CommandHandleSurface(Protocol):
         """The `e2b.AsyncCommandHandle` members the backend reads.
