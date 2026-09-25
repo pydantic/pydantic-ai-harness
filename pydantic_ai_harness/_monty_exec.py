@@ -117,7 +117,9 @@ async def release_monty(stack: AsyncExitStack) -> None:
 
     Cancellation is delivered again at every suspension point while an enclosing cancel scope
     stays cancelled, which would abandon the session or pool exit half way and leak the worker.
-    Local exits kill worker subprocesses and remote exits are bounded by the transport's deadline.
+    The exit waits for a snippet that is still running, so it is bounded by `max_duration_secs`
+    (and, for a remote worker, the transport's per-turn deadline); Monty offers no way to
+    interrupt a running feed.
     """
     with anyio.CancelScope(shield=True):
         await stack.aclose()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import keyword
 import math
@@ -106,7 +107,7 @@ _SANDBOX_LIMIT_MARKERS = {
 
 
 def _check_monty_sandbox_url(url: str) -> None:
-    """Reject plaintext `ws://` unless the host is a loopback IP literal.
+    """Require a `ws://` or `wss://` URL, and reject plaintext `ws://` unless the host is a loopback IP literal.
 
     The WebSocket frames carry tool dispatches, mount reads, and `os_access` results, so a
     plaintext connection to a remote host would let an on-path attacker read and forge them.
@@ -115,7 +116,9 @@ def _check_monty_sandbox_url(url: str) -> None:
     resolver, not this check.
     """
     split = urlsplit(url)
-    if split.scheme != 'ws':
+    if split.scheme not in ('ws', 'wss'):
+        raise UserError(f'`monty_sandbox_url` must be a `ws://` or `wss://` URL, not scheme {split.scheme!r}.')
+    if split.scheme == 'wss':
         return
     host = split.hostname or ''
     try:
@@ -124,7 +127,7 @@ def _check_monty_sandbox_url(url: str) -> None:
     except ValueError:
         pass
     raise UserError(
-        f'`CodeMode.monty_sandbox_url` uses plaintext `ws://` for host {host!r}. '
+        f'`monty_sandbox_url` uses plaintext `ws://` for host {host!r}. '
         'Use `wss://`, or a loopback IP address such as `ws://127.0.0.1:<port>` for a local relay.'
     )
 
@@ -308,6 +311,29 @@ def _resolve_resource_limits(
     }
 
 
+# Extra time the remote transport allows on top of `max_duration_secs`, so the sandbox's own
+# limit fires first and the model sees a time-limit error rather than a dropped connection.
+_REMOTE_TURN_SLACK_SECS = 10.0
+
+
+def _remote_turn_timeout(limits: ResourceLimits) -> float | None:
+    """The WebSocket per-turn deadline for `limits`: none when execution time is unbounded."""
+    max_duration_secs = limits.get('max_duration_secs')
+    return None if max_duration_secs is None else max_duration_secs + _REMOTE_TURN_SLACK_SECS
+
+
+def _in_current_context(os_access: CodeModeOS | None) -> CodeModeOSCallback | None:
+    """Run `os_access` in the caller's context, although Monty invokes it from its own thread.
+
+    Monty's async bindings call OS handlers on a worker I/O thread, where the run's contextvars
+    (tracing spans, anything a handler reads from the current run) are not set. The sandbox is
+    suspended while a handler runs, so calls from one feed never overlap in this context.
+    """
+    if os_access is None:
+        return None
+    return partial(contextvars.copy_context().run, os_access)
+
+
 @dataclass
 class _MontyRunState:
     """Monty resources shared by every toolset view created during one agent run.
@@ -337,7 +363,11 @@ class _MontyRunState:
         if self.pool is None:
             try:
                 self.portal = open_monty_portal(self._pool_stack, in_temporal_workflow=in_temporal_workflow)
-                pool = AsyncMonty() if self.monty_sandbox_url is None else AsyncMontyWebsocket(self.monty_sandbox_url)
+                pool = (
+                    AsyncMonty()
+                    if self.monty_sandbox_url is None
+                    else AsyncMontyWebsocket(self.monty_sandbox_url, request_timeout=_remote_turn_timeout(limits))
+                )
                 self.pool = await enter_monty(self._pool_stack, pool, self.portal)
             except BaseException:
                 await self._release_pool()  # a failed spawn or dial must not leave the portal thread behind
@@ -349,10 +379,11 @@ class _MontyRunState:
 
     async def reset(self) -> None:
         """Return the current worker and make the next call start a fresh REPL."""
-        await release_monty(self._session_stack)
-        self._session_stack = AsyncExitStack()
+        # Detach before awaiting the exit, so a session checked out meanwhile is not dropped.
+        stack, self._session_stack = self._session_stack, AsyncExitStack()
         self.session = None
         self.has_executed_feed = False
+        await release_monty(stack)
 
     async def close(self) -> None:
         """Return the checked-out worker, then close the owning pool (and portal) even if that fails."""
@@ -362,10 +393,10 @@ class _MontyRunState:
             await self._release_pool()
 
     async def _release_pool(self) -> None:
-        await release_monty(self._pool_stack)
-        self._pool_stack = AsyncExitStack()
+        stack, self._pool_stack = self._pool_stack, AsyncExitStack()
         self.pool = None
         self.portal = None
+        await release_monty(stack)
 
 
 class _RunCodeArguments(TypedDict):
@@ -808,8 +839,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     """Run sandboxed code on remote Monty workers reached over this `ws://` or `wss://` URL.
 
     Only execution moves: tool dispatch, mounts, `os_access`, and print capture stay
-    host-side over the connection. Plaintext `ws://` is accepted for loopback hosts only.
-    Not available inside a Temporal workflow, whose event loop cannot service the transport.
+    host-side over the connection. Plaintext `ws://` is accepted for loopback IP literals only.
     """
 
     dynamic_catalog: bool = False
@@ -1175,7 +1205,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                         session.feed_start,
                         code,
                         print_callback=capture.callback,
-                        os=self.os_access,
+                        os=_in_current_context(self.os_access),
                         mount=self.mount,
                         skip_type_check=not type_check,
                     )

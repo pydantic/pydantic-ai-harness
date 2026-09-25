@@ -483,7 +483,8 @@ not a guarantee that every eligible call starts early.
 
 ## Remote workers over WebSockets
 
-Set `monty_sandbox_url` to run the Monty worker remotely instead of spawning local worker subprocesses:
+Set `monty_sandbox_url` to run sandboxed code on a remote Monty worker instead of a local
+subprocess:
 
 ```python
 from pydantic_ai import Agent
@@ -495,26 +496,14 @@ agent = Agent(
 )
 ```
 
-The URL must use `wss://` (plaintext `ws://` is only accepted for a loopback IP literal such as
-`ws://127.0.0.1:<port>`, e.g. a local relay or a TLS-terminating sidecar) and point to a server that bridges each WebSocket
-connection to one Monty worker -- Monty's `monty-server` is built for this, or any relay that
-forwards frames to a worker fits. The WebSocket side carries one binary Monty protocol frame per
-message. A relay backed by `monty subprocess` adds the worker's four-byte little-endian length
-prefix before writing each frame to stdin and removes it when reading frames from stdout.
+The URL points to a server that connects each WebSocket to one Monty worker, such as
+[Full Monty](https://pydantic.dev/docs/monty/commercial-support/server/). Use `wss://`: plaintext
+`ws://` is only accepted for a loopback IP address such as `ws://127.0.0.1:8000`, for example a
+local TLS-terminating proxy.
 
-Only sandbox execution moves to the remote worker. Tool dispatch, mounted directory access,
-`os_access` calls, and print collection are still serviced by the host over the connection. The
-REPL session remains checked out for the agent run, so state persists across `run_code` calls as it
-does with local workers.
-
-Everything else is unchanged: the same host-side execution loop drives a remote session, so
-`sequential` tools, parallel `gather`, resource limits, eager execution, and Temporal and DBOS
-durability behave exactly as they do with local workers.
-
-The WebSocket transport has a 10-second deadline for each remote protocol turn. The deadline
-covers worker-side execution only: while the sandbox is suspended waiting for a host tool call, the
-clock is not running, so slow tools are safe. Sandbox code that computes for longer than the
-deadline between suspensions surfaces as a sandbox-crash retry and resets the session.
+Only code execution moves to the worker. Your tools, `mount` directories, `os_access`, and `print`
+output are still handled by the agent's process, and REPL state persists across `run_code` calls
+as it does locally. Eager execution, speculation, resource limits, and Temporal work the same way.
 
 ## Temporal durability
 
@@ -553,13 +542,8 @@ either `__pydantic_ai_agents__` or `AgentPlugin`.
 
 `PydanticAIPlugin` passes `pydantic_monty` through Temporal's workflow sandbox. This makes Monty
 runnable there, but `run_code` still executes in workflow code and is re-executed during replay.
-Monty's bindings are async and complete each call by waking the event loop it was awaited on,
-which Temporal's workflow event loop does not support. Inside a workflow, CodeMode therefore
-runs every Monty call on a helper thread with its own event loop (an `anyio` blocking portal)
-and blocks the workflow thread until the sandbox suspends or completes, the same way a blocking
-call would. Between those calls, control is back in the workflow, where nested tools run as
-activities. This applies to local workers and to `monty_sandbox_url` alike; with a remote
-worker, replay dials the worker again and re-runs the recorded snippets against it.
+This works with local workers and with `monty_sandbox_url`. With a remote worker, replay connects
+to the worker again, so it must be reachable whenever the workflow replays.
 Model requests and, by default, nested tool calls cross Temporal activity boundaries;
 `asyncio.gather` can schedule nested tool activities concurrently. The REPL is process-local state
 for one agent run, not durable storage. Replay reconstructs it by running the recorded snippets
@@ -700,7 +684,7 @@ CodeMode(
     os_access=None,       # OS behavior; custom handlers may expose host resources
     mount=None,           # host directories to share with the sandbox
     resource_limits=None, # sandbox time and memory caps; 'unlimited' removes them
-    monty_sandbox_url=None, # ws:// or wss:// remote Monty worker relay
+    monty_sandbox_url=None, # wss:// URL of a remote Monty worker server
     dynamic_catalog=False,
 )
 ```

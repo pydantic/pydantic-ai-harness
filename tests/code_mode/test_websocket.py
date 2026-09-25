@@ -11,6 +11,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_monty import MountDir
+from typing_extensions import Never
 
 from pydantic_ai_harness import CodeMode
 
@@ -93,6 +94,36 @@ async def test_loopback_or_tls_sandbox_url_accepted(url: str) -> None:
     agent = Agent(_snippets_model(), capabilities=[CodeMode(monty_sandbox_url=url)])
     result = await agent.run('no run_code call, so nothing dials')
     assert result.output == 'done'
+
+
+async def test_non_websocket_sandbox_url_rejected() -> None:
+    """A URL Monty's WebSocket client cannot dial fails when the run starts, not at every `run_code`."""
+    agent = Agent(_snippets_model(), capabilities=[CodeMode(monty_sandbox_url='https://sandbox.example.com/monty')])
+    with pytest.raises(UserError, match="not scheme 'https'"):
+        await agent.run('never dials')
+
+
+@pytest.mark.parametrize(
+    ('resource_limits', 'request_timeout'),
+    [(None, 40.0), ({'max_duration_secs': 90}, 100.0), ('unlimited', None)],
+)
+async def test_remote_turn_deadline_follows_max_duration(
+    monkeypatch: pytest.MonkeyPatch, resource_limits: Any, request_timeout: float | None
+) -> None:
+    """The transport's per-turn deadline leaves room for `max_duration_secs` to fire first."""
+    seen: list[float | None] = []
+
+    def recording_pool(url: str, *, request_timeout: float | None) -> Never:
+        seen.append(request_timeout)
+        raise RuntimeError('not dialing')
+
+    monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.AsyncMontyWebsocket', recording_pool)
+    agent = Agent(
+        _snippets_model('1'),
+        capabilities=[CodeMode(monty_sandbox_url='wss://sandbox.example.com/monty', resource_limits=resource_limits)],
+    )
+    await agent.run('record the deadline')
+    assert seen == [request_timeout]
 
 
 async def test_dial_failure_redacts_sandbox_url() -> None:

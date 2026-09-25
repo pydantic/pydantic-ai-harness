@@ -221,11 +221,9 @@ Before a script runs it is statically type-checked against the sub-agent signatu
 
 Attach `TemporalDurability` to the orchestrating agent alongside `DynamicWorkflow`, and to each
 sub-agent whose model requests should run as activities, then register every agent with its own
-`AgentPlugin`. The script itself runs in workflow code, through the same Monty loop as
-[Code Mode](/ai/harness/code-mode/#temporal-durability), and is re-executed during replay against the recorded activity
-results. `max_duration_secs` is ignored there, because an elapsed timer could make replay take a
-different path from the original run. Keep the script deterministic in the same way: it has no
-clock or filesystem access, and every sub-agent call is recorded as its activities.
+`AgentPlugin`. The script runs in workflow code, like [Code Mode's `run_code`](/ai/harness/code-mode/#temporal-durability),
+and is re-executed during replay against the recorded sub-agent results. `max_duration_secs` is
+ignored there, because a time limit could make replay take a different path from the original run.
 
 ## Observability
 

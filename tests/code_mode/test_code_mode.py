@@ -9,7 +9,9 @@ loaded by the project (no extra dev dependency needed).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
+import threading
 import warnings as _warnings
 from collections.abc import AsyncIterator
 from dataclasses import replace as dc_replace
@@ -41,6 +43,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     NativeToolReturnPart,
     NativeToolSearchReturnPart,
+    RetryPromptPart,
     SystemPromptPart,
     TextPart,
     ToolCallPart,
@@ -71,7 +74,6 @@ from pydantic_ai_harness.code_mode._capability import (
 from pydantic_ai_harness.code_mode._toolset import (  # pyright: ignore[reportPrivateUsage]
     _SEARCH_TOOLS_MODIFIER,
     _TOOL_SEARCH_ADDENDUM,
-    _MontyRunState,
     _sanitize_tool_name,
     global_mode_is_sequential,
 )
@@ -1523,18 +1525,34 @@ class TestCodeMode:
         ]
 
     async def test_failed_pool_start_closes_the_portal(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A pool that fails to start inside a Temporal workflow must not leave its portal thread behind."""
+        """A pool that fails to start inside a Temporal workflow does not leave its portal thread behind."""
 
         def failing_monty() -> Never:
             raise RuntimeError('spawn failed')
 
+        def in_temporal_workflow(ctx: object) -> bool:
+            return True
+
+        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.in_temporal_workflow', in_temporal_workflow)
         monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.AsyncMonty', failing_monty)
-        state = _MontyRunState()
 
-        with pytest.raises(RuntimeError, match='spawn failed'):
-            await state.get_session(type_check=False, type_check_stubs=None, limits={}, in_temporal_workflow=True)
+        threads_before = set(threading.enumerate())
+        threads_after_retry: list[str] = []
 
-        assert state.portal is None
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if len(messages) == 1:
+                return ModelResponse(parts=[ToolCallPart('run_code', {'code': '1'})])
+            # Checked while the run is still live: the run's own teardown would hide a leak.
+            # anyio's `to_thread` pool, which runs this sync function, is not the portal.
+            new_threads = set(threading.enumerate()) - threads_before
+            threads_after_retry.extend(t.name for t in new_threads if t.name != 'AnyIO worker thread')
+            return ModelResponse(parts=[TextPart('done')])
+
+        result = await Agent(FunctionModel(model_fn), capabilities=[CodeMode[object]()]).run('fail to spawn')
+
+        retry = next(p for m in result.all_messages() for p in m.parts if isinstance(p, RetryPromptPart))
+        assert 'spawn failed' in str(retry.content)
+        assert threads_after_retry == []
 
     async def test_agent_run_preserves_repl_between_code_calls(self) -> None:
         """Code Mode keeps one REPL across model steps in an agent run."""
@@ -3753,6 +3771,21 @@ class TestCodeModeOSAccess:
         # Second call reuses the REPL (so `import os` carries over) and must still dispatch.
         second = await wrapper.call_tool('run_code', {'code': "os.getenv('B')"}, ctx, tools['run_code'])
         assert second.return_value == 'persisted'
+
+    async def test_os_access_sees_the_callers_contextvars(self) -> None:
+        """Monty calls OS handlers from its own thread; they still see the run's contextvars."""
+        run_value: contextvars.ContextVar[str] = contextvars.ContextVar('run_value', default='unset')
+
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            return run_value.get()
+
+        wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        run_value.set('from the run')
+        result = await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('A')"}, ctx, tools['run_code'])
+        assert result.return_value == 'from the run'
 
     async def test_abstract_os_instance_dispatches_inside_run_code(self) -> None:
         """An `AbstractOS` instance is accepted as the `os` value and dispatches OS calls."""
