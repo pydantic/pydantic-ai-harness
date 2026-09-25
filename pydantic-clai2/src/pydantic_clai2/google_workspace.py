@@ -106,37 +106,49 @@ async def access_token(settings: GoogleWorkspaceSettings, oauth: GoogleOAuth) ->
     return await oauth.access_token(choice)
 
 
-async def _secret(label: str, *, name: str) -> KeyReference | None:
-    """Pick a saved key or enter one, saved under `name`; `None` when cancelled."""
+async def _ask(label: str) -> str | KeyReference | None:
+    """Pick a saved key or enter a value, which is not saved yet; `None` when cancelled."""
     prompt: PromptSession[str] = PromptSession()
-    token = await prompt_api_key(prompt=prompt, label=label)
-    if token is None:
-        return None
-    if isinstance(token, KeyReference):
-        return token
-    await asyncio.to_thread(save_key, name=name, value=token)
+    return await prompt_api_key(prompt=prompt, label=label)
+
+
+async def _stored(secret: str | KeyReference, *, name: str) -> KeyReference:
+    """Save an entered value under `name`; a picked key is already stored."""
+    if isinstance(secret, KeyReference):
+        return secret
+    await asyncio.to_thread(save_key, name=name, value=secret)
     return KeyReference(name=name)
 
 
 async def choose_key() -> str:
     """Use a ready-made access token from /keys; only the key's name is remembered outside /keys."""
-    token = await _secret(f'Google OAuth access token (saved in /keys as {TOKEN_LABEL}): ', name=TOKEN_LABEL)
-    if token is None:
+    answer = await _ask(f'Google OAuth access token (saved in /keys as {TOKEN_LABEL}): ')
+    if answer is None:
         return 'Google Workspace key unchanged.'
+    token = await _stored(answer, name=TOKEN_LABEL)
     connection = Connection(token=token)
     await asyncio.to_thread(save_key_connection, account=ACCOUNT, token=token, value=connection.model_dump_json())
     return f'Google Workspace uses the saved key {token.name} from the next turn.'
 
 
 async def sign_in(host: PluginHost[DepsT], oauth: GoogleOAuth) -> str:
-    """Sign in through the browser and keep the refresh token in /keys; replaces any access-token choice."""
+    """Sign in through the browser and keep the refresh token in /keys; replaces any access-token choice.
+
+    Nothing is saved until Google has issued the tokens, so a denied or failed sign-in leaves an
+    earlier one, including its client secret, working.
+    """
     settings = host.settings(GoogleWorkspaceSettings)
     if not settings.client_id:
         return 'Set the OAuth client ID first, then sign in with Google.'
-    secret = await _secret(f'Google OAuth client secret (saved in /keys as {SECRET_LABEL}): ', name=SECRET_LABEL)
-    if secret is None:
+    answer = await _ask(f'Google OAuth client secret (saved in /keys as {SECRET_LABEL}): ')
+    if answer is None:
         return 'Google sign-in cancelled.'
-    client_secret = await asyncio.to_thread(resolve_key, token=secret)
+    if isinstance(answer, KeyReference):
+        if answer.name == REFRESH_LABEL:
+            raise UserError(f'{REFRESH_LABEL} holds the refresh token. Choose another key for the client secret.')
+        client_secret = await asyncio.to_thread(resolve_key, token=answer)
+    elif not (client_secret := answer.strip()):
+        raise UserError('A client secret is required.')
     wanted = scopes_for(settings.services)
     result = await oauth.sign_in(client_id=settings.client_id, client_secret=client_secret, scopes=wanted)
     granted = result.tokens.scope.split()
@@ -145,6 +157,7 @@ async def sign_in(host: PluginHost[DepsT], oauth: GoogleOAuth) -> str:
             f'Google did not grant {len(refused)} of the requested permissions. Sign in again and allow them all, '
             'or turn off the products that need them.'
         )
+    secret = await _stored(answer if isinstance(answer, KeyReference) else client_secret, name=SECRET_LABEL)
     refresh_token = result.refresh_token.get_secret_value()
     await asyncio.to_thread(save_key, name=REFRESH_LABEL, value=refresh_token)
     signed_in = SignedIn(

@@ -11,7 +11,7 @@ import httpx
 import keyring
 import pytest
 from menu_script import pick, typed
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
@@ -22,9 +22,10 @@ from rich.console import Console
 from termflow.tui.menu import MenuResult  # pyright: ignore[reportMissingTypeStubs]
 
 from pydantic_clai2 import api_keys, google_workspace
+from pydantic_clai2.api_keys import KeyReference
 from pydantic_clai2.credential_store import load_codex_credentials
 from pydantic_clai2.field_menu import Runners
-from pydantic_clai2.google_oauth import GoogleOAuth, scopes_for
+from pydantic_clai2.google_oauth import GoogleOAuth, SignedIn, scopes_for
 from pydantic_clai2.plugins import PluginHost
 
 CLIENT_ID = '123-abc.apps.googleusercontent.com'
@@ -92,7 +93,11 @@ def tokens(access: str, *, refresh: str | None = 'refresh-1', scopes: list[str] 
 
 
 def plugin_with(
-    monkeypatch: pytest.MonkeyPatch, google: Google, settings: dict[str, JsonValue] | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    google: Google,
+    settings: dict[str, JsonValue] | None = None,
+    *,
+    secrets: tuple[str, ...] = ('client-secret',),
 ) -> tuple[PluginHost[None], GoogleOAuth, Clock]:
     clock = Clock()
     oauth = GoogleOAuth(
@@ -107,7 +112,8 @@ def plugin_with(
         return oauth
 
     monkeypatch.setattr(google_workspace, 'GoogleOAuth', shared)
-    monkeypatch.setattr(google_workspace, 'PromptSession', lambda: Prompt('client-secret'))
+    prompt = Prompt(*secrets)
+    monkeypatch.setattr(google_workspace, 'PromptSession', lambda: prompt)
     plugin = PluginHost[None](name='google_workspace', console=Console(file=io.StringIO()), settings=settings or {})
     google_workspace.activate(plugin)
     return plugin, oauth, clock
@@ -229,6 +235,7 @@ async def test_changed_settings_and_missing_keys_fail_closed(monkeypatch: pytest
         (httpx.Response(400, json={'error': 'invalid_grant'}), 'expired or been revoked'),
         (httpx.Response(500), 'Could not refresh'),
         (httpx.Response(200, json={'access_token': ''}), 'Could not refresh'),
+        (httpx.Response(200, json={'access_token': 'a', 'expires_in': 60, 'refresh_token': ''}), 'Could not refresh'),
     ],
 )
 async def test_refresh_failures_name_the_fix_without_secrets(
@@ -323,3 +330,59 @@ async def test_sign_out_returns_to_the_access_token_key(monkeypatch: pytest.Monk
     assert source.current(rows['sign_in']) == 'not signed in'
     with pytest.raises(UserError, match='GOOGLE_ACCESS_TOKEN'):
         await token_for(plugin)
+
+
+async def test_a_failed_sign_in_again_keeps_the_earlier_client_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    google = Google([tokens('access-1'), tokens('access-2', refresh=None)])
+    plugin, oauth, clock = plugin_with(monkeypatch, google, {'client_id': CLIENT_ID}, secrets=('client-secret',))
+    await menu(plugin, oauth, 'sign_in')
+    google.callback = 'error=access_denied'
+    pressed = iter(['down', 'down', 'enter'])
+    monkeypatch.setattr(api_keys, 'menu_key', lambda: next(pressed))
+    replacement = Prompt('replacement-secret')
+    monkeypatch.setattr(google_workspace, 'PromptSession', lambda: replacement)
+    assert 'denied' in await menu(plugin, oauth, 'sign_in')
+    assert next(replacement.values, None) is None
+    assert len(google.urls) == 2
+    assert api_keys.load_keys()['GOOGLE_CLIENT_SECRET'].get_secret_value() == 'client-secret'
+    clock.now += 7200
+    assert await token_for(plugin) == 'access-2'
+    assert google.forms[-1]['client_secret'] == 'client-secret'
+
+
+async def test_the_refresh_token_key_cannot_hold_the_client_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    google = Google([tokens('access-1')])
+    plugin, oauth, _ = plugin_with(monkeypatch, google, {'client_id': CLIENT_ID})
+
+    async def refresh_key(*, prompt: object, label: str) -> KeyReference:
+        return KeyReference(name='GOOGLE_REFRESH_TOKEN')
+
+    monkeypatch.setattr(google_workspace, 'prompt_api_key', refresh_key)
+    assert 'Choose another key for the client secret' in await menu(plugin, oauth, 'sign_in')
+    assert google.urls == []
+    same = KeyReference(name='SHARED')
+    with pytest.raises(ValidationError, match='different /keys entries'):
+        SignedIn(client_id=CLIENT_ID, client_secret=same, refresh_token=same, scopes=[])
+
+
+async def test_a_blank_client_secret_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    google = Google([])
+    plugin, oauth, _ = plugin_with(monkeypatch, google, {'client_id': CLIENT_ID}, secrets=(' ',))
+    assert await menu(plugin, oauth, 'sign_in') == 'A client secret is required.'
+    assert google.urls == []
+
+
+async def test_a_saved_client_secret_is_referenced_not_copied(monkeypatch: pytest.MonkeyPatch) -> None:
+    api_keys.save_key(name='WORK_SECRET', value='work-secret')
+    google = Google([tokens('access-1')])
+    plugin, oauth, _ = plugin_with(monkeypatch, google, {'client_id': CLIENT_ID})
+
+    async def saved(*, prompt: object, label: str) -> KeyReference:
+        return KeyReference(name='WORK_SECRET')
+
+    monkeypatch.setattr(google_workspace, 'prompt_api_key', saved)
+    await menu(plugin, oauth, 'sign_in')
+    assert google.forms[0]['client_secret'] == 'work-secret'
+    assert 'GOOGLE_CLIENT_SECRET' not in api_keys.load_keys()
+    with pytest.raises(ValueError, match='used by google-workspace'):
+        api_keys.rename_key(name='WORK_SECRET', new_name='OTHER')

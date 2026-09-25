@@ -13,10 +13,11 @@ from collections.abc import Callable, Mapping, Sequence
 from urllib.parse import urlencode
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 from pydantic_ai.exceptions import UserError
 from pydantic_ai_harness.google_workspace import GoogleWorkspaceService
 from rich.console import Console
+from typing_extensions import Self
 
 from .api_keys import KeyReference, load_keys, save_key
 from .auth import ReadLine, read_line
@@ -64,6 +65,13 @@ class SignedIn(BaseModel):
     scopes: list[str]
     """What Google granted, which can be less than what was asked for."""
 
+    @model_validator(mode='after')
+    def _separate_keys(self) -> Self:
+        # Saving a rotated refresh token would otherwise overwrite the client secret.
+        if self.client_secret.name == self.refresh_token.name:
+            raise ValueError('The client secret and refresh token need different /keys entries.')
+        return self
+
     def problem(self, *, client_id: str, services: Sequence[GoogleWorkspaceService]) -> str | None:
         """Why this sign-in no longer matches the settings, or `None` when it still does."""
         if client_id != self.client_id:
@@ -78,7 +86,7 @@ class Tokens(BaseModel):
 
     access_token: SecretStr = Field(min_length=1)
     expires_in: int = Field(gt=0)
-    refresh_token: SecretStr | None = None
+    refresh_token: SecretStr | None = Field(default=None, min_length=1)
     scope: str = ''
 
 
