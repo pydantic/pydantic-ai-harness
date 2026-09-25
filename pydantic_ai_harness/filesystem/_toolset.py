@@ -25,6 +25,7 @@ from pydantic_ai.workspaces import (
     WorkspaceReadOnlyError,
 )
 
+from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored, warn_argument_renamed
 from pydantic_ai_harness._workspace import raise_tool_failure, supports_commands, workspace_path
 from pydantic_ai_harness.filesystem._changes import Change
 from pydantic_ai_harness.filesystem._events import (
@@ -413,7 +414,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
       `root_dir` both as written and once the workspace has resolved its symlinks, checked
       before each operation; a symlink swapped in between the check and the use is not caught.
     - Glob-based allow/deny filtering
-    - Protected path patterns (e.g. `.git/`, `.env`), matched against both spellings
+    - Read-only path patterns (e.g. `.git/`, `.env`), matched against both spellings
     - Binary file detection blocks text operations
 
     These are guardrails, not isolation: the workspace is the isolation boundary.
@@ -425,7 +426,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         root_dir: Path | None = None,
         allowed_patterns: Sequence[str],
         denied_patterns: Sequence[str],
-        protected_patterns: Sequence[str],
+        read_only_patterns: Sequence[str] | None = None,
         max_read_lines: int,
         max_read_chars: int | None = None,
         max_list_results: int,
@@ -434,8 +435,17 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         id: str | None = None,
         content_hashes: bool = True,
         tools: Sequence[str] = DEFAULT_TOOL_NAMES,
+        protected_patterns: Sequence[str] | None = None,
+        cwd: Path | None = None,
     ) -> None:
         super().__init__(id=id)
+        if cwd is not None:
+            warn_argument_ignored('FileSystemToolset', 'cwd', WORKING_DIR_IS_THE_WORKSPACES, stacklevel=3)
+        if protected_patterns is not None:
+            if read_only_patterns is not None:
+                raise TypeError('Pass `read_only_patterns` only: `protected_patterns` is its deprecated name.')
+            warn_argument_renamed('FileSystemToolset', 'protected_patterns', 'read_only_patterns')
+            read_only_patterns = protected_patterns
         # A workspace path, absolute or relative to the workspace's working directory, resolved
         # against the workspace a call acts on; `None` bounds calls by the working directory itself.
         self._root_spelling = root_spelling(root_dir)
@@ -443,7 +453,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         self._resolved: _Scope | None = None
         self._allowed_patterns = list(allowed_patterns)
         self._denied_patterns = list(denied_patterns)
-        self._protected_patterns = list(protected_patterns)
+        self._read_only_patterns = list(read_only_patterns or ())
         self._max_read_lines = max_read_lines
         self._max_read_chars = max_read_chars
         self._max_list_results = max_list_results
@@ -510,7 +520,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                     f'The working directory {cwd!r} is outside root_dir {root!r}. '
                     'Set `root_dir` to a directory that contains it, or leave it unset to use the working directory.'
                 )
-        has_patterns = bool(self._allowed_patterns or self._denied_patterns or self._protected_patterns)
+        has_patterns = bool(self._allowed_patterns or self._denied_patterns or self._read_only_patterns)
         self._resolved = _Scope(workspace=facade, root=root, cwd=cwd, checks_realpath=root != '/' or has_patterns)
         return self._resolved
 
@@ -552,8 +562,15 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Whether a path a walk reached still leads inside the root once symlinks are resolved."""
         return not scope.checks_realpath or _contains(scope.root, await scope.workspace.realpath(path))
 
+    async def _entry_inside(self, scope: _Scope, entry: WorkspaceFileEntry) -> bool:
+        """Whether a listed entry leads inside the root, resolving only an entry that is or may be a symlink.
+
+        Walks list only directories inside the root, so an entry that is not a symlink is inside too.
+        """
+        return entry.is_symlink is False or await self._real_path_inside(scope, entry.path)
+
     def _check_access(self, path: str, *, write: bool = False, check_allowed: bool = True) -> None:
-        """Validate path against allow/deny/protected patterns.
+        """Validate path against allow/deny/read-only patterns.
 
         `check_allowed=False` skips the `allowed_patterns` gate. Walkers
         (`list_directory`, `search_files`, `find_files`) pass it so their root
@@ -562,8 +579,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         entries are still filtered against `allowed_patterns` per-entry via
         `_is_accessible`. Denied patterns continue to gate the root.
         """
-        if write and self._protected_patterns:
-            matched = self._first_matching_pattern(path, self._protected_patterns)
+        if write and self._read_only_patterns:
+            matched = self._first_matching_pattern(path, self._read_only_patterns)
             if matched:
                 raise PermissionError(f'Path {path!r} is protected (matches {matched!r}).')
 
@@ -579,7 +596,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
     def _is_accessible(self, path: str) -> bool:
         """Predicate form of the read-level `_check_access` checks.
 
-        Protected patterns are not consulted: they gate writes, and the walkers
+        Read-only patterns are not consulted: they gate writes, and the walkers
         only read.
         """
         if self._denied_patterns:
@@ -588,10 +605,6 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if self._allowed_patterns and not any(self._matches(path, p) for p in self._allowed_patterns):
             return False
         return True
-
-    def permits_read(self, path: str) -> bool:
-        """Whether the allow/deny patterns let `read_file` read `path`, given relative to the root."""
-        return self._is_accessible(path)
 
     def _walk_entry(self, scope: _Scope, path: str) -> str | None:
         """Authorize one entry of a directory walk: its root-relative path, or `None` to skip it.
@@ -653,12 +666,12 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Entries below `directory`, walked iteratively with `list_dir`, and whether the walk was cut short.
 
         Hidden directories are not descended into, since everything under them
-        is hidden, and a subdirectory that cannot be listed (removed mid-walk,
-        unreadable, a symlink loop the backend reports) or that leads outside the
-        root through a symlink is skipped. `max_depth`
-        bounds how many levels below `directory` are listed. The walk stops at
-        `_MAX_WALK_DIRECTORIES` listings or `_MAX_WALK_ENTRIES` entries, the only
-        guard against symlink loops the workspace API does not reveal.
+        is hidden, nor is a symlinked directory that leads outside the root, and a
+        subdirectory that cannot be listed (removed mid-walk, unreadable, a symlink
+        loop the backend reports) is skipped. `max_depth` bounds how many levels
+        below `directory` are listed. The walk stops at `_MAX_WALK_DIRECTORIES`
+        listings or `_MAX_WALK_ENTRIES` entries, which bounds a symlink loop inside
+        the root.
         """
         entries: list[WorkspaceFileEntry] = []
         pending: list[tuple[str, int]] = [(directory, 1)]
@@ -668,8 +681,6 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 return entries[:_MAX_WALK_ENTRIES], True
             listed += 1
             current, depth = pending.pop()
-            if current != directory and not await self._real_path_inside(scope, current):
-                continue
             try:
                 children = await scope.workspace.list_dir(current)
             except WorkspaceError:
@@ -680,9 +691,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 continue
             entries.extend(children)
             if max_depth is None or depth < max_depth:
-                pending.extend(
-                    (child.path, depth + 1) for child in children if child.is_dir and not child.name.startswith('.')
-                )
+                for child in children:
+                    if child.is_dir and not child.name.startswith('.') and await self._entry_inside(scope, child):
+                        pending.append((child.path, depth + 1))
         return entries, False
 
     async def read_file(
@@ -1057,7 +1068,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         for entry in sorted(children, key=lambda child: child.name):
             # Skip dotfiles and dot-directories, matching search_files and
             # find_files so the three walkers agree on what exists.
-            if self._walk_entry(scope, entry.path) is None:
+            if self._walk_entry(scope, entry.path) is None or not await self._entry_inside(scope, entry):
                 continue
             rel = posixpath.relpath(entry.path, scope.cwd)
             if entry.is_dir:
@@ -1232,7 +1243,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         matches: list[str] = []
         capped = False
         for match in sorted(found, key=lambda child: _sort_key(child.path)):
-            if self._walk_entry(scope, match.path) is None:
+            if self._walk_entry(scope, match.path) is None or not await self._entry_inside(scope, match):
                 continue
             if not match.is_dir and match.size is None and not await scope.workspace.exists(match.path):
                 # A dangling symlink is inside the root but names nothing.

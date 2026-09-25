@@ -77,9 +77,8 @@ async def run_ripgrep(
     if result.exit_code == _MISSING or not status_line.startswith(_STATUS_PREFIX):
         if result.exit_code == _MISSING or 'not found' in result.stderr:
             raise ModelRetry(
-                "ripgrep (rg) was not found on the workspace's PATH. A local workspace inherits no environment, "
-                "so pass `env={'PATH': ...}` to `LocalWorkspace`; otherwise install rg, or use the pure-Python "
-                'search tools.'
+                "ripgrep (rg) was not found on the workspace's PATH. Install rg in the workspace, or use "
+                '`search_files` and `find_files` instead.'
             )
         raise ModelRetry(f'ripgrep failed: {result.stderr.strip() or f"exit code {result.exit_code}"}')
     status = status_line.removeprefix(_STATUS_PREFIX)

@@ -11,13 +11,10 @@ from pydantic_ai_harness.coder import Coder
 
 DEFAULT_MODEL = os.environ.get('PYDANTIC_AI_MODEL', 'anthropic:claude-sonnet-5')
 
-HOST_ENV = {name: os.environ[name] for name in ('PATH', 'HOME') if name in os.environ}
-"""Commands inherit nothing from this process; `PATH` and `HOME` let them find the user's tools."""
-
 
 def build_agent(model: Model | str = DEFAULT_MODEL, workspace: Path | None = None) -> Agent:
     """Build the coding agent for the requested workspace, by default the current directory."""
-    return Agent(model, name='coder', capabilities=[LocalWorkspace(workspace or '.', env=HOST_ENV), Coder()])
+    return Agent(model, name='coder', capabilities=[LocalWorkspace(workspace or '.'), Coder()])
 
 
 def main() -> None:

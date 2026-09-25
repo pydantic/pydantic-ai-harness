@@ -86,7 +86,7 @@ def test_coder_unknown_export() -> None:
 def test_coder_members_and_parameters() -> None:
     coder = Coder(instructions='Custom instructions')
     assert [type(capability).__name__ for capability in coder.capabilities] == [
-        '_RequireWorkspace',
+        'RequireWorkspace',
         'Capability',
         'FileSystem',
         'Shell',

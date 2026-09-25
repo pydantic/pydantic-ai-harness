@@ -16,6 +16,7 @@ from anyio.to_thread import run_sync
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability, on_event
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.workspaces import LocalWorkspaceBackend
 
 from pydantic_ai_harness.shell import (
     MAX_FOREGROUND_WAIT,
@@ -28,7 +29,6 @@ from pydantic_ai_harness.shell import (
 )
 
 from .._tool_calls import call_tool, call_tools
-from .._workspace import local_workspace
 
 pytestmark = [pytest.mark.anyio, pytest.mark.skipif(os.name == 'nt', reason='POSIX shell commands and process groups')]
 
@@ -64,7 +64,7 @@ async def shell(
     **settings: object,
 ) -> str:
     capability = Shell[None](denied_commands=[], allow_interactive=True, tools=['shell'], **settings)  # pyright: ignore[reportArgumentType]
-    return await call_tool([capability, *capabilities], 'shell', arguments, workspace=local_workspace(cwd))
+    return await call_tool([capability, *capabilities], 'shell', arguments, workspace=LocalWorkspaceBackend(cwd))
 
 
 class Recorder(AbstractCapability[None]):
@@ -91,7 +91,7 @@ class Recorder(AbstractCapability[None]):
 class TestToolSelection:
     async def test_default_tools_are_run_scoped(self, tmp_path: Path) -> None:
         model = TestModel(call_tools=[])
-        await Agent(model, capabilities=[Shell()]).run('Inspect tools', workspace=local_workspace(tmp_path))
+        await Agent(model, capabilities=[Shell()]).run('Inspect tools', workspace=LocalWorkspaceBackend(tmp_path))
         assert model.last_model_request_parameters is not None
         names = [tool.name for tool in model.last_model_request_parameters.function_tools]
         assert names == list(RUN_SCOPED_TOOL_NAMES)
@@ -99,7 +99,7 @@ class TestToolSelection:
     async def test_selected_tools(self, tmp_path: Path) -> None:
         model = TestModel(call_tools=[])
         await Agent(model, capabilities=[Shell(tools=['shell', 'run_command'])]).run(
-            'Inspect tools', workspace=local_workspace(tmp_path)
+            'Inspect tools', workspace=LocalWorkspaceBackend(tmp_path)
         )
         assert model.last_model_request_parameters is not None
         names = [tool.name for tool in model.last_model_request_parameters.function_tools]
@@ -193,7 +193,7 @@ class TestShellTool:
         assert 'NUL' in await shell(tmp_path, {'command': 'echo \0'})
         capability = Shell[None](allowed_commands=['echo'], tools=['shell'])
         assert 'not in the allowed list' in await call_tool(
-            [capability], 'shell', {'command': 'printf hi'}, workspace=local_workspace(tmp_path)
+            [capability], 'shell', {'command': 'printf hi'}, workspace=LocalWorkspaceBackend(tmp_path)
         )
 
     async def test_handles_survive_output_cap(self, tmp_path: Path) -> None:
@@ -208,7 +208,7 @@ class TestShellTool:
         moved, listed = await call_tools(
             [capability],
             [('run_command', {'command': 'cd child && pwd'}), ('shell', {'command': 'pwd'})],
-            workspace=local_workspace(tmp_path),
+            workspace=LocalWorkspaceBackend(tmp_path),
         )
         assert moved.strip().endswith('child')
         assert listed.splitlines()[0] == str(tmp_path.resolve())
