@@ -320,7 +320,9 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         directory = absolute_path('cwd', cwd) if cwd is not None else self._working_dir
         marker = f'pydantic-ai-end-{uuid.uuid4().hex}'
-        args = _with_env(_ending_with(marker, command_argv(command, shell)), {**self._env, **(env or {})})
+        # `env` runs inside the wrapper: a `sh` such as dash drops variables whose names are not shell
+        # identifiers from the environment it passes on.
+        args = _ending_with(marker, _with_env(command_argv(command, shell), {**self._env, **(env or {})}))
 
         # Acquiring the Sprite has its own bound; the deadline is the command's alone.
         sprite = await self.get_client()
