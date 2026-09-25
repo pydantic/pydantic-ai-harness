@@ -197,6 +197,29 @@ async def test_replacing_a_shared_key_needs_confirmation(tmp_path: Path, monkeyp
     assert api_keys.load_keys()['GITHUB_TOKEN'].get_secret_value() == 'other'
 
 
+async def test_a_key_created_while_picking_still_needs_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shell = Shell(tmp_path)
+    await shell.loader.enable('github')
+
+    async def prompt_api_key(*, prompt: object, label: str, optional: bool = False) -> str | KeyReference | None:
+        api_keys.save_key(name='GITHUB_TOKEN', value='from-another-process')
+        return 'typed-here'
+
+    monkeypatch.setattr('pydantic_clai2.github.prompt_api_key', prompt_api_key)
+    script(monkeypatch, lists=[pick('token')], choices=[CLOSE])
+    assert await shell.loader.configure('github') == 'GitHub settings unchanged.'
+    assert api_keys.load_keys()['GITHUB_TOKEN'].get_secret_value() == 'from-another-process'
+
+
+def test_save_key_without_replace_refuses_an_existing_name() -> None:
+    api_keys.save_key(name='SHARED', value='first', replace=False)
+    with pytest.raises(api_keys.KeyExistsError, match='SHARED is already saved'):
+        api_keys.save_key(name='SHARED', value='second', replace=False)
+    assert api_keys.load_keys()['SHARED'].get_secret_value() == 'first'
+
+
 @pytest.mark.parametrize(
     ('choice', 'text'),
     [(CLOSE, None), (pick(ENTERPRISE), TextInputResult(cancelled=True)), (pick(ENTERPRISE), typed(' '))],

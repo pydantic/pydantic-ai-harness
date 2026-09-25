@@ -17,7 +17,7 @@ from termflow.tui import MenuBuilder, MenuItem, TextInputBuilder  # pyright: ign
 
 from . import theme
 from ._rendering import markdown_style
-from .api_keys import KeyReference, SavedKey, load_keys, prompt_api_key, save_key
+from .api_keys import KeyExistsError, KeyReference, SavedKey, load_keys, prompt_api_key, save_key
 from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run_flow
 from .menu_worker import menu_key, run_worker, worker_stopping
 from .plugins import DepsT, PluginHost, SessionStart
@@ -235,13 +235,16 @@ async def _configure(source: GitHubSource[DepsT]) -> str:
     def pick_token() -> list[str]:
         # The key picker is async, so the menu's thread hands it back to the event loop. Its widgets
         # watch their own stop signal, so cancelling this worker must cancel the picker explicitly.
-        picking = asyncio.run_coroutine_threadsafe(_choose_key(source.settings.token.name), loop)
+        name = source.settings.token.name
+        label = f'GitHub token (saved in /keys as {name})'
+        picking = asyncio.run_coroutine_threadsafe(prompt_api_key(prompt=_MaskedPrompt(), label=label), loop)
         while not (picking.done() or worker_stopping()):
             concurrent.futures.wait([picking], timeout=0.05)
         if not picking.done():
             picking.cancel()
             return []
-        reference = picking.result()
+        # Saving happens here, after the cancellable picker, so a cancelled menu saves nothing.
+        reference = _saved(name, picking.result())
         if reference is None:
             return []
         source.save(source.settings.model_copy(update={'token': reference}))
@@ -285,17 +288,19 @@ class _MaskedPrompt:
         return result.value
 
 
-async def _choose_key(name: str) -> KeyReference | None:
-    """Pick a saved key, or save a masked new value under `name`; `None` means cancelled."""
-    choice = await prompt_api_key(prompt=_MaskedPrompt(), label=f'GitHub token (saved in /keys as {name})')
+def _saved(name: str, choice: str | KeyReference | None) -> KeyReference | None:
+    """A picked key as is, or a typed token saved under `name`; `None` means cancelled."""
     if choice is None or isinstance(choice, KeyReference):
         return choice
     value = choice.strip()
     if not value:
         return None
-    if name in await asyncio.to_thread(load_keys) and not await run_worker(lambda: _confirm_replace(name)):
-        return None
-    await asyncio.to_thread(save_key, name=name, value=value)
+    try:
+        save_key(name=name, value=value, replace=False)
+    except KeyExistsError:
+        if not _confirm_replace(name):
+            return None
+        save_key(name=name, value=value)
     return KeyReference(name=name)
 
 
