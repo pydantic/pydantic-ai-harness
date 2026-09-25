@@ -130,9 +130,14 @@ class TestShellTool:
         )
         assert 'unset' in output and 'do-not-expose' not in output
 
-    async def test_job_files_live_in_the_git_ignored_metadata_directory(self, tmp_path: Path) -> None:
-        output = await shell(tmp_path, {'command': 'printf hello'})
+    @pytest.mark.parametrize('metadata_exists', [False, True])
+    async def test_job_files_live_in_the_git_ignored_metadata_directory(
+        self, tmp_path: Path, metadata_exists: bool
+    ) -> None:
         metadata = tmp_path / '.pydantic-ai-harness'
+        if metadata_exists:
+            metadata.mkdir()
+        output = await shell(tmp_path, {'command': 'printf hello'})
         assert f'Output: {metadata}/shell/' in output
         assert (metadata / '.gitignore').read_text() == '*\n'
 
