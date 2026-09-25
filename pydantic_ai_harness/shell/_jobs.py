@@ -75,9 +75,10 @@ i=0
 while [ ! -e "$dir/status.json" ] && [ "$i" -lt 20 ]; do sleep 0.1 2> /dev/null || sleep 1; i=$((i + 1)); done
 printf '{"pid": %s, "exit_code": null}' "$pid" > "$dir/status.launch" && ln "$dir/status.launch" "$dir/status.json" 2> /dev/null
 rm -f "$dir/status.launch"
+echo "$pid $group" > "$dir/handle"
 echo "$pid $group"
 """
-"""Start the wrapper detached and print `<pid> <process group or ->`.
+"""Start the wrapper detached and print `<pid> <process group or ->`, also kept in the job's `handle` file.
 
 Before returning, the launcher waits (up to about two seconds) for the wrapper to publish its
 status, which it does only after `setsid` has detached it: some workspaces kill the launching
@@ -139,6 +140,20 @@ class Job:
         if result.exit_code != 0 or len(fields) != 2 or not fields[0].isdigit():
             detail = result.stderr.strip() or f'launcher output {result.stdout.strip()!r}'
             raise ModelRetry(f'Shell supervisor exited with {result.exit_code}: {detail}')
+        pgid = int(fields[1]) if fields[1].isdigit() else None
+        return cls(workspace=workspace, directory=directory, pid=int(fields[0]), pgid=pgid, combined=combined)
+
+    @classmethod
+    async def attach(cls, workspace: Workspace, directory: str, *, combined: bool) -> Job | None:
+        """The job launched into `directory`, from its `handle` file, or `None` when there is none."""
+        try:
+            fields = (await workspace.read_bytes(posixpath.join(directory, 'handle'))).decode(errors='replace').split()
+        except WorkspaceError:
+            raise
+        except OSError:  # missing, a directory, or unreadable: no job to attach to
+            return None
+        if len(fields) != 2 or not fields[0].isdigit():
+            return None
         pgid = int(fields[1]) if fields[1].isdigit() else None
         return cls(workspace=workspace, directory=directory, pid=int(fields[0]), pgid=pgid, combined=combined)
 

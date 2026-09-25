@@ -37,7 +37,7 @@ from pydantic_ai_harness.filesystem._events import (
     FileWrittenEvent,
     SearchKind,
 )
-from pydantic_ai_harness.filesystem._ripgrep import Record, run_ripgrep
+from pydantic_ai_harness.filesystem._ripgrep import Record, RipgrepMissing, run_ripgrep
 
 _P = ParamSpec('_P')
 
@@ -137,7 +137,7 @@ class _EventLocation(TypedDict):
     root_dir: str
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Scope:
     """The workspace a call acts on, with its containment boundary and working directory."""
 
@@ -151,6 +151,8 @@ class _Scope:
 
     A boundary at `/` contains everything, so only access patterns need the real path there.
     """
+    lacks_ripgrep: bool = False
+    """Set once `rg` is found missing, so later searches go straight to the built-in walk."""
 
 
 def _contains(root: str, path: str) -> bool:
@@ -562,13 +564,6 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Whether a path a walk reached still leads inside the root once symlinks are resolved."""
         return not scope.checks_realpath or _contains(scope.root, await scope.workspace.realpath(path))
 
-    async def _entry_inside(self, scope: _Scope, entry: WorkspaceFileEntry) -> bool:
-        """Whether a listed entry leads inside the root, resolving only an entry that is or may be a symlink.
-
-        Walks list only directories inside the root, so an entry that is not a symlink is inside too.
-        """
-        return entry.is_symlink is False or await self._real_path_inside(scope, entry.path)
-
     def _check_access(self, path: str, *, write: bool = False, check_allowed: bool = True) -> None:
         """Validate path against allow/deny/read-only patterns.
 
@@ -666,7 +661,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Entries below `directory`, walked iteratively with `list_dir`, and whether the walk was cut short.
 
         Hidden directories are not descended into, since everything under them
-        is hidden, nor is a symlinked directory that leads outside the root, and a
+        is hidden, nor is a directory whose real path is outside the root, and a
         subdirectory that cannot be listed (removed mid-walk, unreadable, a symlink
         loop the backend reports) is skipped. `max_depth` bounds how many levels
         below `directory` are listed. The walk stops at `_MAX_WALK_DIRECTORIES`
@@ -692,7 +687,11 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             entries.extend(children)
             if max_depth is None or depth < max_depth:
                 for child in children:
-                    if child.is_dir and not child.name.startswith('.') and await self._entry_inside(scope, child):
+                    if (
+                        child.is_dir
+                        and not child.name.startswith('.')
+                        and await self._real_path_inside(scope, child.path)
+                    ):
                         pending.append((child.path, depth + 1))
         return entries, False
 
@@ -1068,7 +1067,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         for entry in sorted(children, key=lambda child: child.name):
             # Skip dotfiles and dot-directories, matching search_files and
             # find_files so the three walkers agree on what exists.
-            if self._walk_entry(scope, entry.path) is None or not await self._entry_inside(scope, entry):
+            if self._walk_entry(scope, entry.path) is None:
                 continue
             rel = posixpath.relpath(entry.path, scope.cwd)
             if entry.is_dir:
@@ -1217,7 +1216,13 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
     @_recoverable
     async def _find_files(
-        self, scope: _Scope, ctx: RunContext[AgentDepsT] | None, pattern: str, *, path: str = '.'
+        self,
+        scope: _Scope,
+        ctx: RunContext[AgentDepsT] | None,
+        pattern: str,
+        *,
+        path: str = '.',
+        files_only: bool = False,
     ) -> str:
         if posixpath.isabs(pattern):
             raise ValueError(f'Pattern {pattern!r} must be relative to the search path, not absolute.')
@@ -1236,14 +1241,14 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         found = [
             child
             for child in walked
-            if (child.is_dir or not directories_only)
+            if (not child.is_dir if files_only else child.is_dir or not directories_only)
             and _glob_match(parts, posixpath.relpath(child.path, resolved).split('/'))
         ]
 
         matches: list[str] = []
         capped = False
         for match in sorted(found, key=lambda child: _sort_key(child.path)):
-            if self._walk_entry(scope, match.path) is None or not await self._entry_inside(scope, match):
+            if self._walk_entry(scope, match.path) is None:
                 continue
             if not match.is_dir and match.size is None and not await scope.workspace.exists(match.path):
                 # A dangling symlink is inside the root but names nothing.
@@ -1291,14 +1296,22 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if entry is None or not entry.is_dir:
             raise NotADirectoryError(f'Path {path!r} is not a directory.')
         arguments = ['--files', '--sort', 'path', *(['--glob', glob] if glob is not None else [])]
-        results, capped = await run_ripgrep(
-            scope.workspace,
-            arguments,
-            cwd=resolved,
-            limit=self._max_find_results,
-            listing=True,
-            accept=lambda record: self._ripgrep_entry(scope, resolved, record),
-        )
+        try:
+            if scope.lacks_ripgrep:
+                raise RipgrepMissing
+            results, capped = await run_ripgrep(
+                scope.workspace,
+                arguments,
+                cwd=resolved,
+                limit=self._max_find_results,
+                listing=True,
+                accept=lambda record: self._ripgrep_entry(scope, resolved, record),
+            )
+        except RipgrepMissing:
+            scope.lacks_ripgrep = True
+            # Like ripgrep's, a glob without a `/` matches a file name at any depth.
+            pattern = '**' if glob is None else glob if '/' in glob else f'**/{glob}'
+            return await self._find_files(scope, ctx, pattern, path=path, files_only=True)
         if ctx is not None:
             await ctx.emit(
                 self._searched(scope, resolved, glob or '', search='find', match_count=len(results), truncated=capped)
@@ -1415,13 +1428,24 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if literal:
             arguments.append('--fixed-strings')
         arguments.extend(['--regexp', pattern, '--', target])
-        results, capped = await run_ripgrep(
-            scope.workspace,
-            arguments,
-            cwd=cwd,
-            limit=self._max_search_results,
-            accept=lambda record: self._match_line(scope, cwd, record),
-        )
+        try:
+            if scope.lacks_ripgrep:
+                raise RipgrepMissing
+            results, capped = await run_ripgrep(
+                scope.workspace,
+                arguments,
+                cwd=cwd,
+                limit=self._max_search_results,
+                accept=lambda record: self._match_line(scope, cwd, record),
+            )
+        except RipgrepMissing:
+            scope.lacks_ripgrep = True
+            if file_type is not None:
+                raise ValueError('`file_type` needs ripgrep, which the workspace lacks; use `glob` instead.')
+            regex = re.escape(pattern) if literal else pattern
+            return await self._search_files(
+                scope, ctx, f'(?i){regex}' if ignore_case else regex, path=path, include_glob=glob
+            )
         if ctx is not None:
             await ctx.emit(
                 self._searched(scope, resolved, pattern, search='grep', match_count=len(results), truncated=capped)

@@ -36,7 +36,7 @@ result = agent.run_sync('Read the toolsets docs, then explain how to build a Fun
 print(result.output)
 ```
 
-A configured local checkout is read through the run's [workspace](https://pydantic.dev/docs/ai/workspace/), so a run with a local path and no workspace fails at its start. With no local path configured, every call goes to the remote source and no workspace is needed.
+A configured local checkout is read through the run's [workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/), so a run with a local path and no workspace fails at its start. With no local path configured, every call goes to the remote source and no workspace is needed.
 
 ## Resolution order
 

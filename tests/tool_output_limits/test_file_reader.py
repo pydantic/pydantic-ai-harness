@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, LocalWorkspace
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 
+from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.tool_output_limits import READ_TOOL_NAME, Band, Spill, ToolOutputLimits
 
@@ -89,6 +90,20 @@ class TestFileReader:
         assert all(READ_TOOL_NAME not in tools for tools in offered)
         # The whole file came back: reading a spill is exempt from being spilled again.
         assert '\tline 250\n' in result.output
+
+    async def test_coders_read_file_reads_spills(self, tmp_path: Path):
+        offered: list[set[str]] = []
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+            # Coder's capabilities wrap the event stream, so the run streams its model requests.
+            offered.append({tool.name for tool in info.function_tools})
+            yield 'done' if _returns(messages, 'big_tool') else {0: DeltaToolCall(name='big_tool', json_args='{}')}
+
+        result = await _agent(tmp_path, FunctionModel(stream_function=stream), Coder()).run('go')
+
+        [spilled] = _returns(result.all_messages(), 'big_tool')
+        assert str(spilled.content).splitlines()[0].endswith('Read it with `read_file`.]')
+        assert all(READ_TOOL_NAME not in tools for tools in offered)
 
     @pytest.mark.parametrize(
         'file_system',
