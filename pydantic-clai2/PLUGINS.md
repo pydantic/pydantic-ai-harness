@@ -395,8 +395,9 @@ any device.
   not mean signing in again. An expired or rejected token is refreshed; if that
   fails, the next run signs in again. `/logfire_mcp logout` forgets every
   Logfire sign-in and keeps keys in `/keys`.
-  If the keyring or file refuses to save a sign-in, CLAI says so and uses it for
-  the rest of the session; the next session asks you to sign in again.
+  If the keyring or file refuses to save a sign-in, CLAI says so and keeps it in
+  memory for the rest of the session (logout forgets it too); the next session
+  asks you to sign in again.
 
 A saved key's value is read at the start of each run, like a model connection's.
 Replacing it in `/keys` applies from the next turn. `/keys` does not stop you

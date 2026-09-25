@@ -445,8 +445,19 @@ class TestDeviceAuth:
         async with httpx.AsyncClient(transport=httpx.MockTransport(logfire.handle), auth=auth) as client:
             for _ in range(2):
                 assert (await client.post(RESOURCE)).status_code == 200
-        assert lines[-1] == 'Signed in to Logfire for this session only: saving the sign-in failed (KeyringError).'
-        assert (opened, logfire.bearers, load(RESOURCE)) == ([LINK], ['access-1', 'access-1'], None)
+            assert lines[-1] == 'Signed in to Logfire for this session only: saving the sign-in failed (KeyringError).'
+            assert (opened, logfire.bearers, status(resource=RESOURCE, read_only=True)) == (
+                [LINK],
+                ['access-1', 'access-1'],
+                'signed in',
+            )
+            assert forget()  # Logout drops the in-memory sign-in too, so the next request signs in again.
+            assert status(resource=RESOURCE, read_only=True) == 'signed out'
+            logfire.polls = [granted('access-1')]
+            assert (await client.post(RESOURCE)).status_code == 200
+        assert opened == [LINK, LINK]
+        assert forget()
+        assert not forget()
 
     def test_sync_clients_are_refused(self) -> None:
         auth = DeviceAuth(resource=RESOURCE, read_only=True, announce=print)

@@ -69,6 +69,8 @@ class Tokens(BaseModel):
 
 _STORE: TypeAdapter[dict[str, Tokens]] = TypeAdapter(dict[str, Tokens])
 _WRITES = threading.Lock()
+_UNSAVED: dict[str, Tokens] = {}
+"""Sign-ins the keyring or file refused, kept in memory so they last this session; guarded by `_WRITES`."""
 
 
 def _load_all() -> dict[str, Tokens]:
@@ -81,26 +83,30 @@ def _load_all() -> dict[str, Tokens]:
 
 def load(resource: str) -> Tokens | None:
     """The sign-in for one MCP URL, if any, even when it has expired."""
-    return _load_all().get(resource)
+    return _UNSAVED.get(resource) or _load_all().get(resource)
 
 
 def _save(resource: str, tokens: Tokens) -> str | None:
     """Store `tokens`; the reason when the keyring or file refused them."""
-    try:
-        with _WRITES:
+    with _WRITES:
+        try:
             store = _load_all()
             store[resource] = tokens
             save_codex_credentials(value=_STORE.dump_json(store).decode(), account=ACCOUNT)
-    except (UserError, KeyringError, OSError) as exc:
-        return type(exc).__name__
-    return None
+        except (UserError, KeyringError, OSError) as exc:
+            _UNSAVED[resource] = tokens
+            return type(exc).__name__
+        _UNSAVED.pop(resource, None)
+        return None
 
 
 def forget() -> bool:
     """Sign out everywhere; `False` when there was nothing to forget."""
     with _WRITES:
+        unsaved = bool(_UNSAVED)
+        _UNSAVED.clear()
         if not _load_all():
-            return False
+            return unsaved
         delete_credentials(account=ACCOUNT)
         return True
 
@@ -372,8 +378,6 @@ class DeviceAuth(httpx.Auth):
         self._announce = announce
         self._http = http
         self._lock = anyio.Lock()
-        self._unsaved: Tokens | None = None
-        """Tokens the store refused; used until the session ends, since the store has nothing better."""
 
     def sync_auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
         """Unsupported: signing in waits on the network, and MCP clients are async."""
@@ -392,28 +396,19 @@ class DeviceAuth(httpx.Auth):
     async def _tokens(self, *, rejected: Tokens | None) -> Tokens:
         # One sign-in at a time: an MCP connection sends several requests at once.
         async with self._lock:
-            tokens = await to_thread.run_sync(load, self._resource) or self._unsaved
+            tokens = await to_thread.run_sync(load, self._resource)
             if tokens is None or not tokens.serves(read_only=self._read_only):
                 return await self.sign_in()
             if tokens != rejected and tokens.fresh():
                 return tokens  # Another request, or another CLAI process, may have refreshed it already.
             async with self._http() as http:
                 refreshed = await _refresh(http, resource=self._resource, tokens=tokens)
-            return await self._remember(refreshed) if refreshed else await self.sign_in()
+            return refreshed or await self.sign_in()
 
     async def sign_in(self) -> Tokens:
         """Run the device flow now, announcing the link and code."""
         async with self._http() as http:
-            tokens = await sign_in(
-                resource=self._resource, read_only=self._read_only, announce=self._announce, http=http
-            )
-        return await self._remember(tokens)
-
-    async def _remember(self, tokens: Tokens) -> Tokens:
-        # Only a token the store lost is held here, so `/logfire_mcp logout` still signs a working store out.
-        stored = await to_thread.run_sync(load, self._resource)
-        self._unsaved = None if stored == tokens else tokens
-        return tokens
+            return await sign_in(resource=self._resource, read_only=self._read_only, announce=self._announce, http=http)
 
 
 Status = Literal['signed in', 'expired', 'signed out']
