@@ -21,7 +21,7 @@ Then set `E2B_API_KEY` to your E2B API key.
 
 ## Quick start
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.e2b_sandbox import E2BSandbox
@@ -38,7 +38,7 @@ A sandbox lives for 24 hours, E2B's maximum, and is then paused; reattaching res
 
 ## Continue in the same sandbox
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.e2b_sandbox import E2BSandbox
@@ -58,7 +58,7 @@ The follow-up run finds the sandbox in the message history and works in it, so t
 
 For a narrower agent, use [`Shell`](shell.md) and [`FileSystem`](filesystem.md) instead of `Coder`, or write your own tool:
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent, RunContext
 from pydantic_ai_harness.e2b_sandbox import E2BSandbox
 from pydantic_ai_harness.filesystem import FileSystem
@@ -80,7 +80,7 @@ See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for more
 
 To come back to the sandbox without the message history, store the run's workspace ref and pass it back as `workspace=`:
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.e2b_sandbox import E2BSandbox
@@ -103,7 +103,7 @@ Already have an `e2b.AsyncSandbox`? Pass `workspace=E2BSandboxBackend(workspace=
 
 The sandbox keeps running, and billing, after the run ends. Pydantic AI never kills it. Kill it with the ref you stored:
 
-```python
+```python {names="defined"}
 from pydantic_ai.workspaces import WorkspaceRef
 from pydantic_ai_harness.e2b_sandbox import E2BSandboxBackend
 
