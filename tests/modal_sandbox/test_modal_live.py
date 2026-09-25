@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import anyio
 import pytest
@@ -23,10 +24,12 @@ from pydantic_ai.workspaces import (
     WorkspaceTimeoutError,
     WorkspaceUnavailableError,
 )
+from pytest_examples import CodeExample
 
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.modal_sandbox import ModalSandbox, ModalSandboxBackend
 
+from .._docs_examples import documented_cleanup, python_blocks, run_block
 from .._tool_calls import call_tools
 from .conftest import LIVE_IDLE_TIMEOUT, LIVE_SANDBOX_TIMEOUT
 
@@ -34,9 +37,13 @@ pytestmark = [pytest.mark.anyio(backends=['asyncio']), pytest.mark.modal_live]
 
 
 @asynccontextmanager
-async def owned_backend(**settings: object) -> AsyncGenerator[ModalSandboxBackend, None]:
-    limits = {'sandbox_timeout': LIVE_SANDBOX_TIMEOUT, 'idle_timeout': LIVE_IDLE_TIMEOUT}
-    backend = ModalSandboxBackend(image='python:3.12-slim', **(limits | settings))  # type: ignore[arg-type]
+async def owned_backend(**settings: Any) -> AsyncGenerator[ModalSandboxBackend, None]:
+    defaults: dict[str, Any] = {
+        'image': 'python:3.12-slim',
+        'sandbox_timeout': LIVE_SANDBOX_TIMEOUT,
+        'idle_timeout': LIVE_IDLE_TIMEOUT,
+    }
+    backend = ModalSandboxBackend(**(defaults | settings))
     native = await backend.get_client()
     try:
         yield backend
@@ -136,3 +143,32 @@ async def test_coder_tools_run_in_the_sandbox_modal_sandbox_supplies() -> None:
         for backend in supplied:
             if backend.ref is not None:
                 await (await backend.get_client()).terminate.aio()
+
+
+async def test_commands_get_a_usable_environment() -> None:
+    """With no `env`, a command sees `PATH` and `HOME` and finds git in the documented image; `env=` adds to them."""
+    import modal  # noqa: PLC0415 - optional extra, absent on slim installs
+
+    image = modal.Image.debian_slim(python_version='3.12').apt_install('git')
+    async with owned_backend(image=image) as backend:
+        result = await backend.run('echo "$PATH"; echo "$HOME"; git --version', shell=True, timeout=60)
+        path, home, git = result.stdout.splitlines()
+        assert path and home and git.startswith('git version')
+
+        result = await backend.run('echo "$FOO"; echo "$PATH"', shell=True, env={'FOO': '1'}, timeout=30)
+        assert result.stdout.splitlines() == ['1', path]
+
+
+# The README's Python blocks are the same as this page's.
+_DOCS_BLOCKS = python_blocks('docs/modal-sandbox.md')
+
+
+@pytest.mark.parametrize('example', [pytest.param(block, id=f'line {block.start_line}') for block in _DOCS_BLOCKS])
+def test_docs_example(example: CodeExample) -> None:
+    """Every example on the docs page runs as written, and its agent's tools do their work in a real sandbox.
+
+    A follow-up run, from the message history or a stored ref, works in the first run's sandbox.
+    """
+    _, runs = run_block(example, cleanup=documented_cleanup(_DOCS_BLOCKS, 'terminate_sandbox'))
+    assert all(run.used_sandbox for run in runs), runs
+    assert len({run.ref for run in runs}) <= 1, runs
