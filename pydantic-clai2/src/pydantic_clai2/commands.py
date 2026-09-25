@@ -15,8 +15,28 @@ from termflow.tui.completion import (  # pyright: ignore[reportMissingTypeStubs]
     Document,
 )
 
-from .config import SETTING_FIELDS, PluginSettings
+from .config import SETTING_FIELDS, STRING_SETTINGS, PluginSettings
 from .settings_store import SettingsStore
+from .spinners import BUILTIN_SPINNERS
+from .theme import names as theme_names
+
+
+def is_command_input(text: str) -> bool:
+    """Recognize slash commands without routing path-like prefixes to the registry.
+
+    A slash, dot, or backslash in the first token after `/` denotes a path, not a command
+    name. This is lexical: it neither reads local files nor parses prompt text
+    as shell arguments. Unknown command-shaped names still reach the registry.
+    """
+    if not text.startswith('/'):
+        return False
+    name = text.split(maxsplit=1)[0][1:]
+    return not any(marker in name for marker in ('/', '.', '\\'))
+
+
+def expand_bare_command(text: str) -> str:
+    """Map bare `clear` to `/clear`, as Code Puppy does, so every input path dispatches it as a command."""
+    return '/clear' if text.strip().lower() == 'clear' else text
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -27,6 +47,15 @@ class Command:
     description: str
     handler: Callable[[list[str]], str | Awaitable[str]]
     complete: Callable[[list[str]], Iterable[str]] = lambda _: ()
+    raw: bool = False
+    """Pass the argument text unparsed, as one element, so free-form prompts keep quotes and apostrophes."""
+    during_turn: bool = False
+    """Open the bare command's menu as soon as it is entered, even while a turn streams.
+
+    Only for menus whose changes the running turn cannot observe, such as settings that
+    take effect on the next turn. The run's output is held while the menu owns the screen.
+    With arguments the command still queues, keeping its order among queued follow-ups.
+    """
 
 
 class Commands(Completer):
@@ -60,14 +89,24 @@ class Commands(Completer):
 
     def execute(self, text: str) -> str | Awaitable[str]:
         """Parse shell-style arguments and dispatch without invoking a shell."""
-        words = shlex.split(text.removeprefix('/'))
-        if not words:
+        parts = text.removeprefix('/').split(maxsplit=1)
+        if not parts:
             return self.help([])
-        name, *args = words
+        name, rest = parts[0], parts[1] if len(parts) > 1 else ''
         command = self._commands.get(name)
         if command is None:
             raise ValueError(f'Unknown command /{name}. Use /help.')
-        return command.handler(args)
+        if command.raw:
+            return command.handler([rest] if rest else [])
+        return command.handler(shlex.split(rest))
+
+    def runs_during_turn(self, text: str) -> bool:
+        """Whether `text` is a bare command that opted into opening its menu mid-turn."""
+        words = text.split()
+        if len(words) != 1 or not is_command_input(text):
+            return False
+        command = self._commands.get(words[0][1:])
+        return command is not None and command.during_turn
 
     async def execute_async(self, text: str) -> str:
         """Await asynchronous plugin commands without blocking the event loop."""
@@ -77,7 +116,7 @@ class Commands(Completer):
     def get_completions(self, document: Document, complete_event: CompleteEvent) -> Iterator[Completion]:
         """Complete slash commands, contextual arguments, and @file paths."""
         text = document.text_before_cursor
-        if not text.startswith('/'):
+        if not is_command_input(text):
             word = document.get_word_before_cursor(WORD=True)
             if word.startswith('@'):
                 path = Path(word[1:]).expanduser()
@@ -85,16 +124,16 @@ class Commands(Completer):
                 prefix = '' if word.endswith('/') else path.name
                 try:
                     for child in sorted(directory.iterdir()):
-                        if child.name.startswith(prefix):
-                            yield Completion(child.name[len(prefix) :] + ('/' if child.is_dir() else ''))
+                        if prefix in child.name:
+                            yield Completion(child.name + ('/' if child.is_dir() else ''), start_position=-len(prefix))
                 except OSError:
                     return
             return
         words = text[1:].split()
         if len(words) <= 1 and not text.endswith(' '):
             prefix = text[1:]
-            for command in self._commands.values():
-                if command.name.startswith(prefix):
+            for command in list(self._commands.values()):
+                if prefix in command.name:
                     yield Completion(
                         command.name,
                         start_position=-len(prefix),
@@ -112,7 +151,7 @@ class Commands(Completer):
             args.append('')
         prefix = args[-1] if args else ''
         for candidate in command.complete(args):
-            if candidate.startswith(prefix):
+            if prefix in candidate:
                 yield Completion(candidate, start_position=-len(prefix))
 
     def help(self, _: list[str]) -> str:
@@ -133,7 +172,7 @@ def config_command(store: SettingsStore, args: list[str]) -> str:
         store.reset(args[1])
     elif len(args) == 3 and args[0] == 'set':
         adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
-        value: JsonValue = args[2] if args[1] == 'model' else adapter.validate_json(args[2])
+        value: JsonValue = args[2] if args[1] in STRING_SETTINGS else adapter.validate_json(args[2])
         store.set(args[1], value)
     else:
         raise ValueError('Usage: config show|get KEY|set KEY VALUE|reset KEY')
@@ -144,10 +183,16 @@ def set_completions(args: list[str]) -> Iterable[str]:
     """Complete setting names and values without network calls or credentials."""
     if len(args) <= 1:
         return (*SETTING_FIELDS, 'api_key')
+    if len(args) == 2 and args[0] == 'display.theme':
+        return theme_names()
+    if len(args) == 2 and args[0] == 'display.spinner':
+        return tuple(BUILTIN_SPINNERS)
     if len(args) == 2 and args[0] == 'model':
+        from .model_catalog import CODEX_MODELS  # noqa: PLC0415
+
         names = known_model_names()
         providers = sorted({name.partition(':')[0] + ':' for name in names} | {'openai-codex:'})
-        return (*providers, 'openai-codex:gpt-6-astra', *names)
+        return tuple(dict.fromkeys((*providers, *CODEX_MODELS, *names)))
     if len(args) == 2 and args[0] in ('display.thinking', 'display.splash'):
         return ('true', 'false')
     return ()

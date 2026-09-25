@@ -11,13 +11,23 @@ contract; this guide is shipped with the package for use without a checkout.
   with host.add, or installed directly as a capability class.
 - Add slash commands or a custom menu: host.commands.register(Command(...)).
 - Change tool output: host.render(EventClass), returning a Rich renderable.
+- Add a fragment to the status row: host.status_segment(fn), where fn returns a short string.
+- Add a working animation: host.spinner(name, frames, interval=..., description=...)
+  from a plugin, or an entry in spinners.json next to CLAI's settings (/spinner
+  init writes a starter). /spinner picks one; the choice persists as display.spinner.
 - React to prompts or session lifecycle: host.on with a typed handler.
 - Configure a plugin: host.settings with a Pydantic settings model.
 - Use a custom model/provider: supply a Pydantic AI Agent to chat from a Python
   launcher. There is no host.register_provider or host.register_model API.
-- Replace the prompt editor, splash, status line, streaming Markdown, built-in
-  model catalog, or global colour scheme: currently a CLAI source change, not
-  a supported PluginHost extension. A command can own its own UI instead.
+- Select colours: /theme opens the Termflow palette picker; /theme tokyo_night
+  selects directly and persists display.theme. /theme default restores CLAI's
+  existing appearance. Browsing previews a sample conversation without applying
+  the candidate. /set exposes the same preference.
+- Replace the prompt editor, splash, streaming Markdown, built-in model catalog,
+  or add custom palettes: currently a CLAI source change, not a supported
+  PluginHost extension. A command can own its own UI instead. You can add a
+  fragment to the status row with host.status_segment; you cannot redesign or
+  replace the row itself.
 
 Pydantic AI core owns the agent loop, model/provider protocols, hooks and tools.
 Harness owns reusable, non-terminal capabilities. CLAI owns the prompt loop,
@@ -103,12 +113,45 @@ clai2 plugins add NAME module[:attr] [JSON] saves for the next startup.
 delete its source file yourself to remove it from disk.
 
 The second built-in is ask_user (pydantic_clai2.ask_user_menu:activate): the
-harness AskUser capability with a full-screen terminal menu as its answerer, so
+harness AskUser capability with an inline numbered picker as its answerer, so
 the model can ask the user multiple-choice questions mid-run through
-ask_user_question. /plugins disable ask_user removes the tool. To answer the
+ask_user_question. The conversation remains visible. Enter or a number selects;
+for multiple selections it toggles, then Done submits. /plugins disable ask_user removes the tool. To answer the
 questions somewhere other than the terminal, declare ask_user again with a
 module whose activate(host) calls host.add(AskUser(answerer=...)) with your own
 async answerer; see PLUGINS.md.
+
+The inline `ask_user_question` picker also offers `Other (type answer)`.
+Choose it to type your own answer instead of the suggested options, including for
+multi-select questions. Enter submits nonblank text. Esc returns to the choices
+and keeps your draft; Ctrl-C declines the whole request. Backspace and arrow keys
+edit the text. Multiline paste is inserted as text and waits for Enter; it does
+not submit an answer or select choices. The conversation stays visible while you type. Custom answers
+appear in the transcript and reach the model as a one-item list under the question's header.
+
+The built-in logfire plugin (pydantic_clai2.logfire) is enabled by default in the
+stock CLI. It contributes core's Instrumentation capability using an isolated
+Logfire instance. It exports to Logfire only when credentials are present, with
+no interactive setup or console logging. Text and binary images are included by
+default, so review the telemetry destination before setting LOGFIRE_TOKEN. Use
+/plugins disable logfire to remove it, or replace its settings with:
+
+```text
+/plugins add logfire pydantic_clai2.logfire '{"include_content": false, "include_binary_content": false}'
+```
+
+Other options are service_name (default pydantic-clai2) and send_to_logfire
+(default "if-token-present", or false). This explicit option overrides
+LOGFIRE_SEND_TO_LOGFIRE. Use LOGFIRE_TOKEN or the SDK credential file in
+$XDG_CONFIG_HOME/pydantic-clai2/logfire (default ~/.config/pydantic-clai2/logfire).
+Both SDK configuration and credentials are read from that user directory, not
+from the checkout. LOGFIRE_CONFIG_DIR and LOGFIRE_CREDENTIALS_DIR are ignored;
+relative XDG_CONFIG_HOME falls back to ~/.config. Keep tokens out of plugin JSON. Disabling or reloading shuts down only the plugin's own
+providers, without mutating the agent or global tracer/meter providers. The
+existing global propagator is preserved, but SDK-installed executor propagation
+helpers are not removed on unload. While enabled, its per-run instrumentation takes precedence over the supplied
+agent's instrumentation; disabling restores that agent's own behavior. Standard
+SDK configuration, including explicit OTLP exporters, still applies.
 
 Plugins are trusted Python executed as the user. Drop-ins execute at startup,
 not in a sandbox. Do not install code or change executable startup configuration
@@ -118,7 +161,12 @@ SQLite. Use environment variables or plugin-owned credential storage instead.
 Each plugin gets its own PluginHost. Keep mutable state inside activate, not in
 module globals. Loading calls activate then session_start; unloading calls
 session_end and discards that host's registrations. Changes happen between turns.
-Import/activation failures discard partial registrations. Drop-in entry modules
+Failed or cancelled loading calls registered session_end handlers with reason=error
+under cancellation shielding, with a five-second cooperative timeout per handler,
+then discards partial registrations. Handler errors/timeouts are reported and later
+handlers still run. Blocking code and nested shields can exceed the deadline.
+Cleanup can run before session_start finishes; register it once the plugin owns a
+resource. Drop-in entry modules
 reload from fresh source; installed modules use importlib.reload, which can retain
 globals absent from the new source. Initialize state explicitly on activation.
 Do not mutate another plugin's host or the agent to register a plugin's tools.
@@ -140,9 +188,16 @@ in `activate`. Failed imports or shell rebuilds restore previous module bindings
 and report the error; correct the source and retry. Import-time side effects
 cannot be undone.
 
-Reload ordering follows existing imports. Restart for changes to import
-dependencies, startup code, or agent construction. Third-party dependencies are
-not recursively reloaded. Use `/plugins reload NAME` to reload only one plugin.
+Reload ordering follows module-scope imports in the current source, including
+newly added dependencies between CLAI modules and new local modules. Function-local
+imports and `TYPE_CHECKING` guards do not create eager dependencies. Literal
+guards and direct platform/version comparisons select their active branch without
+executing source expressions. Other conditions are analyzed conservatively and
+may require a restart if their alternatives form a cycle. New modules
+are imported only if reached by the updated code; invalid source or a detected
+import cycle fails before reloads begin. Restart for changes to startup code,
+agent construction, or dynamically loaded dependencies. Third-party dependencies
+are not recursively reloaded. Use `/plugins reload NAME` to reload only one plugin.
 
 ## Hooks, tools and settings
 
@@ -205,7 +260,14 @@ If an event supports cancel(), use its documented cancellation semantics.
 
 Command handlers receive list[str] arguments and return a string or an awaitable
 string. Register complete= on Command for Tab suggestions. Command names must be
-unique, including built-ins. Unknown slash commands do not reach the model.
+unique, including built-ins. Unknown command-shaped input such as `/missing`
+does not reach the model. Path-like input (a slash, dot, or backslash in the first
+token after `/`) is passed through as a prompt instead. Routing itself does not
+read files. Separately, the editor converts bracketed pastes of existing image
+paths into attachments. Ctrl-V or Alt-V attaches clipboard images. Attachment
+markers are removed before host turn hooks run; those hooks receive the text
+caption, while core hooks receive the multimodal request. Quoted paths are also
+prompts.
 Commands run between turns, which makes them suitable for configuration menus.
 
 Use a renderer for output during a stream:
@@ -225,9 +287,52 @@ Return a Rich renderable, or None to let the next renderer/default handle it.
 CLAI flushes streaming text before printing it. First matching non-None renderer
 wins. Do not print from an event observer when a renderer can do the job.
 Use host.console for plugin-owned console output outside streaming handlers.
-Use pydantic_clai2.theme roles ACCENT, INFO, WARNING, ERROR, MUTED, THINKING,
-not hard-coded colours. Raw ANSI uses theme.sgr. StreamRenderer owns text and
+Resolve pydantic_clai2.theme roles ACCENT, INFO, WARNING, ERROR, MUTED, THINKING
+with theme.color(role) at render time, not hard-coded colours. Raw ANSI uses
+theme.sgr(role), which resolves the selected colours itself. Choices are default
+(the unchanged CLAI appearance) and termflow.themes.PALETTES. theme.current()
+returns the selected TerminalPalette or None for default. Starting and exiting
+in default leaves terminal colours untouched. For bundled palettes, Termflow
+applies foreground, background, and ANSI slots via OSC; returning to default or
+exiting resets terminal colours. Redirected output receives no palette changes.
+The early splash keeps brand colours. Code uses the terminal foreground and ANSI
+syntax colours. Default diffs stay unchanged; bundled palettes use Termflow's diff defaults. StreamRenderer owns text and
 thinking, not tool-specific rendering.
+
+Add a fragment to the status row with host.status_segment:
+
+```python
+import os
+
+from pydantic_clai2.plugins import PluginHost
+
+
+def activate(host: PluginHost[None]) -> None:
+    @host.status_segment
+    def where() -> str:
+        return os.getcwd()
+```
+
+The fragment is appended after the built-in figures and painted muted. The row
+repaints about ten times a second, so it runs that often: no blocking IO, no
+awaits, no printing. Return an empty string to contribute nothing that frame.
+Fragments are truncated from the right on narrow terminals and cannot set their
+own colours. host.status_segment adds to the row; replacing the row, prompt
+editor, splash, or adding custom palettes is still a CLAI source change.
+
+Offer a working animation with host.spinner; the user selects it with /spinner:
+
+```python
+from pydantic_clai2.plugins import PluginHost
+
+
+def activate(host: PluginHost[None]) -> None:
+    host.spinner('wave', ['~   ', ' ~  ', '  ~ ', '   ~'], interval=0.1, description='a small wave')
+```
+
+Frames are padded to one width and interval is clamped to 0.02-1 seconds. The
+user's spinners.json replaces a plugin spinner of the same name, and an entry
+without frames only retunes an existing spinner's interval or description.
 
 ## Custom TUI menus
 
@@ -272,6 +377,11 @@ close normally. menu_key and run_worker cooperate on cancellation, keeping the
 terminal owned until the worker restores its screen. Do not fire-and-forget a
 thread that is still reading input. If a menu key needs an async action, follow
 plugin_menu.py's bridge back to the main event loop.
+
+Pass during_turn=True to Command when the menu is safe to open mid-turn, so the
+bare command opens at once instead of queueing behind the running turn. While
+run_worker runs, CLAI holds the turn's output and prints it in order afterwards.
+Only opt in when the running turn cannot observe what the menu changes.
 
 For named validated fields, reuse FieldSource, FieldMenu and run_flow in
 field_menu.py rather than write another editor. SettingsSource in set_menu.py
@@ -329,6 +439,16 @@ identifier, not an alias for your custom instance. Noninteractive Session expose
 resolve_model for translating overrides; chat currently configures its own
 resolver for Codex authentication, not a plugin provider registry.
 
+For `openai-codex` models, open `/model_settings openai-codex:gpt-6-astra`
+(or your saved Codex model), then **Service Tier / Fast Mode**. Choose
+**Fast (priority)** to request fast processing, or **Standard (default)** to
+turn it off. [Codex fast mode](https://developers.openai.com/codex/speed)
+uses more ChatGPT credits and depends on model and account availability. It does
+not lower reasoning effort. Reset restores the existing model default; it does
+not enable fast mode. The stored values remain `service_tier=priority` and
+`service_tier=default`, so older CLAI versions can read them. A custom
+`service_tier` body parameter still takes precedence.
+
 To extend the built-in picker in a CLAI source change, add a source returning
 CatalogModel values in model_catalog.py and merge it in catalog(). Adding a
 catalog row does not implement provider support. Editable per-model settings
@@ -351,3 +471,13 @@ edits, and verify disable removes your commands and tools. Keep README.md and
 PLUGINS.md aligned with user-facing API changes. For UI capabilities not exposed
 by PluginHost, state that limitation and propose a focused source change rather
 than monkeypatching a private global registry.
+
+## Headless invocation
+
+`clai2 -p "PROMPT" -m PROVIDER:NAME` runs one saved turn and prints only the final
+answer. Prompt text is required as an argument; stdin is not read. Use
+`--resume SESSION-ID` to continue saved history without opening the browser.
+The `ask_user` plugin is skipped without changing saved preferences. Full-screen
+requests fail, stream renderers are not called, and host console output is
+suppressed. Plugins must not read input or print directly to stdout. Errors go
+to stderr with a nonzero exit status. `-m` also works in the interactive CLI.

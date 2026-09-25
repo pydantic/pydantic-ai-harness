@@ -2,6 +2,7 @@
 
 import logging
 import os
+import sys
 from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -12,7 +13,7 @@ from anyio import get_cancelled_exc_class, move_on_after
 from pydantic_ai import AgentRunResult, AgentStreamEvent, RunContext, capture_run_messages
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart
+from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, ModelResponse, UserContent, UserPromptPart
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
@@ -63,6 +64,9 @@ class Session(Generic[DepsT, OutputT]):
         self.on_stream_event = on_stream_event
         self._messages: list[ModelMessage] = list(message_history)
         self._running = False
+        self._accepting_steering = False
+        self._run_context: RunContext[DepsT] | None = None
+        self._pending_steering: list[Sequence[UserContent]] = []
         self.on_context_usage: Callable[[int], None] | None = None
 
     @property
@@ -116,11 +120,20 @@ class Session(Generic[DepsT, OutputT]):
                 if snapshot is not None:
                     messages = snapshot.messages
             self._messages = list(messages)
+            if saved.summary.outcome in ('running', 'failed', 'cancelled'):
+                self._mark_interrupted()
             self.summary = saved.summary
             # Keep the caller's current model and approval configuration. Saved models are informational.
             return f'Resumed {saved.summary.title} ({saved.summary.id}).{warning}'
         finally:
             self._running = False
+
+    def _mark_interrupted(self) -> None:
+        # Let core close unanswered calls without replaying them on the next prompt.
+        if self._messages:
+            last = self._messages[-1]
+            if not isinstance(last, ModelResponse) or last.state != 'suspended':
+                self._messages[-1] = replace(last, state='interrupted')
 
     async def _save_turn(self, *, outcome: Literal['running', 'completed', 'failed', 'cancelled']) -> None:
         if self.conversations is None:
@@ -136,11 +149,24 @@ class Session(Generic[DepsT, OutputT]):
         model = self.resolve_model(self.model)
         return await model if isinstance(model, Awaitable) else model
 
-    async def prompt(self, text: str) -> AgentRunResult[OutputT]:
+    def steer(self, text: str, *, images: Sequence[BinaryContent] = ()) -> bool:
+        """Deliver input to the active run, or decline when no run is accepting input."""
+        if not self._accepting_steering:
+            return False
+        content: Sequence[UserContent] = [text, *images]
+        if self._run_context is None:
+            self._pending_steering.append(content)
+        else:
+            self._run_context.enqueue(*content, priority='asap')
+        return True
+
+    async def prompt(self, text: str, *, images: Sequence[BinaryContent] = ()) -> AgentRunResult[OutputT]:
         """Execute the complete native agent loop, including tool calls."""
         if self._running:
             raise RuntimeError('A conversation can only run one prompt at a time')
+        content: str | Sequence[UserContent] = [text, *images] if images else text
         self._running = True
+        self._accepting_steering = True
         try:
             previous = self._messages
             run_id = str(uuid4())
@@ -149,7 +175,7 @@ class Session(Generic[DepsT, OutputT]):
                 if self.summary.revision == 0:
                     title = ' '.join(''.join(c for c in text if c.isprintable() or c.isspace()).split())[:64]
                     candidate = replace(candidate, title=title or 'New session')
-                accepted: list[ModelMessage] = [*previous, ModelRequest(parts=[UserPromptPart(text)])]
+                accepted: list[ModelMessage] = [*previous, ModelRequest(parts=[UserPromptPart(content)])]
                 self.summary = await self.conversations.save(
                     summary=replace(candidate, outcome='running'), messages=accepted
                 )
@@ -158,7 +184,7 @@ class Session(Generic[DepsT, OutputT]):
                 try:
                     model = await self.resolved_model()
                     result = await self.agent.run(
-                        text,
+                        content,
                         deps=self.deps,
                         model=model,
                         model_settings=self.model_settings,
@@ -170,29 +196,44 @@ class Session(Generic[DepsT, OutputT]):
                         usage_limits=self.usage_limits,
                         event_stream_handler=self._stream,
                     )
+                    self._accepting_steering = False
                     self._messages = result.all_messages()
                     await self._save_turn(outcome='completed')
                     return result
                 except get_cancelled_exc_class() as cancelled:
+                    self._accepting_steering = False
                     # Core captures partial responses and tool results during cleanup.
                     # If cancellation precedes graph startup, retain at least the prompt.
-                    self._messages = messages or [*previous, ModelRequest(parts=[UserPromptPart(text)])]
+                    self._messages = messages or [*previous, ModelRequest(parts=[UserPromptPart(content)])]
+                    self._mark_interrupted()
                     try:
                         with move_on_after(5, shield=True):
                             await self._save_turn(outcome='cancelled')
                     except Exception as exc:  # noqa: BLE001 -- persistence failure must not swallow cancellation.
-                        cancelled.add_note(f'Could not save cancelled turn: {exc}')
+                        if sys.version_info >= (3, 11):  # `add_note` is 3.11+; the log below covers 3.10.
+                            cancelled.add_note(f'Could not save cancelled turn: {exc}')
                         logging.getLogger(__name__).error('Could not save cancelled turn: %s', exc)
                     raise
                 except Exception:
+                    self._accepting_steering = False
                     if self.conversations is not None:
                         self._messages = messages or self._messages
+                        self._mark_interrupted()
                         await self._save_turn(outcome='failed')
                     raise
         finally:
+            self._accepting_steering = False
+            self._run_context = None
+            self._pending_steering.clear()
             self._running = False
 
     async def _stream(self, ctx: RunContext[DepsT], events: AsyncIterable[AgentStreamEvent]) -> None:
+        self._accepting_steering = True
+        self._run_context = ctx
+        for content in self._pending_steering:
+            ctx.enqueue(*content, priority='asap')
+        self._pending_steering.clear()
+
         async def observed() -> AsyncIterable[AgentStreamEvent]:
             async for event in events:
                 if self.on_context_usage is not None:
@@ -203,11 +244,17 @@ class Session(Generic[DepsT, OutputT]):
                 if self.on_stream_event is not None:
                     await self.on_stream_event(event)
                 yield event
+            self._accepting_steering = False
+            self._run_context = None
 
         # Preserve a supplied agent's handler instead of replacing its observers.
         handler = self.agent.event_stream_handler
-        if handler is not None:
-            await handler(ctx, observed())
-        else:
-            async for _ in observed():
-                pass
+        try:
+            if handler is not None:
+                await handler(ctx, observed())
+            else:
+                async for _ in observed():
+                    pass
+        finally:
+            self._accepting_steering = False
+            self._run_context = None

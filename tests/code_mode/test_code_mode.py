@@ -63,7 +63,7 @@ from pydantic_core import SchemaValidator, core_schema
 from pydantic_monty import NOT_HANDLED, Monty, MountDir, OSAccess, OsFunction
 from typing_extensions import Never, TypedDict
 
-from pydantic_ai_harness import CodeMode
+from pydantic_ai_harness import CodeMode, ToolOutputLimits
 from pydantic_ai_harness.code_mode import CodeModeResourceLimits, CodeModeToolset
 from pydantic_ai_harness.code_mode._capability import (
     _extract_discovered_names,  # pyright: ignore[reportPrivateUsage]
@@ -71,8 +71,8 @@ from pydantic_ai_harness.code_mode._capability import (
 from pydantic_ai_harness.code_mode._toolset import (  # pyright: ignore[reportPrivateUsage]
     _SEARCH_TOOLS_MODIFIER,
     _TOOL_SEARCH_ADDENDUM,
-    _global_mode_is_sequential,
     _sanitize_tool_name,
+    global_mode_is_sequential,
 )
 
 _entered_toolsets: list[CodeModeToolset[Never]] = []
@@ -631,6 +631,53 @@ class TestCodeMode:
         result = await wrapper.call_tool('run_code', {'code': '1 + 2'}, ctx, tools['run_code'])
         # No print output → result returned directly (not wrapped in a dict).
         assert result.return_value == 3
+
+    @pytest.mark.parametrize(
+        ('code', 'expected'),
+        [
+            pytest.param("type('a')", "<class 'str'>", id='type'),
+            pytest.param('len', '<built-in function len>', id='builtin'),
+            pytest.param("ValueError('boom')", "ValueError('boom')", id='exception'),
+            pytest.param('...', 'Ellipsis', id='ellipsis'),
+            pytest.param("[float('nan'), float('-inf'), 1.5]", ['nan', '-inf', 1.5], id='non-finite-float'),
+            pytest.param(
+                "{'kind': type(1), 'rows': [1, (int, 'a')], 'ok': b'raw'}",
+                {'kind': "<class 'int'>", 'rows': [1, ("<class 'int'>", 'a')], 'ok': b'raw'},
+                id='nested',
+            ),
+            pytest.param('{int: 1}', {"<class 'int'>": 1}, id='key'),
+            pytest.param(
+                "{'<class \\'int\\'>': 'text', int: 1}",
+                "{\"<class 'int'>\": 'text', <class 'int'>: 1}",
+                id='key-collision',
+            ),
+        ],
+    )
+    async def test_run_code_renders_results_without_json_form_as_repr(self, code: str, expected: object) -> None:
+        """Monty hands back host objects no serializer handles; they would abort the run."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == expected
+
+    async def test_agent_run_survives_type_result_under_tool_output_limits(self) -> None:
+        """Regression: `type(x)` as a snippet's last line crashed `ToolOutputLimits` and the run."""
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            last_request = messages[-1]
+            assert isinstance(last_request, ModelRequest)
+            returned = [part for part in last_request.parts if isinstance(part, ToolReturnPart)]
+            if not returned:
+                return ModelResponse(parts=[ToolCallPart('run_code', {'code': "x = {'a': 1}\ntype(x)"})])
+            return ModelResponse(parts=[TextPart(returned[0].model_response_str())])
+
+        agent: Agent[object, str] = Agent(
+            FunctionModel(model_fn), capabilities=[CodeMode[object](), ToolOutputLimits[object]()]
+        )
+        result = await agent.run('what type is x?')
+        assert result.output == "<class 'dict'>"
 
     async def test_run_code_treats_none_as_no_expression_result(self) -> None:
         """A final `None` uses the same return shapes as no final expression."""
@@ -3839,7 +3886,7 @@ def _search_tool_def(description: str = 'Search for tools.') -> ToolDefinition:
 
 
 class TestGlobalModeIsSequential:
-    """`_global_mode_is_sequential` dispatches across pydantic-ai v1 and v2.
+    """`global_mode_is_sequential` dispatches across pydantic-ai v1 and v2.
 
     v1's `get_parallel_execution_mode` takes the pending calls list; v2 dropped
     the argument. The helper inspects arity and calls the matching shape, so
@@ -3853,8 +3900,8 @@ class TestGlobalModeIsSequential:
         def sequential(calls: list[ToolCallPart]) -> ParallelExecutionMode:
             return 'sequential'
 
-        assert _global_mode_is_sequential(parallel) is False
-        assert _global_mode_is_sequential(sequential) is True
+        assert global_mode_is_sequential(parallel) is False
+        assert global_mode_is_sequential(sequential) is True
 
     def test_v2_signature_without_arguments(self) -> None:
         def parallel() -> ParallelExecutionMode:
@@ -3863,5 +3910,5 @@ class TestGlobalModeIsSequential:
         def sequential() -> ParallelExecutionMode:
             return 'sequential'
 
-        assert _global_mode_is_sequential(parallel) is False
-        assert _global_mode_is_sequential(sequential) is True
+        assert global_mode_is_sequential(parallel) is False
+        assert global_mode_is_sequential(sequential) is True

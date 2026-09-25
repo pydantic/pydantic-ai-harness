@@ -4,6 +4,8 @@ import asyncio
 import io
 import re
 from decimal import Decimal
+from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic_ai import FunctionToolCallEvent, FunctionToolResultEvent, PartDeltaEvent, PartStartEvent
@@ -12,7 +14,7 @@ from rich.console import Console
 
 from pydantic_clai2._app import _reset_status  # pyright: ignore[reportPrivateUsage]
 from pydantic_clai2.status import Status, StatusLine
-from pydantic_clai2.theme import WARNING, sgr
+from pydantic_clai2.theme import MUTED, WARNING, sgr
 
 
 @pytest.fixture
@@ -30,6 +32,31 @@ def test_estimate_includes_tool_argument_deltas() -> None:
     status.output_tokens = 20
     assert 'context: 1,000 tokens' in status.text()
     assert '20 output tokens' in status.text()
+
+
+def test_workspace_follows_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, 'home', lambda: Path('/home/me'))
+    status = Status(model='m', workspace='/home/me/code/app')
+    assert status.text().startswith('m | ~/code/app | context: ')
+    status.workspace = '/home/me/' + 'deep/' * 10 + 'app'
+    shown = status.text().split(' | ')[1]
+    assert shown.startswith('\u2026') and shown.endswith('/deep/app') and len(shown) == 40
+    status.workspace = '/home/meow/app'
+    assert ' | /home/meow/app | ' in status.text()
+
+
+def test_workspace_control_characters_are_inert() -> None:
+    status = Status(model='m', workspace='/tmp/a\nb\x1b[31m\u00e9')
+    assert ' | /tmp/a\\x0ab\\x1b[31m\u00e9 | ' in status.text()
+    assert ' | /tmp/a\\x0ab\\x1b[31m\u00e9 | ' in ''.join(text for _, text in status.toolbar())
+
+
+def test_workspace_without_a_home_directory_is_shown_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_home() -> Path:
+        raise RuntimeError('Could not determine home directory.')
+
+    monkeypatch.setattr(Path, 'home', no_home)
+    assert ' | /srv/app | ' in Status(model='m', workspace='/srv/app').text()
 
 
 def test_toolbar_paints_the_context_figure_on_alert() -> None:
@@ -55,12 +82,13 @@ async def test_footer_paints_the_context_figure_on_alert(monkeypatch: pytest.Mon
     assert f'{sgr(WARNING)}9{sgr(WARNING)}0' in painted and f'{sgr(WARNING)}m' not in painted
 
 
-def test_new_resets_the_figures_whatever_follows_it() -> None:
+@pytest.mark.parametrize('command', ['/new', '/clear'])
+def test_new_resets_the_figures_whatever_follows_it(command: str) -> None:
     status = Status(context_tokens=90, context_alert=True, output_tokens=5, streamed_chars=8)
-    _reset_status('/new please', status)
+    _reset_status(f'{command} please', status)
     assert status == Status()
     status.context_alert = True
-    _reset_status('/newer', status)
+    _reset_status(f'{command}er', status)
     assert status.context_alert
 
 
@@ -83,15 +111,21 @@ async def test_shimmer_without_spinner(monkeypatch: pytest.MonkeyPatch, truecolo
     output = io.StringIO()
     frames: list[str] = []
     original_sleep = asyncio.sleep
+    now = [0.0]
 
     async def tick(delay: float) -> None:
         frames.append(output.getvalue().split('\x1b[2K')[-1])
+        now[0] += delay
         if len(frames) == 11:
             raise asyncio.CancelledError
         await original_sleep(0)
 
     monkeypatch.setattr('pydantic_clai2.status.asyncio.sleep', tick)
-    async with StatusLine(Console(file=output, force_terminal=True, width=40, height=24), Status(model='test\x1b\n')):
+    async with StatusLine(
+        Console(file=output, force_terminal=True, width=40, height=24),
+        Status(model='test\x1b\n'),
+        clock=lambda: now[0],
+    ):
         while len(frames) < 11:
             await original_sleep(0)
     plain = [re.sub(r'\x1b\[[0-9;]*m|\x1b8', '', frame) for frame in frames]
@@ -114,12 +148,12 @@ async def test_row_reserved_before_margins_and_again_on_resize() -> None:
 
     output = Output()
     console = Console(file=output, force_terminal=True, width=40, height=24)
-    async with StatusLine(console, Status()):
+    async with StatusLine(console, Status(), clock=lambda: 0.0):
         painted.clear()
         await asyncio.wait_for(painted.wait(), timeout=5)
         first = output.getvalue()
         assert first.count('\x1bD' * 4 + '\x1b[4A\x1b7\x1b[1;20r') == 1
-        assert '│> Working... Ctrl-C to interrupt' in first
+        assert '│> Working ⠋ Ctrl-C to interrupt' in first
         assert first.count('\x1b[24;1H') >= 2
         console.height = 30
         painted.clear()
@@ -135,7 +169,7 @@ async def test_row_reserved_before_margins_and_again_on_resize() -> None:
         console.height = 24
         painted.clear()
         await asyncio.wait_for(painted.wait(), timeout=5)
-        assert 'Working... Ctrl-C to interrupt' in output.getvalue()[before:]
+        assert 'Ctrl-C to interrupt' in output.getvalue()[before:]
 
 
 async def test_tiny_terminal() -> None:
@@ -196,3 +230,55 @@ async def test_cancellation_restores_scroll_region() -> None:
     assert '\n' not in output.getvalue()
     assert '\x1b[r' in output.getvalue()
     assert output.getvalue().endswith('\x1b8\x1b[?25h')
+
+
+def test_plugin_segments_are_appended_and_empties_are_skipped() -> None:
+    status = Status(model='m', status_segments=(lambda: '', lambda: '/tmp/work'))
+    assert status.text().endswith('ready | /tmp/work')
+    assert status.toolbar()[-1] == (MUTED, ' | /tmp/work')
+    assert ''.join(text for _, text in status.toolbar()) == status.text()
+    status.context_alert = True
+    assert ''.join(text for _, text in status.toolbar()) == status.text()
+
+
+def test_a_failing_segment_reports_itself_instead_of_breaking_the_row() -> None:
+    def broken() -> str:
+        raise RuntimeError('no directory')
+
+    status = Status(model='m', status_segments=(broken, lambda: 'last'))
+    assert status.text().endswith('ready | !RuntimeError | last')
+
+
+def test_a_segment_returning_a_non_string_is_reported_not_joined() -> None:
+    status = Status(model='m', status_segments=(lambda: cast(str, 42), lambda: cast(str, None), lambda: 'ok'))
+    assert status.text().endswith('ready | !int | ok')
+
+
+def test_a_fragment_cannot_break_the_prompt_row() -> None:
+    status = Status(model='m', status_segments=(lambda: 'a\nb\x1b[31mc',))
+    assert '\n' not in status.text()
+    assert '\x1b' not in status.text()
+    assert ''.join(text for _, text in status.toolbar()) == status.text()
+
+
+async def test_plugin_segments_are_painted_muted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('COLORTERM', 'truecolor')
+    output = io.StringIO()
+    status = Status(model='m', status_segments=(lambda: 'cwd: /tmp',))
+    async with StatusLine(Console(file=output, force_terminal=True, width=80, height=24), status):
+        pass
+    muted = sgr(MUTED)
+    painted = output.getvalue()
+    assert f'{muted}c{muted}w{muted}d' in painted
+    assert f'{muted}m{muted}p' in painted
+    assert sgr(WARNING) not in painted
+
+
+async def test_a_fragment_wider_than_the_terminal_still_mutes_only_itself() -> None:
+    output = io.StringIO()
+    status = Status(model='m', status_segments=(lambda: 'x' * 200,))
+    async with StatusLine(Console(file=output, force_terminal=True, width=60, height=24), status):
+        pass
+    painted = output.getvalue()
+    assert f'{sgr(MUTED)}m' not in painted
+    assert f'{sgr(MUTED)}x' in painted

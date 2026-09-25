@@ -18,7 +18,7 @@ from pydantic_ai_harness.step_persistence.conversations import SqliteConversatio
 from rich.console import Console
 
 import pydantic_clai2
-from pydantic_clai2 import DEFAULT_PLUGINS, chat
+from pydantic_clai2 import DEFAULT_PLUGINS, chat, theme
 from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.project_settings import ProjectSettings
 from pydantic_clai2.settings_store import SettingsStore
@@ -31,13 +31,17 @@ async def main(root: Path, mode: str) -> None:
     package = root / 'pydantic_clai2'
     app = package / '_app.py'
     original = app.read_text()
-    updated = original.replace("prompt_async('> ',", "prompt_async('updated> ',")
+    updated = original.replace("prompt_async('> ')", "prompt_async('updated> ')")
     updated = updated.replace('New session started.', 'Updated session started.')
     commands = package / 'commands.py'
     commands.write_text(commands.read_text().replace('Use /help.', 'Use updated /help.'))
+    if mode == 'new_imports':
+        commands.write_text(commands.read_text() + '\nRELOAD_MARKER = "source graph"\n')
+        (package / 'reload_bridge.py').write_text('from .commands import RELOAD_MARKER\n')
+        updated += '\nfrom .reload_bridge import RELOAD_MARKER\nassert RELOAD_MARKER == "source graph"\n'
     session = package / '_session.py'
     session.write_text(
-        session.read_text().replace('                        text,', "                        text + ' updated',")
+        session.read_text().replace('                        content,', "                        content + ' updated',")
     )
     plugin = root / 'reload_plugin.py'
     plugin.write_text(
@@ -67,6 +71,7 @@ async def main(root: Path, mode: str) -> None:
             '/help',
             '/set model test',
             '/set display.thinking false',
+            '/theme github_light',
             'first',
             '/reload extra',
             '/reload',
@@ -93,6 +98,12 @@ async def main(root: Path, mode: str) -> None:
 
         async def prompt_async(self, label: str, **kwargs: object) -> str:
             nonlocal reloads
+            palette = theme.current()
+            assert (palette.name if palette is not None else 'default') == store.load().theme
+            assert [item.text for item in self.completer.get_completions(Document('/theme '), CompleteEvent())] == list(
+                theme.names()
+            )
+            assert not list(self.completer.get_completions(Document('/theme github_light '), CompleteEvent()))
             assert [item.text for item in self.completer.get_completions(Document('/rel'), CompleteEvent())] == [
                 'reload'
             ]
@@ -174,11 +185,12 @@ async def main(root: Path, mode: str) -> None:
     if mode == 'custom':
         assert 'example: reload_plugin (built-in) (enabled, loaded)' in text, text
     assert seen[0] == ['first'], seen
-    assert seen[1] == ['first', 'second updated' if mode in ('success', 'custom') else 'second'], seen
+    assert seen[1] == ['first', 'second updated' if mode in ('success', 'custom', 'new_imports') else 'second'], seen
     assert seen[2] == [*seen[1], 'third' if mode == 'unchanged' else 'third updated'], seen
     assert labels[-1] == ('> ' if mode == 'unchanged' else 'updated> ')
     assert store.load().model == 'test' and not store.load().thinking
-    if mode in ('unchanged', 'success', 'custom'):
+    assert store.load().theme == 'github_light'
+    if mode in ('unchanged', 'success', 'custom', 'new_imports'):
         assert text.count('CLAI2 reloaded. Conversation preserved.') == 2, text
         assert ('Use /help.' if mode == 'unchanged' else 'Use updated /help.') in text, text
     else:

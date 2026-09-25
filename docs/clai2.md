@@ -8,6 +8,13 @@ not protect secret files or repository metadata. OS permissions still apply.
 Relative paths use the launch workspace. Use a custom agent with `Coder()` to
 retain workspace-scoped file tools. Shell output is displayed dimly.
 
+## Word deletion
+
+Option+Backspace (Alt+Backspace) deletes the word before the cursor, like Ctrl-W,
+including trailing whitespace. Spaces, tabs, and newlines separate words. Text
+after the cursor is preserved. Your terminal must send Option as Alt/Meta for
+this shortcut; legacy and modified-key encodings are supported.
+
 ## Interrupting a turn
 
 Press Ctrl-C once to cancel the active agent turn and return to input. Tool cleanup
@@ -25,8 +32,9 @@ to `config.db`: `$XDG_CONFIG_HOME/pydantic-clai2/input-history`, or
 `~/.config/pydantic-clai2/input-history` by default. On POSIX the file is restricted
 to its owner (mode 0600). Avoid entering secrets in the prompt: input history is
 not encrypted. Delete this file while CLAI is closed to clear saved input.
-`/new` clears model conversation history, not input recall. Model responses and
-tool results are not saved to this file.
+`/new` clears model conversation history, not input recall. `/clear`, or bare
+`clear`, is an alias of `/new`. Model responses and tool results are not saved
+to this file.
 
 ## CI coverage
 
@@ -54,6 +62,52 @@ pyramid, with CLAI lettering. The persistent `CLAI 2.0` banner uses `ansi_shadow
 The splash is disabled for redirected output, CLI arguments, small terminals,
 Windows, `NO_COLOR`, or `CLAI_NO_SPLASH=1`.
 
+## Git worktrees
+
+```bash
+py-cli clai2 --worktree my-task
+```
+
+```bash
+py-cli clai2 -w
+```
+
+A Git worktree is another checkout of the same repository with its own branch
+and working files. Run these commands inside a repository with at least one
+commit. `--worktree NAME` creates a `clai/NAME` branch from the current `HEAD`
+and starts CLAI at `<repository-root>/.worktrees/NAME`.
+`-w` is the short form; omit the name to generate one. Names start with a letter
+or digit and contain only ASCII letters, digits, hyphens, and underscores.
+
+After checkout succeeds, CLAI adds `/.worktrees/` to Git's local `info/exclude`
+file to keep generated checkouts out of `git status`, without changing your
+tracked `.gitignore`.
+Uncommitted changes, ignored files, and untracked files are not copied. Project settings, repository instructions, and coding
+tools use the new worktree root. Your user settings and plugins stay available;
+a relative `--database` path still refers to the directory you launched from.
+
+CLAI prints the new path and branch. Existing branches and non-empty directories
+are rejected. If checkout fails, CLAI tries to remove only the branch it just
+created, without forcing deletion. If cleanup or the ignore edit fails, the error
+names the retained branch or checkout for recovery. The worktree and branch
+remain after exit, including startup
+errors after creation, so CLAI does not delete your work. Enter that directory
+and run `clai2 --resume` to continue a saved session. `--worktree` cannot be
+combined with `--resume`, `config`, or `plugins`.
+
+When you no longer need the checkout, use Git's own cleanup commands from your
+original repository root. Without `--force`, Git refuses to remove a dirty worktree:
+
+```bash
+git worktree remove .worktrees/my-task
+git branch -d clai/my-task
+```
+
+!!! warning "Worktrees are not sandboxes"
+    A worktree separates working files, not permissions. CLAI's default tools can
+    still access files outside it. Creation runs before the agent starts and emits
+    no agent telemetry spans.
+
 ## Codex authentication
 
 `/login openai-codex` opens the browser and uses core's `OpenAICodexOAuthFlow`:
@@ -68,6 +122,11 @@ Installing or selecting a plaintext backend can store tokens in plaintext. Core 
 token refresh through CLAI's `OpenAICodexCredentialSource`. Tests mock keyring,
 the browser, and OAuth exchange and do not access real credentials.
 
+If Codex cannot refresh your login, CLAI tells you to run `/login openai-codex`
+in an interactive session, then retry your message. This replaces the generic
+connection error that can hide an expired login. Headless runs show the same
+advice on stderr and exit with code 1. CLAI does not retry the turn automatically.
+
 The default Coder shell runs under your OS identity, without a sandbox. Commands
 can read files and access credential backends available to that identity, including
 CLAI's tokens. Keyring is storage, not isolation from model-controlled commands.
@@ -77,6 +136,48 @@ The requested default does not guarantee model availability for a subscription.
 Custom agents supplied to `chat` retain their model unless settings explicitly
 select an override. `/login` is async, and plugin command handlers may also return
 an awaitable string.
+
+## GitHub Copilot subscriptions
+
+From a source checkout:
+
+```bash
+uv run --project pydantic-clai2 clai2
+```
+
+Run `/login github-copilot`, then open `/add_model` and choose `github-copilot`.
+The provider menu also starts login when no credentials exist. No application
+registration or client ID configuration is required. CLAI supplies the same
+[public Copilot OAuth client ID as Pi](https://github.com/earendil-works/pi/blob/fde38ed7c2f64434beffc6c0ec3b9994cb89ae23/packages/ai/src/auth/oauth/github-copilot.ts#L10-L11)
+and requests `read:user` access to your GitHub profile. This identifies the existing
+Copilot OAuth application, not a separately registered CLAI application.
+`GITHUB_COPILOT_CLIENT_ID` is an optional override for your own device-enabled OAuth
+application; unset or blank uses the bundled default. The workspace pins the merged
+Pydantic AI device-flow implementation until its release.
+
+Login prints a code and `https://github.com/login/device`, then starts polling.
+Open the link on this or another device and approve only your own session's code.
+CLAI does not launch a browser, so a text browser cannot block login or take over
+an SSH terminal. Ctrl-C stops polling; GitHub controls expiry. There is no localhost callback.
+
+GitHub authorization does not establish Copilot access. The model menu queries
+your account's catalog and keeps only picker-enabled `/chat/completions` models.
+It includes current-model details and `Ctrl+S` settings. Subscription and
+organization policy still control inference access. A known ID also works with
+`/add_model github-copilot:claude-haiku-4.5`.
+
+The `github-copilot` keyring account is separate from Codex and named API keys.
+Without a keyring, CLAI reports the plaintext `credentials-github-copilot.json`
+fallback under the user's CLAI config directory, created with mode `0600`.
+Tokens and issuance time stay out of settings, history, and login output.
+Expiring tokens require another `/login github-copilot`; there is no automatic
+refresh. Failed or cancelled authorization preserves the previous login.
+
+Saved login takes precedence over `GITHUB_COPILOT_API_KEY`,
+`GITHUB_COPILOT_API_TOKEN`, and `COPILOT_GITHUB_TOKEN`, checked in that order when
+no login is saved. CLAI does not read `GH_TOKEN`, `GITHUB_TOKEN`, or another
+application's token files. Core owns inference and its telemetry; CLAI adds no
+login-specific spans. Bare `/login` continues to sign in to Codex.
 
 ## Settings and commands
 
@@ -102,6 +203,13 @@ model get a picker (the model list is searchable, with "Type a value..." for
 anything not listed), everything else a typed input that validates as you go.
 An empty value resets. `R` resets the highlighted setting. Esc closes. Every
 edit saves and applies immediately, the same as `/set KEY VALUE`.
+
+While a turn is running, `/set`, `/model`, `/add_model`, `/model_settings`,
+`/theme`, and `/spinner` typed without arguments open their menu right away
+instead of queueing. The turn keeps running: its output is held while the menu is open
+and printed in order when the menu closes. A question from the agent waits for
+the menu to close. Model and run settings saved in the menu apply once the
+running turn ends. With arguments, these commands queue like any other.
 
 ## Models and their settings
 
@@ -139,7 +247,7 @@ Settings are validated before writes. `/set` updates the active settings snapsho
 legacy `/config` writes apply on restart; plugin changes apply on the next prompt.
 `--request-limit` controls the full prompt's model-request budget.
 
-Interactive commands: `/login`, `/set`, `/model`, `/help`, `/new`, `/exit`, `/config`, `/plugins`, and `/reload`.
+Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/help`, `/new`, `/clear`, `/exit`, `/config`, `/plugins`, and `/reload`.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
 and paths after `@`. Path completion inserts a path; it does not attach file contents.
 Unknown slash commands are not sent to the model. Up/down recall prompt history
@@ -188,20 +296,58 @@ failed or cancelled turns leave the previous history intact, though external too
 side effects may already have occurred. History is in memory only. Structured
 outputs are supported and displayed after completion.
 
-CLAI is painted in the Pydantic brand palette: Lithium magenta for headings,
-the banner, and the thing to look at; Calcium for list markers and errors; Aqua
-for links and added diff lines; Pydantic AI cyan for guidance; purple with a
-magenta-to-white shimmer for the active status line and plain purple while idle;
-brand grey for tool previews and hints. On terminals without 24-bit
-colour the nearest of the 16 standard colours is used. Every colour lives in
-`theme.py`. This is local to CLAI; it does not change your terminal's colours
-or Termflow defaults elsewhere. Code block syntax highlighting retains Termflow's
-Monokai default.
+### Themes
+
+```text
+/theme
+/theme tokyo_night
+/set display.theme github_light
+/theme default
+```
+
+`/theme` opens a searchable picker. Its preview shows a sample conversation with
+Markdown, thinking, a tool call, syntax highlighting, warnings, errors, and the
+input/status area. Each bundled palette paints the sample's foreground and
+background. Browsing does not apply a palette or save a setting. Enter confirms;
+Esc or Ctrl-C keeps your current choice. Narrow terminals show the list alone.
+
+`default` preserves CLAI's existing brand colours, including Markdown, menus,
+status, and diff highlighting. Starting and exiting with this choice leaves your
+terminal palette untouched. The default preview has no forced background.
+`/theme default` restores this appearance after trying another palette.
+
+All other choices come from Termflow's bundled registry, including
+`catppuccin_mocha`, `catppuccin_latte`, `tokyo_night`, and `github_light`. CLAI adds
+no new palettes. `/theme NAME` and `/set display.theme NAME` apply the same
+validated preference immediately and save it for future sessions. Tab completes
+these names. The `/set` theme row also lets you reset immediately;
+`/config reset display.theme` removes the saved override for the next startup.
+
+For a bundled palette, Markdown and newly opened menus use Termflow's
+`to_render_style()`, and shell roles use its colours. Termflow changes the terminal
+foreground, background, and 16 ANSI slots via OSC escape sequences. Supported
+terminals may also recolour existing ANSI-styled scrollback. CLAI resets terminal
+colours when you return to `default` or exit a selected palette, including failure
+and cancellation. Unsupported terminals may ignore these changes. Redirected
+output receives no palette-changing sequences. Your terminal configuration file
+is not modified.
+
+The early splash and the `CLAI 2.0` banner keep Pydantic's brand colours under
+every palette, except on 16-colour terminals, where the palette owns the ANSI
+slots. Syntax highlighting keeps Monokai;
+bundled palettes use Termflow's default diff colours. Theme selection adds no
+model requests or telemetry.
+
+### Streaming
 
 Streaming matches Code Puppy's separate output and thinking paths:
 
 - Markdown uses Termflow `SmoothWriter`: 12 ms ticks, 0.5-second catch-up,
-  minimum one visible character per tick. Markdown is parsed line-by-line.
+  minimum one visible character per tick. Prose is parsed line-by-line. Fenced
+  code is buffered until the closing fence or text part end, then highlighted
+  as a whole block so multiline strings and comments keep their context.
+  Unlabelled and Markdown fences stay literal, including indentation and blank
+  lines. Unknown languages use plain text. Long code lines wrap to the terminal width.
 - Thinking deltas feed `StreamSmoother` immediately: 20 ms ticks, 0.4-second
   catch-up, minimum two characters per tick. They display as dim literal text,
   without waiting for newlines or interpreting Markdown.
@@ -267,9 +413,9 @@ repeated completion heading before the diff or output.
 
 Native capability events drive specialized output: `FileEditedEvent` renders its
 bounded unified diff using Termflow `DiffRenderer`, the same renderer Code Puppy
-uses. Addition backgrounds are muted teal (`#203c3b`), deletion backgrounds are
-muted burgundy (`#432d3b`), and brighter markers distinguish the changes. Code
-syntax colors are unchanged. Successful file writes also show the proposed diff from their matching
+uses. The default appearance keeps CLAI's existing addition and deletion
+backgrounds; bundled palettes use Termflow's defaults. Both use brighter markers.
+Code syntax colours retain the Monokai default. Successful file writes also show the proposed diff from their matching
 `FileChangeRequestEvent`: new files show additions, overwrites show before/after
 changes. Without a matching request event, only the written path is shown. Failed
 or cancelled writes do not display a success diff. Large diffs retain the
@@ -296,7 +442,7 @@ unavailable. During a request it may reflect the previous response.
 
 While running, the footer reserves the terminal's bottom row using ANSI scrolling
 regions. Its text shimmers with a moving highlight at ten frames per second, with no spinner and a
-16-colour fallback when truecolour is unavailable. Prompt-toolkit owns the footer while accepting input. The run footer is
+a 16-colour fallback when truecolour is unavailable. Prompt-toolkit owns the footer while accepting input. The run footer is
 disabled for redirected output and restores normal scrolling on cancellation or
 failure. The cursor is hidden during runs and restored on completion, failure,
 or cancellation. No model requests or telemetry are added for status reporting.

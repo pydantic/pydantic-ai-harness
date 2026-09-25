@@ -19,9 +19,10 @@ class Screen:
     """
 
     def __init__(self) -> None:
-        """Start unbound: between prompts nothing is streaming, so taking the screen is free."""
+        """Start without a stream or editor to suspend."""
         self._take: FullScreen = bare_screen
         self._owner = asyncio.Lock()
+        self.editor: FullScreen | None = None
 
     @contextmanager
     def bound(self, take: FullScreen) -> Generator[None]:
@@ -35,5 +36,15 @@ class Screen:
     @asynccontextmanager
     async def full(self) -> AsyncGenerator[None]:
         """Own the terminal until the block exits. Give this to `PluginHost` as its `full_screen`."""
-        async with self._owner, self._take():
+        async with self._owner, self._take(), (self.editor or bare_screen)():
+            yield
+
+    @asynccontextmanager
+    async def overlay(self) -> AsyncGenerator[None]:
+        """Own the terminal for a menu the user opened mid-turn, leaving the stream running.
+
+        Unlike `full()`, the turn is not paused: its output is held by the menu worker
+        instead. Widgets still take turns, so a question the agent asks waits for the menu.
+        """
+        async with self._owner, (self.editor or bare_screen)():
             yield

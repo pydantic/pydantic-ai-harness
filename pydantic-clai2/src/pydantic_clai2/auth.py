@@ -1,10 +1,11 @@
-"""Codex login through core OAuth and an application-owned credential source."""
+"""Subscription login dispatch and Codex OAuth credential management."""
 
 import asyncio
 import webbrowser
 from collections.abc import Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
+from anyio import fail_after
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 from pydantic import TypeAdapter, ValidationError
@@ -18,13 +19,22 @@ from pydantic_ai.providers.openai_codex import (
 )
 from rich.console import Console
 
-from . import theme
+from . import github_copilot, theme
 from .credential_store import credentials_path, load_codex_credentials, save_codex_credentials
 
 _CREDENTIALS = TypeAdapter(OpenAICodexCredentials)
 _PASTE_PROMPT = 'Paste the URL the browser lands on (or finish there): '
 
 ReadLine = Callable[[str], Awaitable[str]]
+
+
+async def login_command(args: list[str], *, codex: 'CodexAuth') -> str:
+    """Keep bare `/login` compatible with Codex while accepting an explicit subscription provider."""
+    if args == ['github-copilot']:
+        return await github_copilot.login(console=codex.console)
+    if args not in ([], ['openai-codex']):
+        raise ValueError('Usage: /login [openai-codex|github-copilot]')
+    return await codex.login(args)
 
 
 async def read_line(message: str) -> str:
@@ -83,11 +93,13 @@ class CodexAuth:
         if args not in ([], ['openai-codex']):
             raise ValueError('Usage: /login openai-codex')
         flow = OpenAICodexOAuthFlow()
-        self.console.print('Sign in to ChatGPT/Codex in your browser. Waiting up to five minutes.', style=theme.INFO)
+        self.console.print(
+            'Sign in to ChatGPT/Codex in your browser. Waiting up to five minutes.', style=theme.color(theme.INFO)
+        )
         self.console.print(flow.authorization_url(), markup=False, highlight=False)
         self.console.print(
             'If the browser cannot reach this machine (for example over SSH), paste the URL it ends up on.',
-            style=theme.MUTED,
+            style=theme.color(theme.MUTED),
         )
 
         # Launching in a thread keeps the loop available for core's callback listener.
@@ -96,7 +108,8 @@ class CodexAuth:
 
         browser = asyncio.create_task(open_browser())
         try:
-            credentials = await asyncio.wait_for(self._receive(flow), timeout=self.login_timeout)
+            with fail_after(self.login_timeout):
+                credentials = await self._receive(flow)
             await self.source.save(credentials)
             self.provider = None
         except TimeoutError:
@@ -129,7 +142,7 @@ class CodexAuth:
                 if failed is callback and isinstance(callback.exception(), OSError):
                     self.console.print(
                         f'The local callback is unavailable ({callback.exception()}). Paste the URL instead.',
-                        style=theme.WARNING,
+                        style=theme.color(theme.WARNING),
                         markup=False,
                         highlight=False,
                     )

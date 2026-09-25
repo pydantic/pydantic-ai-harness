@@ -5,12 +5,14 @@ import hashlib
 import importlib
 import importlib.util
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Generic
 
+from anyio import CancelScope, fail_after
+from anyio.lowlevel import checkpoint
 from pydantic_ai import AgentStreamEvent
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from rich.console import Console
@@ -32,7 +34,8 @@ from .plugins import (
     bare_screen,
 )
 from .settings_store import SettingsStore
-from .status import Status
+from .spinners import Spinner
+from .status import Status, StatusSegment
 
 _FOLDER_PACKAGE = 'pydantic_clai2_plugins'
 
@@ -152,6 +155,19 @@ class PluginLoader(Generic[DepsT]):
         self._entries = refreshed
         return list(refreshed.values())
 
+    def _registration_order(self) -> list[PluginEntry[DepsT]]:
+        """Shipped plugins first, in declaration order, then everything else by name.
+
+        `entries()` sorts by name so the menu and `/plugins list` are easy to scan, but that sort
+        must not decide which instructions, renderer, or status segment comes first: alphabetical
+        order put `ask_user`'s guidance ahead of `coder`'s. Claiming a built-in's id still counts
+        as shipped, so a replaced declaration keeps its position.
+        """
+        entries = self.entries()
+        order = {name: index for index, name in enumerate(self._builtin)}
+        shipped = sorted((entry for entry in entries if entry.name in order), key=lambda entry: order[entry.name])
+        return [*shipped, *(entry for entry in entries if entry.name not in order)]
+
     def _discover(self) -> dict[str, Path]:
         folder = self._store.plugins_dir
         if not folder.is_dir():
@@ -160,7 +176,7 @@ class PluginLoader(Generic[DepsT]):
         try:
             children = sorted(folder.iterdir())
         except OSError as exc:
-            self._console.print(f'Cannot discover plugins: {exc}', style=theme.ERROR, markup=False)
+            self._console.print(f'Cannot discover plugins: {exc}', style=theme.color(theme.ERROR), markup=False)
             return {}
         for child in children:
             name = child.stem if child.suffix == '.py' else child.name
@@ -186,14 +202,22 @@ class PluginLoader(Generic[DepsT]):
         """Consulted before the default display, in load order."""
         return [renderer for host in self._loaded.values() for renderer in host.renderers]
 
+    def status_segments(self) -> list[StatusSegment]:
+        """Appended to the status row, in load order."""
+        return [segment for host in self._loaded.values() for segment in host.status_segments]
+
+    def spinners(self) -> list[Spinner]:
+        """Plugin spinners, in load order, so a later plugin wins a name collision."""
+        return [spinner for host in self._loaded.values() for spinner in host.spinners]
+
     async def load_all(self, *, fresh: bool = False) -> None:
         """Load enabled plugins, re-importing after a shell reload so host event types match."""
-        for entry in self.entries():
+        for entry in self._registration_order():
             if entry.declaration.enabled and entry.host is None:
                 try:
                     await self.load(entry.name, fresh=fresh)
                 except PluginError as exc:
-                    self._console.print(str(exc), style=theme.ERROR, markup=False)
+                    self._console.print(str(exc), style=theme.color(theme.ERROR), markup=False)
 
     async def load(self, name: str, *, fresh: bool = False) -> None:
         """Import, activate, and fire `session_start`. A failure leaves nothing registered."""
@@ -216,13 +240,35 @@ class PluginLoader(Generic[DepsT]):
             self._loaded[name] = host
             await _dispatch(host, self._session_start())
         except asyncio.CancelledError:
-            self._drop(entry)
+            await self._failed_load(entry, host)
             raise
         except Exception as exc:
-            self._drop(entry)
+            await self._failed_load(entry, host)
             entry.error = f'{type(exc).__name__}: {exc}'
             raise PluginError(name, exc) from exc
         entry.error = None
+
+    async def _failed_load(self, entry: PluginEntry[DepsT], host: PluginHost[DepsT]) -> None:
+        try:
+            for handler in host.handlers:
+                # Its own task keeps the handler's `CancelledError` apart from ours: the former is
+                # reported, the latter propagates. The shield defers scope cancellation until cleanup
+                # finishes; the `checkpoint()` below delivers it.
+                cleanup = asyncio.create_task(_end_failed_session(handler))
+                try:
+                    with CancelScope(shield=True):
+                        await asyncio.wait({cleanup})
+                except asyncio.CancelledError:
+                    cleanup.cancel()
+                    await asyncio.wait({cleanup})
+                    raise
+                if (error := cleanup.result()) is not None:
+                    self._console.print(
+                        str(PluginError(entry.name, error)), style=theme.color(theme.ERROR), markup=False
+                    )
+        finally:
+            self._drop(entry)
+        await checkpoint()
 
     async def unload(self, name: str, *, reason: SessionEndReason = 'exit') -> None:
         """Fire `session_end`, then drop everything the plugin registered."""
@@ -232,7 +278,7 @@ class PluginLoader(Generic[DepsT]):
         try:
             await _dispatch(entry.host, SessionEnd(reason=reason))
         except Exception as exc:  # noqa: BLE001 -- unloading must finish even if the plugin misbehaves.
-            self._console.print(str(PluginError(name, exc)), style=theme.ERROR, markup=False)
+            self._console.print(str(PluginError(name, exc)), style=theme.color(theme.ERROR), markup=False)
         finally:
             self._drop(entry)
 
@@ -255,7 +301,7 @@ class PluginLoader(Generic[DepsT]):
             except Exception as exc:
                 if isinstance(event, TurnStart):
                     raise PluginError(name, exc) from exc
-                self._console.print(str(PluginError(name, exc)), style=theme.ERROR, markup=False)
+                self._console.print(str(PluginError(name, exc)), style=theme.color(theme.ERROR), markup=False)
 
     async def enable(self, name: str) -> None:
         """Remember the plugin as enabled and load it now."""
@@ -385,3 +431,13 @@ def _activate(module: ModuleType, declaration: PluginSettings, host: PluginHost[
 async def _dispatch(host: PluginHost[DepsT], event: HostEvent) -> None:
     for handler in host.handlers:
         await handler(event)
+
+
+async def _end_failed_session(handler: Callable[[HostEvent], Awaitable[None]]) -> BaseException | None:
+    """Return the handler's failure rather than raising it: 3.10 tasks drop a `CancelledError`'s message."""
+    try:
+        with fail_after(5):
+            await handler(SessionEnd(reason='error'))
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 -- reported by the caller.
+        return exc
+    return None

@@ -71,12 +71,19 @@ Plugins load and unload while CLAI runs. The rules that make that safe:
 - **`reload` is unload, re-import, load.** Drop-in entry modules use fresh source.
   Installed modules use `importlib.reload`, which retains globals absent from the
   new source. Plugins must explicitly initialize their state on activation.
+- **Instruction order is capability order.** Placement is a core
+  `CapabilityOrdering` (`position`, `wraps`, `wrapped_by`), not a CLAI list.
 - **Registration is idempotent per name.** A capability is bound per run
   (`agent.run(capabilities=...)`), so "active for the next prompt" is the
   natural unit; nothing rebuilds the agent.
+- **Shipped plugins register first, in declared order.** The menu's alphabetical
+  order is for scanning only. Registration order is the order instructions,
+  renderers, and status segments are consulted in, so `coder`'s guidance leads
+  the prompt. `customization_guide()` orders itself after the guidance plugins
+  contribute and before harness `RepoContext`, so the CLAI hint never leads.
 - **Built-ins are declarations, not code paths.** `DEFAULT_PLUGINS` in
   `_app.py` lists what CLAI ships enabled (`coder`, `ask_user`, `repo_context`,
-  `compaction`, `persistence`). The loader treats them like drop-ins with the lowest
+  `compaction`, `persistence`, `logfire`). The loader treats them like drop-ins with the lowest
   precedence: a store declaration with the same id replaces one, `disable`
   persists an override, `remove` resets it. Do not special-case `Coder`
   anywhere else; the agent from `create_agent()` has no coding tools of its
@@ -91,7 +98,10 @@ Plugins load and unload while CLAI runs. The rules that make that safe:
   drop-in folder, project, built-in. CLAI never writes the project file.
 - **A load failure leaves the session as it was.** Import or `activate` errors
   are reported and the plugin stays unloaded; partial registrations from a
-  failed `activate` are discarded with the host.
+  failed `activate` are discarded with the host. Registered `session_end` handlers
+  run with `reason='error'` under a shield with a five-second cooperative timeout
+  per handler before a failed/cancelled load drops the host. Cleanup must tolerate
+  incomplete `session_start`; a handler failure must not skip later cleanup.
 
 Compaction registers harness `FallbackCompaction` directly with `max_fraction`
 and `context_window` for both strategies. Harness owns the trigger; do not add
@@ -109,7 +119,7 @@ summary failure; other exceptions propagate.
 3. Fire it from exactly one place in the shell.
 4. Document it in `PLUGINS.md` in the table it belongs to.
 
-## The `/plugins`, `/set`, `/model`, and `/add_model` menus
+## The `/plugins`, `/set`, `/theme`, `/model`, and `/add_model` menus
 
 Built on termflow's `MenuBuilder` (and `TextInputBuilder` for typed values),
 exactly like Code Puppy's `/agent`, `/mcp`, `/set`, and `/model` menus:
@@ -124,9 +134,11 @@ actions, `.footer_hint` for the key legend, `markdown_style()` for colours.
 - Nothing prints to the console while the menu is open; the alternate screen
   would hide it. Show empty states and errors inside the menu as disabled rows.
 - Esc and Ctrl-C close cleanly. They are not errors.
-- A menu opened mid-run (the `ask_user` question menu) goes inside
-  `async with host.full_screen()`, which flushes streamed text and pauses the
-  status row first. Between turns the menus do not need it.
+- A widget opened mid-run (including the inline `ask_user` picker) goes inside
+  `async with host.full_screen()`, which flushes streamed text and suspends the
+  editor's input reader first, preserving its draft. Slash-command handlers
+  already run with the editor suspended. Do not start a second input reader
+  alongside the live editor.
 - Adding a plugin is not in the menu. It needs free text, so it stays
   `/plugins add`.
 - Anything that is "edit named, validated fields" uses `field_menu.py`: a
@@ -156,13 +168,17 @@ the host does this for renderers, so do not call `console.print` from inside an
 
 ## Colours
 
-Every colour comes from `theme.py`, which holds the Pydantic brand palette and
-the roles CLAI paints with (`ACCENT`, `INFO`, `WARNING`, `ERROR`, `MUTED`,
-`THINKING`). Use a role, not a hex, and never a bare Rich colour name like
-`'cyan'` or `'dim'`. Raw ANSI surfaces (status line, splash) go through
-`theme.sgr(...)`, which handles the 16-colour fallback. `theme.py` is stdlib
-only because the splash imports it before anything heavy. Source of truth is
-the pydantic.dev `pydantic-visual-identity` skill's `brand-identity.md`.
+`/theme` offers the unchanged `default` appearance and `termflow.themes.PALETTES`.
+Do not define new palettes. Resolve brand roles with `theme.color(...)` for Rich;
+`theme.sgr(...)` resolves raw ANSI itself. `theme.current()` returns a Termflow
+palette or `None` for the original appearance. Termflow owns palette application
+and reset; `theme.use(...)` leaves the terminal untouched in the default session.
+Markdown keeps its original style by default and uses `to_render_style()` for a
+selected palette. The preview renders a sample without OSC changes or persistence.
+Heavy imports in `theme.py` stay lazy for the splash. Code uses the terminal
+foreground and ANSI syntax colours through `theme.syntax_theme()`, shared by
+streamed fences and theme previews. Default diff colours stay unchanged, while
+bundled palettes use Termflow defaults.
 
 ## File map
 
@@ -172,6 +188,7 @@ the pydantic.dev `pydantic-visual-identity` skill's `brand-identity.md`.
 | `_app.py` | the prompt loop and built-in `/commands` |
 | `_session.py` | conversation state, revision-checked saves, restore-only resume, per-run plugins |
 | `sessions.py` | resume command and background namer ownership; built-in step capture |
+| `forks.py` | `/fork` and `/forks`: history snapshot, background child sessions, deferred fork output |
 | `session_browser.py` | project/session browser using Termflow layout and terminal primitives |
 | `_rendering.py` | streaming Markdown and thinking |
 | `plugins.py` | `PluginHost`, hook names, event dataclasses |
@@ -185,15 +202,31 @@ the pydantic.dev `pydantic-visual-identity` skill's `brand-identity.md`.
 | `model_picker.py` | `/model`: selection and completion of saved models |
 | `model_catalog.py` | model sources (genai-prices today) merged by `catalog()` |
 | `model_settings.py` | `ModelSettingsForm`, the editable subset of `ModelSettings` |
+| `logfire.py` | the default-enabled, locally configured Logfire plugin over core `Instrumentation` |
 | `compaction.py` | the built-in `compaction` plugin: harness `FallbackCompaction([SummarizingCompaction, SlidingWindowCompaction])`, `/compact`, the context alert |
 | `commands.py` | `Command`, the registry, completion |
 | `usage_report.py` | `/usage`, `/cost`, and the footer cost, derived from `Session.messages` |
-| `status.py` | the footer `Status` fields and the `StatusLine` row painter |
+| `status.py` | the footer `Status` fields, `StatusSegment`, and the `StatusLine` row painter |
+| `live_prompt.py` | pinned editor lifecycle, completion worker, submission queue and menu handoff |
+| `prompt_surface.py` | scroll-region ownership, serialized transcript writes and changed-row painting |
+| `prompt_transcript.py` | bounded styled transcript tail for viewport replay |
+| `prompt_resize.py` | scoped resize notifications, without terminal IO in signal handlers |
+| `prompt_buffer.py` | pure draft editing, history navigation, search and cell-width wrapping |
+| `prompt_completion.py` | bounded daemon completion worker; no terminal ownership |
+| `prompt_keys.py` | keyboard decoder attachment only; no prompt-toolkit Application or renderer |
 | `config.py` | `Settings`, `PluginSettings` |
 | `settings_store.py` | the SQLite store under `$XDG_CONFIG_HOME/pydantic-clai2/` |
 | `project_settings.py` | `.clai/settings.json`: the walk-up to the git root, validation, `ProjectSettings` |
 | `repo_context.py` | the built-in `repo_context` plugin over harness `RepoContext` |
-| `theme.py` | brand palette, colour roles, `sgr()` |
+| `speculation.py` | the `run.speculative_code_mode` switch, `Ctrl+X Ctrl+S` toggle, session counters and pinned row |
+| `speculative_mode.py` | harness `CodeMode` wiring (native writes, read-only speculation allowlist, guidance), imported only while on |
+| `eager_timing.py` | eager `run_code` latency measurement and the nested-call id pattern |
+| `sandbox_calls.py` | events and ordering that render calls from inside `run_code` like direct calls; no harness imports |
+| `theme.py` | Existing brand roles, opt-in Termflow palette scope, `color()`, `sgr()` |
+| `theme_picker.py` | `/theme` picker over Termflow's bundled palettes |
+| `spinners.py` | the working-animation catalogue: builtins, plugin `host.spinner`, the user's `spinners.json`, `Spinners` |
+| `spinner_frames.py` | frame data for the Code Puppy cli-spinners pack |
+| `spinner_picker.py` | `/spinner`: animated picker, by-name selection with speed, `init` |
 
 Keep files concise - we don't need any 10,000 line files. Single responsibility.
 
@@ -210,6 +243,27 @@ Keep files concise - we don't need any 10,000 line files. Single responsibility.
   cancelled turn, the rewritten text), not a mock call count.
 - Renderers get synthetic events. They must not need `Coder` installed.
 - Cancellation: use a real `anyio` cancel scope, order with `Event`s, no sleeps.
+
+### Settings and database compatibility
+
+Before adding, removing, or renaming a setting, changing its type, meaning, or
+default, or changing the SQL schema, consider upgrades, downgrades, and branch
+switches. Different versions can share the same settings database.
+
+- Add regression cases to `tests/test_settings_compatibility.py` and affected CLI
+  tests using the previous stored format. Keep historical fixtures unchanged;
+  do not regenerate them with current models or rewrite them to make a change pass.
+- Verify older databases load with documented defaults for missing settings and
+  preserve existing preferences, plugin declarations, and model settings. Test
+  migrations and repeated initialization for data preservation and idempotence.
+- Preserve unknown saved setting names and their values when reading, editing
+  other settings, resetting, and reopening. Unknown does not mean obsolete.
+  Keep validation strict for known values, new writes, and plugin declarations.
+- For renamed fields or changed types, meanings, or defaults, define the migration
+  or intentional behavior change and test it explicitly. Comparing only against
+  the current `Settings()` defaults will not catch an unintended default change.
+- Verify rejected values and unsupported schema versions leave stored data intact.
+  If a change introduces a migration, test failure rollback as well as success.
 
 ## Local verification
 
@@ -236,3 +290,23 @@ frame pure, inject keys/size/IO, use Termflow terminal ownership and layout, and
 run through `menu_worker`. Metadata refreshes must preserve selection by ID.
 History-changing plugins use `await conversation.commit_messages`, not the legacy
 in-memory `replace_messages`, so exiting immediately after `/compact` is durable.
+
+The interactive editor owns its layout explicitly. Do not reintroduce a
+PromptSession renderer or mutate generated layout children. Transcript writes
+go directly to the scroll region, never through an erase/redraw of the editor.
+The hardware cursor stays hidden until release; the input cursor is a painted
+reverse-video cell. Keep terminal mutations in `PromptSurface`, and detach the
+key reader before a menu owns the screen. The remaining prompt-toolkit decoder
+preserves paste and modified keys not yet exposed by Termflow's `read_key`.
+
+Physical resize blanks the viewport and defers output until size notifications
+have been quiet for 250 ms. Rebuild from `TranscriptBuffer`, not guessed old row
+coordinates or cursor reports. Never send erase-scrollback (CSI 3 J). Keep editor
+height changes separate from physical resize, preserve the draft, and close the
+resize output spool on both normal handoff and failure. `SIGWINCH` only marks the
+resize and schedules a paint; the signal handler must not perform terminal IO.
+
+The `ask_user` picker is an inline exception to the full-screen menu convention.
+It borrows the released `PromptSurface` while the editor is suspended, retaining
+the shared transcript for resize replay. Keep its numbered choices and Enter
+toggles; do not reintroduce alternate-screen switching or Space-to-toggle.

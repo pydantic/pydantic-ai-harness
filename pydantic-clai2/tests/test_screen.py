@@ -13,6 +13,7 @@ from prompt_toolkit.output import DummyOutput
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from rich.console import Console
+from rich.text import Text
 
 from pydantic_clai2 import chat
 from pydantic_clai2.plugins import PluginHost
@@ -89,14 +90,14 @@ async def test_paused_status_line_releases_and_reserves_the_row() -> None:
     async with StatusLine(console, Status()) as line:
         reserved = output.getvalue()
         assert '\x1b[1;20r' in reserved and '\x1b[?25l' in reserved
-        assert 'Working... Ctrl-C to interrupt' in reserved
+        assert '> Working ' in reserved
         async with line.paused():
             paused = output.getvalue()[len(reserved) :]
             cleared = ''.join(f'\x1b[{row};1H\x1b[2K' for row in range(21, 25))
             assert paused == f'\x1b7\x1b[r{cleared}\x1b8\x1b[?25h'
         resumed = output.getvalue()[len(reserved) + len(paused) :]
         assert '\x1b[1;20r' in resumed and '\x1b[?25l' in resumed
-        assert 'Working... Ctrl-C to interrupt' in resumed
+        assert '> Working ' in resumed
     assert output.getvalue().endswith('\x1b[?25h')
 
 
@@ -125,7 +126,8 @@ async def test_paused_is_a_no_op_when_the_row_was_never_reserved() -> None:
     assert output.getvalue() == ''
 
 
-async def test_plugin_takes_the_screen_from_inside_a_tool(tmp_path: Path) -> None:
+@pytest.mark.parametrize('terminal', [False, True])
+async def test_plugin_takes_the_screen_from_inside_a_tool(tmp_path: Path, terminal: bool) -> None:
     store = SettingsStore(tmp_path / 'config.db')
     store.plugins_dir.mkdir()
     (store.plugins_dir / 'taker.py').write_text(
@@ -151,8 +153,8 @@ async def test_plugin_takes_the_screen_from_inside_a_tool(tmp_path: Path) -> Non
         await chat(
             Agent(TestModel(call_tools=['take'], custom_output_text='done')),
             deps=None,
-            console=Console(file=output),
+            console=Console(file=output, force_terminal=terminal),
             store=store,
         )
-    text = output.getvalue()
+    text = Text.from_ansi(output.getvalue()).plain
     assert text.index('● take') < text.index('drawing on a settled screen') < text.index('done')
