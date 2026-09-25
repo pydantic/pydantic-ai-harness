@@ -801,14 +801,15 @@ class TestListDirectory:
         result = await toolset.list_directory('subdir', workspace=ws)
         assert 'nested.py' in result
 
-    async def test_list_shows_a_link_leading_outside_but_refuses_reading_it(
+    async def test_list_hides_links_leading_outside_the_root(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend, outside: Path
     ) -> None:
-        """Entries are listed by name, with the size the workspace reports; access is checked on use."""
         (fs_root / 'escape_link.txt').symlink_to(outside / 'secret.txt')
-        assert 'escape_link.txt  (9 bytes)' in await toolset.list_directory('.', workspace=ws)
-        with pytest.raises(ModelRetry, match='resolves outside the root directory'):
-            await toolset.read_file('escape_link.txt', workspace=ws)
+        (fs_root / 'escape_dir').symlink_to(outside)
+        (fs_root / 'inner_link.txt').symlink_to(fs_root / 'hello.txt')
+        result = await toolset.list_directory('.', workspace=ws)
+        assert 'escape' not in result
+        assert 'inner_link.txt  (' in result
 
     async def test_list_skips_dangling_symlink(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
@@ -1131,14 +1132,15 @@ class TestFindFiles:
         assert '.hidden' not in result
         assert '.git' not in result
 
-    async def test_find_shows_a_link_leading_outside_but_refuses_writing_it(
+    async def test_find_hides_and_does_not_descend_links_leading_outside_the_root(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend, outside: Path
     ) -> None:
         (fs_root / 'escape_link.txt').symlink_to(outside / 'secret.txt')
-        assert 'escape_link.txt' in await toolset.find_files('*.txt', workspace=ws)
-        with pytest.raises(ModelRetry, match='resolves outside the root directory'):
-            await toolset.write_file('escape_link.txt', 'x', workspace=ws)
-        assert (outside / 'secret.txt').read_text() == 'escaped!\n'
+        (fs_root / 'escape_dir').symlink_to(outside)
+        (fs_root / 'inner_dir').symlink_to(fs_root / 'subdir')
+        result = await toolset.find_files('**', workspace=ws)
+        assert 'escape' not in result
+        assert 'inner_dir/nested.py' in result
 
     async def test_find_skips_dangling_symlink(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend

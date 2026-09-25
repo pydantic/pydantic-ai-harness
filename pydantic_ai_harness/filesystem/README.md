@@ -252,10 +252,10 @@ applies the same rule to absolute symlink targets.
   resolving outside `root_dir` via `..` or an absolute path is rejected. The
   target is checked both as written and once the workspace has resolved its
   symlinks, so a symlink inside the root that points outside it is rejected,
-  and `search_files` skips such files. Listings (`list_directory`,
-  `find_files`) show entries by name: a symlink whose target is outside
-  `root_dir` is listed but refused when read or written. Patterns match the
-  root-relative path, in direct access and in directory walks
+  and the walkers skip such links: `list_directory` and `find_files` leave
+  them out, and no walker descends into a linked directory outside
+  `root_dir`. Patterns match the root-relative path, in direct access and in
+  directory walks
   (`list_directory`, `search_files`, `find_files`, `list_files`, `grep`);
   `read_only_patterns` and `denied_patterns` also match a symlink's target, so
   a link to `.env` is read-only like `.env` itself. `root_dir='/'` turns the
@@ -263,11 +263,11 @@ applies the same rule to absolute symlink targets.
   target. This is a guardrail checked before each operation, not isolation: a
   symlink swapped in between the check and the use is not caught, and `Shell`
   commands are not bounded by `root_dir` at all. The workspace is the
-  isolation boundary: use a sandboxed workspace when the agent or the tree is
+  isolation boundary: use a sandbox workspace when the agent or the tree is
   untrusted.
-- **Bounded walks.** The workspace follows symlinked directories and cannot say
-  an entry is a symlink, so a link back to an ancestor is walked again under a
-  longer path. `search_files` and `find_files` stop after listing 10,000
+- **Bounded walks.** The walkers follow symlinked directories inside
+  `root_dir`, so a link back to an ancestor is walked again under a longer
+  path. `search_files` and `find_files` stop after listing 10,000
   directories or collecting 100,000 entries and end their result with a
   `[... walk cut short ...]` line.
 - **Binary detection.** `read_file` returns a placeholder instead of dumping
