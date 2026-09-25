@@ -21,7 +21,10 @@ if TYPE_CHECKING:
 
 
 class _RunBackend(DaytonaSandboxBackend):
-    """A backend `DaytonaSandbox` built for one run; the capability closes its own API client when the run ends."""
+    """A backend `DaytonaSandbox` built for one run; that run closes its API client when it ends."""
+
+    run_id: str | None = None
+    """The run that built this backend. A child run handed it through `workspace=` has another ID."""
 
 
 @dataclass(kw_only=True)
@@ -72,10 +75,9 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
 
     def get_workspace(self, ctx: RunContext[AgentDepsT], *, ref: WorkspaceRef | None) -> WorkspaceBackend | None:
         """Build the backend for this run. No I/O here: it attaches or creates on first use."""
-        del ctx
         if ref is not None and ref.provider != 'daytona':
             return None
-        return _RunBackend(
+        backend = _RunBackend(
             client=self.client,
             ref=ref,
             snapshot=self.snapshot,
@@ -84,13 +86,15 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
             env=self.env,
             network_block_all=self.network_block_all,
         )
+        backend.run_id = ctx.run_id
+        return backend
 
     async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
         try:
             return await handler()
         finally:
-            # Only a backend this capability built: one passed through `workspace=` may be shared
-            # with other runs still using its client.
+            # Only the backend this run built: one passed through `workspace=`, such as a parent
+            # run's handed to a subagent, may be shared with runs still using its client.
             backend = innermost_backend(ctx.workspace)
-            if isinstance(backend, _RunBackend):
+            if isinstance(backend, _RunBackend) and backend.run_id == ctx.run_id:
                 await backend.aclose()

@@ -192,6 +192,28 @@ async def test_run_leaves_a_supplied_client_or_workspace_open(fake_daytona: Fake
     assert fake_daytona.closed_clients == 0
 
 
+async def test_a_child_run_leaves_the_parent_runs_client_open(fake_daytona: FakeDaytona) -> None:
+    child = Agent(
+        TestModel(call_tools=['_touch']), deps_type=type(None), tools=[_touch], capabilities=[DaytonaSandbox()]
+    )
+    closed_after_child: list[int] = []
+
+    async def delegate(ctx: RunContext[None]) -> str:
+        await child.run('go', workspace=ctx.workspace)
+        closed_after_child.append(fake_daytona.closed_clients)
+        return 'ok'
+
+    parent = Agent(
+        TestModel(call_tools=['_touch', 'delegate']),
+        deps_type=type(None),
+        tools=[_touch, delegate],
+        capabilities=[DaytonaSandbox()],
+    )
+    await parent.run('go')
+    assert closed_after_child == [0]
+    assert fake_daytona.closed_clients == 1
+
+
 async def test_coder_works_in_the_sandbox(fake_daytona: FakeDaytona, tmp_path: Path) -> None:
     fake_daytona.host_root = tmp_path.resolve()
     results = await call_tools(
