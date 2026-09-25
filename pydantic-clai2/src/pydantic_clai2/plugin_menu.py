@@ -2,6 +2,8 @@
 
 import asyncio
 from collections.abc import Callable, Coroutine, Sequence
+from dataclasses import dataclass
+from functools import partial
 from typing import Generic, Protocol
 
 from termflow.tui import MenuBuilder, MenuItem  # pyright: ignore[reportMissingTypeStubs]
@@ -13,7 +15,15 @@ from .plugin_loader import PluginEntry, PluginError, PluginLoader
 from .plugins import DepsT
 
 Apply = Callable[[Coroutine[object, object, object]], None]
-_HINT = 'Up/Down move - Space enable/disable - R reload - D remove - Enter/Q close'
+_HINT = 'Up/Down move - Space enable/disable - C configure - R reload - D remove - Enter/Q close'
+
+
+@dataclass(frozen=True)
+class Configure:
+    """Close the list, open this plugin's settings menu, then show the list again."""
+
+    name: str
+    enable: bool = False
 
 
 class Redrawable(Protocol):
@@ -32,6 +42,7 @@ class PluginMenu(Generic[DepsT]):
         self._loader = loader
         self._apply = apply
         self.notice: str | None = None
+        self.pending: Configure | None = None
 
     def items(self) -> list[MenuItem]:
         """One row per plugin, `[x]` when loaded."""
@@ -59,13 +70,28 @@ class PluginMenu(Generic[DepsT]):
             lines.append(f'notice  {self.notice}')
         return '\n'.join(lines)
 
-    def toggle(self, menu: Redrawable, item: MenuItem) -> None:
-        """Space: enable or disable, saved immediately."""
+    def toggle(self, menu: Redrawable, item: MenuItem) -> MenuResult | None:
+        """Space: enable or disable, saved immediately. Enabling a plugin with settings opens them first."""
         entry = self._find(item)
+        if entry is not None and entry.host is None and self._loader.configurable(entry.name):
+            self.pending = Configure(entry.name, enable=True)
+            return MenuResult(item=item)
         if entry is not None:
             action = self._loader.disable if entry.host else self._loader.enable
             self._run(action(entry.name))
         menu.replace_items(self.items())
+
+    def configure(self, menu: Redrawable, item: MenuItem) -> MenuResult | None:
+        """C: open the plugin's settings menu, when it has one."""
+        entry = self._find(item)
+        if entry is None:
+            return None
+        if not self._loader.configurable(entry.name):
+            self.notice = f'Plugin {entry.name} has no settings menu.'
+            menu.replace_items(self.items())
+            return None
+        self.pending = Configure(entry.name)
+        return MenuResult(item=item)
 
     def reload(self, menu: Redrawable, item: MenuItem) -> None:
         """R: re-import and load again."""
@@ -93,6 +119,7 @@ class PluginMenu(Generic[DepsT]):
             .items(self.items())
             .preview(self.details)
             .on_key(' ', self.toggle)
+            .on_key('c', self.configure)
             .on_key('r', self.reload)
             .on_key('d', self.remove)
             .on_key('q', self.close)
@@ -118,15 +145,27 @@ class PluginMenu(Generic[DepsT]):
 async def open_plugins_menu(
     loader: PluginLoader[DepsT], *, run: Callable[[PluginMenu[DepsT]], object] | None = None
 ) -> str:
-    """Show the menu in a thread; key actions hop back to the event loop to apply."""
+    """Show the menu in a thread; key actions hop back to the event loop to apply.
+
+    A settings menu needs the terminal and may open workers of its own, so the list closes first,
+    the settings run on the event loop, and the list opens again.
+    """
     loop = asyncio.get_running_loop()
 
     def apply(action: Coroutine[object, object, object]) -> None:
         asyncio.run_coroutine_threadsafe(action, loop).result()
 
-    menu = PluginMenu(loader, apply=apply)
-    await run_worker(lambda: (run or _run_menu)(menu))
-    return ''
+    messages: list[str] = []
+    while True:
+        menu = PluginMenu(loader, apply=apply)
+        await run_worker(partial(run or _run_menu, menu))
+        pending = menu.pending
+        if pending is None:
+            return '\n'.join(messages)
+        try:
+            messages.append(await loader.configure(pending.name, enable=pending.enable))
+        except (PluginError, ValueError) as exc:
+            messages.append(str(exc))
 
 
 def _run_menu(menu: PluginMenu[DepsT]) -> None:  # pragma: no cover -- needs a real terminal.

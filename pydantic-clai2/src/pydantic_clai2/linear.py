@@ -1,17 +1,20 @@
-"""The built-in `linear` plugin: harness `Linear`, with its key named in `/keys` rather than stored in settings.
+"""The built-in `linear` plugin: harness `Linear`, set up in a settings menu, with its key named in `/keys`.
 
-Plugin settings are plaintext SQLite, so they carry no credential. `/linear key` picks a saved key or saves a
-new one under `LINEAR_API_KEY`, and only that name is stored. Each run resolves the name, so replacing the key
-in `/keys` reaches Linear on the next run and a deleted key fails the run instead of connecting without it.
+`/plugins configure linear` (also opened by `/plugins add`, `/plugins enable`, and Space or C in `/plugins`) edits
+every setting harness `Linear` takes from a user: how to sign in, which `/keys` entry to use, read-only access,
+and whether to pass the server's instructions. Edits are saved as they are made. Plugin settings are plaintext
+SQLite, so they carry no credential: the menu's key row picks a saved key or saves a new one under
+`LINEAR_API_KEY`, and only that name is stored. Each run resolves the name, so replacing the key in `/keys`
+reaches Linear on the next run and a deleted key fails the run instead of connecting without it.
 """
 
-from collections.abc import Awaitable, Callable
+from typing import Literal
 
 from anyio import to_thread
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from prompt_toolkit import PromptSession
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import RunContext
 from pydantic_ai_harness.linear import Linear
@@ -19,12 +22,14 @@ from pydantic_ai_harness.linear import Linear
 from . import theme
 from .api_keys import KeyReference, SecretPrompt, load_keys, prompt_api_key, resolve_key, save_key, save_key_connection
 from .commands import Command
-from .credential_store import load_codex_credentials
+from .credential_store import delete_credentials, load_codex_credentials
+from .field_menu import FieldMenu, FieldRow, run_flow_async, shown
 from .mcp import HTTPServer, TokenStore, http_client, oauth
+from .plugin_config import PluginConfig
 from .plugins import DepsT, PluginHost, SessionStart
 
 KEY_NAME = 'LINEAR_API_KEY'
-"""The `/keys` label a new Linear key is saved under, and the one used before `/linear key` picks another."""
+"""The `/keys` label a new Linear key is saved under, and the one used until the menu picks another."""
 ACCOUNT = 'linear'
 """Credential-store account holding the chosen key's name. `api_keys.key_users` checks it before a rename."""
 TOKEN_ACCOUNT = 'linear_plugin'
@@ -32,15 +37,22 @@ TOKEN_ACCOUNT = 'linear_plugin'
 # The endpoints harness `Linear` connects to; with `client`, the plugin picks the URL itself.
 _URL = 'https://mcp.linear.app/mcp'
 _READ_ONLY_URL = 'https://mcp.linear.app/mcp/readonly'
-_RECONFIGURE = '/linear key'
+_RECONFIGURE = '/plugins configure linear'
 
 
 class LinearSettings(BaseModel):
-    """The JSON a `linear` declaration may carry. Credentials live in `/keys` or the keyring, never here."""
+    """The JSON a `linear` declaration may carry. Credentials live in `/keys` or the keyring, never here.
+
+    These are the harness `Linear` fields a user chooses. Linear's hosted server has one URL (plus its read-only
+    variant) and takes the workspace from the signed-in account, so there is no base URL or workspace field.
+    """
 
     model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
+    auth: Literal['api_key', 'oauth'] = Field(
+        default='api_key', description='An API key from /keys, or browser sign-in with tokens kept in the keyring.'
+    )
     read_only: bool = Field(default=True, description="Connect to Linear's read-only endpoint.")
-    oauth: bool = Field(default=False, description='Sign in through the browser; tokens are kept in the keyring.')
+    include_instructions: bool = Field(default=True, description="Pass the server's own instructions to the agent.")
 
 
 class _Connection(BaseModel):
@@ -50,10 +62,11 @@ class _Connection(BaseModel):
 
 
 def activate(host: PluginHost[DepsT]) -> None:
-    """Add `Linear` and `/linear`; a missing key is reported now and fails each run until one is chosen."""
+    """Add `Linear`; a missing key is reported now and fails each run until one is chosen."""
     settings = host.settings(LinearSettings)
-    if settings.oauth:
-        host.add(Linear[DepsT](client=_oauth_client(settings.read_only)))
+    if settings.auth == 'oauth':
+        client = _oauth_client(settings.read_only)
+        host.add(Linear[DepsT](client=client, include_instructions=settings.include_instructions))
         store = TokenStore(TOKEN_ACCOUNT)
 
         async def logout(args: list[str]) -> str:
@@ -62,21 +75,22 @@ def activate(host: PluginHost[DepsT]) -> None:
             await to_thread.run_sync(store.forget)
             return 'Signed out of Linear. The next run opens the browser to sign in again.'
 
-        _register(host, 'Sign out of Linear (/linear logout).', logout, 'logout')
+        host.commands.register(
+            Command(
+                name='linear',
+                description='Sign out of Linear (/linear logout).',
+                handler=logout,
+                complete=lambda _: ('logout',),
+            )
+        )
         return
 
     def token(_: RunContext[DepsT]) -> str:
         return resolve_key(token=reference(), reconfigure=_RECONFIGURE)
 
-    host.add(Linear[DepsT](auth=token, read_only=settings.read_only))
-
-    async def configure(args: list[str]) -> str:
-        if args != ['key']:
-            raise ValueError('Usage: /linear key')
-        prompt: PromptSession[str] = PromptSession()
-        return await choose_key(prompt)
-
-    _register(host, 'Choose the /keys entry Linear uses (/linear key).', configure, 'key')
+    host.add(
+        Linear[DepsT](auth=token, read_only=settings.read_only, include_instructions=settings.include_instructions)
+    )
 
     @host.on('session_start')
     async def check(_: SessionStart) -> None:  # pyright: ignore[reportUnusedFunction]
@@ -86,8 +100,123 @@ def activate(host: PluginHost[DepsT]) -> None:
             host.console.print(f'Linear: {exc}', style=theme.color(theme.WARNING), markup=False)
 
 
+async def configure(config: PluginConfig) -> str:
+    """The settings menu: each edit is saved at once, and the key row opens the `/keys` picker."""
+    prompt: PromptSession[str] = PromptSession()
+
+    async def pick_key() -> list[str]:
+        try:
+            return [await choose_key(prompt)]
+        except (UserError, ValueError) as exc:
+            return [str(exc)]
+
+    menu = FieldMenu(_Settings(config))
+    messages = await run_flow_async(menu, config.runners, submenus={'api_key': pick_key})
+    return '\n'.join(messages) or 'Linear settings unchanged.'
+
+
+class _Settings:
+    """The rows of the Linear settings menu; a `field_menu.FieldSource`."""
+
+    title = 'Linear settings'
+
+    def __init__(self, config: PluginConfig) -> None:
+        self._config = config
+
+    def rows(self) -> list[FieldRow]:
+        saved = self._saved()
+        rows = [
+            FieldRow(
+                key='auth',
+                label='Sign-in',
+                description=LinearSettings.model_fields['auth'].description or '',
+                default='api_key',
+                choices=('api_key', 'oauth'),
+                choice_labels={'api_key': 'API key from /keys', 'oauth': 'Browser sign-in (OAuth)'},
+                allow_custom=False,
+            )
+        ]
+        if saved.auth == 'api_key':
+            rows.append(
+                FieldRow(
+                    key='api_key',
+                    label='API key',
+                    description=(
+                        'Enter picks a saved /keys entry or enters a new key, masked. Only the name is stored; '
+                        f'R goes back to {KEY_NAME}. Several plugins can share one entry.'
+                    ),
+                    default=KEY_NAME,
+                    note=self._key_note(),
+                )
+            )
+        rows += [
+            FieldRow(
+                key='read_only',
+                label='Access',
+                description=LinearSettings.model_fields['read_only'].description or '',
+                default='true',
+                choices=('true', 'false'),
+                choice_labels={'true': 'Read-only', 'false': 'Read and write'},
+                allow_custom=False,
+            ),
+            FieldRow(
+                key='include_instructions',
+                label='Server instructions',
+                description=LinearSettings.model_fields['include_instructions'].description or '',
+                default='true',
+                choices=('true', 'false'),
+                choice_labels={'true': 'Include', 'false': 'Leave out'},
+                allow_custom=False,
+            ),
+        ]
+        return rows
+
+    def current(self, row: FieldRow) -> str:
+        if row.key == 'api_key':
+            try:
+                return reference().name
+            except UserError:
+                return '(invalid choice)'
+        return shown(self._saved().model_dump()[row.key])
+
+    def problem(self, row: FieldRow, text: str) -> str | None:  # pragma: no cover -- no row opens a text editor.
+        """Nothing here is typed: every row is a fixed choice or the `/keys` picker."""
+        return None
+
+    def apply(self, row: FieldRow, raw: str) -> str:
+        self._config.save(self._validated(row, raw).model_dump(exclude_defaults=True))
+        return f'Linear {row.label}: {row.display(raw)}.'
+
+    def reset(self, row: FieldRow) -> str:
+        if row.key == 'api_key':
+            delete_credentials(account=ACCOUNT)
+            return f'Linear uses {KEY_NAME} from /keys from the next run.'
+        settings: dict[str, JsonValue] = self._saved().model_dump(exclude_defaults=True)
+        settings.pop(row.key, None)
+        self._config.save(settings)
+        return f'Linear {row.label}: {row.display(row.default)} (default).'
+
+    def _saved(self) -> LinearSettings:
+        try:
+            return LinearSettings.model_validate(self._config.settings())
+        except ValidationError:
+            return LinearSettings()
+
+    def _validated(self, row: FieldRow, text: str) -> LinearSettings:
+        settings: dict[str, JsonValue] = self._saved().model_dump()
+        settings[row.key] = text == 'true' if isinstance(settings[row.key], bool) else text
+        return LinearSettings.model_validate(settings)
+
+    def _key_note(self) -> str:
+        try:
+            name = reference().name
+        except UserError as exc:
+            return str(exc)
+        return '' if name in load_keys() else f'{name} is missing from /keys'
+
+
 def reference() -> KeyReference:
-    """The key Linear uses: the one `/linear key` chose, else `LINEAR_API_KEY`."""
+    """The key Linear uses: the one chosen in the settings menu, else `LINEAR_API_KEY`."""
     raw = load_codex_credentials(account=ACCOUNT)
     if raw is None:
         return KeyReference(name=KEY_NAME)
@@ -124,14 +253,6 @@ async def choose_key(prompt: SecretPrompt) -> str:
         lambda: save_key_connection(account=ACCOUNT, token=key, value=value_json, reconfigure=_RECONFIGURE)
     )
     return f'{saved}Linear uses {key.name} from /keys from the next run.'
-
-
-def _register(
-    host: PluginHost[DepsT], description: str, handler: Callable[[list[str]], Awaitable[str]], action: str
-) -> None:
-    host.commands.register(
-        Command(name='linear', description=description, handler=handler, complete=lambda _: (action,))
-    )
 
 
 def _oauth_client(read_only: bool) -> Client[StreamableHttpTransport]:

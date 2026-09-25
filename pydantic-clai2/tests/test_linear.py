@@ -1,9 +1,13 @@
-"""The built-in `linear` plugin: declared disabled, its key named in `/keys`, and resolved on every run."""
+"""The built-in `linear` plugin: declared disabled, set up in its settings menu, key named in `/keys`.
+
+The menu tests drive the real termflow widgets with scripted keys, the way `test_api_keys` drives the key picker.
+"""
 
 import io
+import itertools
 import json
 from pathlib import Path
-from typing import TypeGuard
+from typing import Protocol, TypeGuard
 
 import keyring
 import pytest
@@ -20,7 +24,7 @@ from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.linear import Linear
 from rich.console import Console
 
-from pydantic_clai2 import DEFAULT_PLUGINS, api_keys, linear
+from pydantic_clai2 import DEFAULT_PLUGINS, api_keys, field_menu, linear
 from pydantic_clai2.api_keys import delete_key, key_users, load_keys, rename_key, save_key
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.credential_store import load_codex_credentials, save_codex_credentials
@@ -32,6 +36,23 @@ from pydantic_clai2.settings_store import SettingsStore
 
 pytestmark = pytest.mark.anyio
 Vault = dict[tuple[str, str], str]
+
+
+class Press(Protocol):
+    def __call__(self, *keys: str) -> None: ...
+
+
+@pytest.fixture(autouse=True)
+def press(monkeypatch: pytest.MonkeyPatch) -> Press:
+    """Script the keys every menu reads; once they run out, Esc closes whatever is open."""
+
+    def script(*keys: str) -> None:
+        pressed = itertools.chain(keys, itertools.repeat('escape'))
+        monkeypatch.setattr(field_menu, 'menu_key', pressed.__next__)
+        monkeypatch.setattr(api_keys, 'menu_key', pressed.__next__)
+
+    script()
+    return script
 
 
 @pytest.fixture
@@ -87,14 +108,25 @@ async def declare(loader: PluginLoader[None], settings: dict[str, JsonValue]) ->
     await loader.command(['add', 'linear', 'pydantic_clai2.linear', json.dumps(settings)])
 
 
+def saved(tmp_path: Path) -> dict[str, JsonValue]:
+    [declaration] = [plugin for plugin in SettingsStore(tmp_path / 'settings.db').plugins() if plugin.id == 'linear']
+    return declaration.settings
+
+
 def is_linear(capability: object) -> TypeGuard[Linear[None]]:
     return isinstance(capability, Linear)
 
 
+def only(loader: PluginLoader[None]) -> Linear[None]:
+    [capability] = loader.capabilities()
+    assert is_linear(capability)
+    return capability
+
+
 def token(loader: PluginLoader[None]) -> str | None:
     """What the next run connects with."""
-    [capability] = loader.capabilities()
-    assert is_linear(capability) and callable(capability.auth)
+    capability = only(loader)
+    assert callable(capability.auth)
     return capability.auth(RunContext(deps=None, model=TestModel(), usage=RunUsage()))
 
 
@@ -115,34 +147,82 @@ async def test_each_run_resolves_the_named_key(tmp_path: Path, vault: Vault) -> 
     await loader.load_all()
     assert loader.capabilities() == [], 'disabled until the user enables it'
     save_key(name=KEY_NAME, value='lin_1')
-    assert await loader.command(['enable', 'linear']) == 'Enabled linear.'
+    assert await loader.command(['enable', 'linear']) == 'Linear settings unchanged.\nEnabled linear.'
     assert output.getvalue() == ''
-    [capability] = loader.capabilities()
-    assert isinstance(capability, Linear) and capability.read_only
+    capability = only(loader)
+    assert capability.read_only and capability.include_instructions
     assert token(loader) == 'lin_1'
 
     save_key(name=KEY_NAME, value='lin_2')
     assert token(loader) == 'lin_2', 'replacing the key in /keys reaches the next run without a reload'
     delete_key(name=KEY_NAME)
     with pytest.raises(
-        UserError, match=f'{KEY_NAME} is missing. Restore it in /keys or reconfigure through /linear key'
+        UserError, match=f'{KEY_NAME} is missing. Restore it in /keys or reconfigure through /plugins configure linear'
     ):
         token(loader)
-    assert all(
-        'lin_' not in value
-        for value in (str(plugin.settings) for plugin in SettingsStore(tmp_path / 'settings.db').plugins())
-    )
-
-    await declare(loader, {'read_only': False})
-    [capability] = loader.capabilities()
-    assert isinstance(capability, Linear) and not capability.read_only
     await loader.close('exit')
 
 
-async def test_missing_key_is_reported_at_load_and_fixed_with_linear_key(
-    tmp_path: Path, vault: Vault, monkeypatch: pytest.MonkeyPatch
+async def test_menu_saves_each_edit_and_reloads(tmp_path: Path, vault: Vault, press: Press) -> None:
+    save_key(name=KEY_NAME, value='lin')
+    loader, _, _ = make(tmp_path)
+    await loader.command(['enable', 'linear'])
+    # Rows: Sign-in, API key, Access, Server instructions.
+    press(
+        *('down', 'down', 'enter', 'down', 'enter'),  # Access -> Read and write
+        *('down', 'enter', 'escape'),  # Server instructions, Esc keeps it
+        *('enter', 'down', 'enter'),  # Server instructions -> Leave out
+        'R',  # ... and back to the default
+    )
+    message = await loader.command(['configure', 'linear'])
+    assert message.splitlines() == [
+        'Linear Access: Read and write.',
+        'Linear Server instructions: Leave out.',
+        'Linear Server instructions: Include (default).',
+    ]
+    assert saved(tmp_path) == {'read_only': False}, 'saved as edited, defaults left out'
+    capability = only(loader)
+    assert not capability.read_only and capability.include_instructions, 'reloaded with the new settings'
+    assert token(loader) == 'lin'
+
+
+async def test_switching_to_oauth_hides_the_key_row(tmp_path: Path, vault: Vault, press: Press) -> None:
+    loader, _, _ = make(tmp_path)
+    press('enter', 'down', 'enter', 'down', 'enter', 'down', 'enter')  # Sign-in -> OAuth; then row 2 is Access
+    assert (await loader.command(['enable', 'linear'])).splitlines() == [
+        'Linear Sign-in: Browser sign-in (OAuth).',
+        'Linear Access: Read and write.',
+        'Enabled linear.',
+    ]
+    assert saved(tmp_path) == {'auth': 'oauth', 'read_only': False}
+    client = only(loader).client
+    assert isinstance(client, Client) and isinstance(client.transport, StreamableHttpTransport)
+    assert client.transport.url == 'https://mcp.linear.app/mcp'
+
+
+async def test_key_row_picks_a_saved_key_and_resets(tmp_path: Path, vault: Vault, press: Press) -> None:
+    save_key(name='GITHUB_TOKEN', value='gh')
+    save_key(name='SHARED_LINEAR', value='lin_shared')
+    loader, _, _ = make(tmp_path)
+    press('down', 'enter', 'down', 'enter')  # API key -> the searchable /keys picker -> SHARED_LINEAR
+    assert (await loader.command(['enable', 'linear'])).startswith('Linear uses SHARED_LINEAR from /keys')
+    assert token(loader) == 'lin_shared'
+    raw = load_codex_credentials(account=ACCOUNT)
+    assert raw is not None and json.loads(raw) == {'token': {'name': 'SHARED_LINEAR'}}
+    assert 'lin_' not in json.dumps(saved(tmp_path)) and saved(tmp_path) == {}
+    assert key_users(name='SHARED_LINEAR') == ['linear']
+    with pytest.raises(ValueError, match='used by linear'):
+        rename_key(name='SHARED_LINEAR', new_name='OTHER')
+
+    press('down', 'R')
+    assert await loader.command(['configure', 'linear']) == f'Linear uses {KEY_NAME} from /keys from the next run.'
+    assert reference().name == KEY_NAME
+
+
+async def test_missing_key_is_reported_at_load_and_fixed_in_the_menu(
+    tmp_path: Path, vault: Vault, monkeypatch: pytest.MonkeyPatch, press: Press
 ) -> None:
-    loader, commands, output = make(tmp_path)
+    loader, _, output = make(tmp_path)
     await loader.enable('linear')
     assert f'Linear: Saved API key {KEY_NAME} is missing' in output.getvalue()
     with pytest.raises(UserError, match='is missing'):
@@ -150,37 +230,26 @@ async def test_missing_key_is_reported_at_load_and_fixed_with_linear_key(
 
     prompt = Prompt('lin_typed')
     monkeypatch.setattr(linear, 'PromptSession', lambda: prompt)
-    assert (await run(commands, '/linear key')).endswith(f'Linear uses {KEY_NAME} from /keys from the next run.')
+    press('down', 'enter')  # No saved keys, so the masked prompt opens directly.
+    message = await loader.command(['configure', 'linear'])
+    assert message.endswith(f'Linear uses {KEY_NAME} from /keys from the next run.')
     assert prompt.labels == [f'Linear API key (saved in /keys as {KEY_NAME}): ']
-    assert token(loader) == 'lin_typed', 'no reload needed'
+    assert token(loader) == 'lin_typed'
+
+    save_codex_credentials(account=ACCOUNT, value='{"token": "inline-secret"}')
+    prompt = Prompt('  ')
+    press('down', 'enter', 'down', 'enter')  # The picker now lists LINEAR_API_KEY; choose to enter another.
+    assert await loader.command(['configure', 'linear']) == 'A Linear API key is required.'
+    with pytest.raises(UserError, match='saved Linear key choice is invalid'):
+        reference()
 
 
-async def test_settings_carry_no_credential(tmp_path: Path) -> None:
+@pytest.mark.parametrize('settings', [{'api_key': 'lin_secret'}, {'oauth': True}, {'auth': 'token'}])
+async def test_settings_carry_no_credential(tmp_path: Path, settings: dict[str, JsonValue]) -> None:
     loader, _, _ = make(tmp_path)
-    with pytest.raises(PluginError, match='api_key'):
-        await declare(loader, {'api_key': 'lin_secret'})
+    with pytest.raises(PluginError, match='validation error'):
+        await declare(loader, settings)
     assert loader.capabilities() == []
-
-
-async def test_choose_a_saved_key_stores_only_its_name(
-    tmp_path: Path, vault: Vault, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    save_key(name='GITHUB_TOKEN', value='gh')
-    save_key(name='SHARED_LINEAR', value='lin_shared')
-    monkeypatch.setattr(api_keys, 'menu_key', iter(['down', 'enter']).__next__)
-    assert await choose_key(Prompt()) == 'Linear uses SHARED_LINEAR from /keys from the next run.'
-    assert reference().name == 'SHARED_LINEAR'
-    raw = load_codex_credentials(account=ACCOUNT)
-    assert raw is not None and json.loads(raw) == {'token': {'name': 'SHARED_LINEAR'}}
-    assert key_users(name='SHARED_LINEAR') == ['linear']
-    with pytest.raises(ValueError, match='used by linear'):
-        rename_key(name='SHARED_LINEAR', new_name='OTHER')
-
-    loader, commands, _ = make(tmp_path)
-    await loader.enable('linear')
-    assert token(loader) == 'lin_shared'
-    with pytest.raises(ValueError, match='Usage: /linear key'):
-        await run(commands, '/linear')
 
 
 @pytest.mark.parametrize(
@@ -237,7 +306,7 @@ async def test_key_deleted_while_choosing(vault: Vault, monkeypatch: pytest.Monk
         return api_keys.KeyReference(name='GONE')
 
     monkeypatch.setattr(linear, 'prompt_api_key', gone)
-    with pytest.raises(UserError, match='Select a saved key again through /linear key'):
+    with pytest.raises(UserError, match='Select a saved key again through /plugins configure linear'):
         await choose_key(Prompt())
     assert load_codex_credentials(account=ACCOUNT) is None
 
@@ -257,7 +326,7 @@ async def test_cancel_empty_and_invalid_choice(vault: Vault) -> None:
 )
 async def test_oauth_signs_in_with_keyring_tokens(tmp_path: Path, vault: Vault, read_only: bool, url: str) -> None:
     loader, commands, _ = make(tmp_path)
-    await declare(loader, {'oauth': True, 'read_only': read_only})
+    await declare(loader, {'auth': 'oauth', 'read_only': read_only})
     [capability] = loader.capabilities()
     assert isinstance(capability, Linear)
     assert not capability.read_only, 'the URL carries read_only, not tool annotations'

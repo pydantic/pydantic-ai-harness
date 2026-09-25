@@ -80,7 +80,7 @@ if TYPE_CHECKING:
 
 DepsT = TypeVar('DepsT')
 OutputT = TypeVar('OutputT')
-_PLUGIN_ACTIONS = ('list', 'add', 'enable', 'disable', 'remove', 'reload')
+_PLUGIN_ACTIONS = ('list', 'add', 'enable', 'disable', 'configure', 'remove', 'reload')
 
 
 DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (

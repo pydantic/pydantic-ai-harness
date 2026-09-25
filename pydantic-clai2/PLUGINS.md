@@ -318,26 +318,56 @@ to stock built-ins. See [telemetry](README.md#telemetry-and-references).
 
 The built-in `linear` plugin (`pydantic_clai2.linear`) gives the agent the tools
 of Linear's hosted MCP server through harness
-[`Linear`](../pydantic_ai_harness/linear/README.md). It starts disabled; turn it
-on with `/plugins enable linear`. It connects to Linear's read-only endpoint
-unless you set `"read_only": false`, because tools that create or change issues
-act on a workspace your team shares.
-
-The API key lives in [`/keys`](#saved-api-keys), not in plugin settings, which
-are stored in plaintext. Run `/linear key` to choose a saved key or enter a new
-one in a masked prompt; a new key is saved in `/keys` as `LINEAR_API_KEY`, asking
-first if that name already exists. Until you choose, the plugin uses the key named
-`LINEAR_API_KEY`. The plugin stores only the key's name and looks the key up at the
-start of every run, so replacing the value in `/keys` takes effect on the next run.
-If the key is missing, loading the plugin prints a warning and each run fails with
-an error naming `/linear key`, rather than running without Linear. Harness's
-`LINEAR_ACCESS_TOKEN` environment variable is not read.
-
-To sign in through the browser instead, declare `{"oauth": true}`. Tokens go to
-the keyring the way `/mcp` OAuth tokens do, and `/linear logout` signs out:
+[`Linear`](../pydantic_ai_harness/linear/README.md). It starts disabled. Turning
+it on (`/plugins enable linear`, or Space in `/plugins`) first opens its settings
+menu, and `/plugins configure linear` (or C in `/plugins`) opens it again later:
 
 ```text
-/plugins add linear pydantic_clai2.linear '{"oauth": true, "read_only": false}'
+ Linear settings
+ search: (type to filter)
+
+ > Sign-in                  API key from /keys
+   API key                  LINEAR_API_KEY
+   Access                   Read-only
+   Server instructions      Include
+
+ type to filter - Enter edit - R reset - Esc close
+```
+
+| Row | Choices | Default |
+|---|---|---|
+| Sign-in | an API key from `/keys`, or browser sign-in (OAuth) | API key |
+| API key | a `/keys` entry, picked from a searchable list, or a new key typed into a masked prompt | `LINEAR_API_KEY` |
+| Access | read-only, or read and write | read-only |
+| Server instructions | pass Linear's own MCP instructions to the agent, or leave them out | include |
+
+Enter edits a row, R resets it to the default, and Esc closes the menu or backs
+out of a picker without changing anything. Each change is saved as you make it,
+and an enabled plugin is reloaded with the new settings when the menu closes.
+Read-only is the default because tools that create or change issues act on a
+workspace your team shares. These rows are the settings harness `Linear` takes
+from a user. Linear's hosted server has a single URL (with a read-only variant)
+and takes the workspace from the account you sign in with, so the menu has no
+base URL or workspace field.
+
+The API key lives in [`/keys`](#saved-api-keys), not in plugin settings, which
+are stored in plaintext. On the API key row, pick any saved key (one entry can
+serve several plugins), or choose **Enter a different API key**. A new key is
+saved in `/keys` as `LINEAR_API_KEY`; if that name already exists, CLAI asks
+before replacing it, since other plugins may use it. The plugin stores only the
+key's name and looks the key up at the start of every run, so replacing the value
+in `/keys` takes effect on the next run. If the key is missing, loading the plugin
+prints a warning and each run fails with an error naming `/plugins configure linear`,
+rather than running without Linear. Harness's `LINEAR_ACCESS_TOKEN` environment
+variable is not read.
+
+With browser sign-in, the key row is hidden. Tokens go to the keyring the way
+`/mcp` OAuth tokens do, and `/linear logout` signs out.
+
+The settings are also plain JSON, for scripts:
+
+```text
+/plugins add linear pydantic_clai2.linear '{"auth": "oauth", "read_only": false}'
 ```
 
 ## Where plugins live
@@ -546,7 +576,7 @@ for `/agent` and `/mcp`:
                                                      | adds    2 commands, 1 hook, 0 tools
                                                      | error   none
 
- Up/Down move - Space enable/disable - R reload - D remove - Enter/Q close
+ Up/Down move - Space enable/disable - C configure - R reload - D remove - Enter/Q close
 ```
 
 The left side lists every plugin with `[x]` for on and `[ ]` for off. The right
@@ -554,7 +584,9 @@ side shows details for the highlighted one: where it came from, whether it
 loaded, what it registered, and the last error if loading failed. Every key
 acts immediately; there is no save step, so Enter, Q, Esc, and Ctrl-C all just close.
 Closing returns to the prompt without printing the plugin list. Use `/plugins list`
-to print it.
+to print it. C opens the highlighted plugin's [settings menu](#offer-a-settings-menu-configureconfig),
+if it has one, and Space on such a plugin opens that menu before turning it on. The
+list closes while the settings menu is open and comes back after it.
 Adding a plugin needs a name and a module, so that stays a typed command.
 
 With arguments `/plugins` is a plain command, and `clai2 plugins ...` outside
@@ -563,9 +595,10 @@ CLAI does the same thing:
 | Command | Does |
 |---|---|
 | `/plugins list` | show every plugin and whether it is on |
-| `/plugins add NAME module[:attr] [JSON]` | save it and load it now |
+| `/plugins add NAME module[:attr] [JSON]` | save it, open its settings menu if it has one, and load it now |
 | `/plugins remove NAME` | forget an installed declaration; persistently disable a drop-in (delete its file yourself to remove it); reset a built-in or project-declared plugin to its declaration |
-| `/plugins enable NAME` / `disable NAME` | load or unload, remembered across restarts |
+| `/plugins enable NAME` / `disable NAME` | load or unload, remembered across restarts; enabling opens the plugin's settings menu first if it has one |
+| `/plugins configure NAME` | open the plugin's settings menu; each change is saved as made, and a loaded plugin is reactivated with the result |
 | `/plugins reload NAME` | re-import the file and load it again (for editing a plugin while CLAI runs) |
 | `/reload` | reload CLAI's own Python modules for development and rebuild the shell without restarting the process |
 
@@ -915,6 +948,43 @@ Bad or missing values fail at startup with a message naming your plugin.
 CLAI ignores unknown names in its own saved settings and preserves their values for
 other versions or branches. This does not relax validation of plugin declarations
 or `host.settings(Model)`.
+
+### Offer a settings menu: `configure(config)`
+
+Define `configure` next to `activate` to give users a menu instead of JSON. CLAI
+calls it for `/plugins configure NAME`, before `/plugins add` and `/plugins enable`
+load the plugin, and for C and Space in the `/plugins` menu. It runs between
+prompts and returns the message to print:
+
+```python
+from pydantic_clai2.plugin_config import PluginConfig
+
+
+async def configure(config: PluginConfig) -> str:
+    current = NotifySettings.model_validate(config.settings())
+    ...  # show widgets, then for each change:
+    config.save(current.model_copy(update={'sound': False}).model_dump(exclude_defaults=True))
+    return 'Notifications: sound off.'
+```
+
+`config.settings()` returns what is saved now and `config.save(...)` replaces it at
+once, so an edit survives even if the user closes the terminal mid-menu. Validate
+before saving: the saved JSON is what `host.settings(Model)` reads on the next load.
+When the hook returns, CLAI runs `activate` again with the new settings if the plugin
+was loaded. It does not re-import the module.
+
+For rows of fields, reuse the editor behind `/set`: implement a
+`field_menu.FieldSource` and pass it to `field_menu.run_flow_async` with
+`config.runners`. Lists of more than eight choices are searchable, R resets a row,
+and Esc backs out. `submenus` maps a row to an async function for anything that is
+not a plain value. The `linear` plugin uses one to open the `/keys` picker.
+
+Settings are stored in plaintext. Keep secrets in `/keys`: call
+`api_keys.prompt_api_key` to pick a saved key or read a new one masked, save the value
+with `api_keys.save_key`, and keep only its name (`api_keys.KeyReference`). Resolve it
+with `api_keys.resolve_key` each time you connect, so a replaced key takes effect and a
+deleted one fails with an error instead of connecting without it. The
+[`linear` plugin](src/pydantic_clai2/linear.py) is a complete example.
 
 ### Reach the conversation and the status row: `host.conversation`, `host.status`
 
