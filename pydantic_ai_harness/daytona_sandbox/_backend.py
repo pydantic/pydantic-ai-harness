@@ -11,8 +11,8 @@ External assumptions last verified 2026-09-08 against Daytona Python SDK 0.198.0
   https://www.daytona.io/docs/en/python-sdk/async/async-process/
 * `sandbox.fs` provides metadata, byte upload/download, and directory operations:
   https://www.daytona.io/docs/en/python-sdk/async/async-file-system/
-* `auto_stop_interval`, `auto_archive_interval`, and `auto_delete_interval` (negative disables
-  it) are the creation-time lifecycle settings:
+* `auto_stop_interval` is a creation-time setting; left unset, Daytona stops an idle sandbox after
+  15 minutes, archives it after 7 days stopped, and never deletes it:
   https://www.daytona.io/docs/en/python-sdk/async/async-daytona/
 * `FileInfo` has `is_dir` and a `mode` string but no symlink flag, and the SDK does not say whether
   `is_dir` follows a symlink.
@@ -62,8 +62,6 @@ if TYPE_CHECKING:
     from pydantic_ai.workspaces import WorkspaceCommand
 
 __all__ = ('DaytonaSandboxBackend',)
-
-DEFAULT_AUTO_STOP_INTERVAL = 60
 
 try:
     import daytona
@@ -187,14 +185,9 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             it. Without one, the backend opens its own from the environment on first use and closes
             it in `aclose()`.
         ref: Identity of an existing sandbox to attach to on first use.
-        name: Daytona name for a newly created sandbox. It is not used to find a sandbox when `ref`
-            is absent.
         snapshot: Daytona snapshot a newly created sandbox starts from; Daytona's default when `None`.
-        auto_stop_interval: Idle minutes before Daytona stops a newly created sandbox; `0` disables it.
-        auto_archive_interval: Minutes a newly created sandbox stays stopped before Daytona archives
-            it; Daytona's default (7 days) when `None`, its maximum when `0`.
-        auto_delete_interval: Minutes a newly created sandbox stays stopped before Daytona deletes
-            it; negative disables automatic deletion, `0` deletes it as soon as it stops.
+        auto_stop_interval: Idle minutes before Daytona stops a newly created sandbox; `0` disables
+            it, and `None` keeps Daytona's default (15 minutes).
         working_dir: Absolute directory commands start in and relative paths resolve against; the
             sandbox's own default when `None`, discovered with `pwd -P` on first use.
         env: Environment variables every command gets; a command's own `env` is layered on top.
@@ -208,11 +201,8 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         workspace: AsyncSandbox | None = None,
         client: AsyncDaytona | None = None,
         ref: WorkspaceRef | None = None,
-        name: str | None = None,
         snapshot: str | None = None,
-        auto_stop_interval: int = DEFAULT_AUTO_STOP_INTERVAL,
-        auto_archive_interval: int | None = None,
-        auto_delete_interval: int = -1,
+        auto_stop_interval: int | None = None,
         working_dir: str | None = None,
         env: Mapping[str, str] | None = None,
         network_block_all: bool = False,
@@ -225,11 +215,8 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         self._ref = ref if workspace is None else WorkspaceRef(provider='daytona', id=workspace.id)
         self._client = client
         self._owns_client = client is None
-        self._name = name
         self._snapshot = snapshot
         self._auto_stop_interval = auto_stop_interval
-        self._auto_archive_interval = auto_archive_interval
-        self._auto_delete_interval = auto_delete_interval
         self._env = dict(env or {})
         self._network_block_all = network_block_all
         self._canonical_working_dir: str | None = None
@@ -395,12 +382,9 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
     async def _create(self, client: AsyncDaytona) -> AsyncSandbox:
         params = daytona.CreateSandboxFromSnapshotParams(
-            name=self._name,
             snapshot=self._snapshot,
             env_vars=self._env or None,
             auto_stop_interval=self._auto_stop_interval,
-            auto_archive_interval=self._auto_archive_interval,
-            auto_delete_interval=self._auto_delete_interval,
             network_block_all=self._network_block_all,
         )
         # Shielded: cancelling the request after Daytona accepted it would leave a sandbox nothing

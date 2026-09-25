@@ -78,7 +78,7 @@ class TestLiveDaytonaSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover 
     @pytest.fixture(scope='class')
     @classmethod
     async def backend(cls) -> AsyncIterator[DaytonaSandboxBackend]:
-        backend = DaytonaSandboxBackend(auto_stop_interval=15)
+        backend = DaytonaSandboxBackend()
         try:
             yield backend
         finally:

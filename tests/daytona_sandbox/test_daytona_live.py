@@ -66,7 +66,7 @@ async def client() -> AsyncIterator[daytona.AsyncDaytona]:
 @asynccontextmanager
 async def _owned(client: daytona.AsyncDaytona) -> AsyncGenerator[DaytonaSandboxBackend]:
     """Create a sandbox and delete it on the way out, even when the test deleted it already."""
-    backend = DaytonaSandboxBackend(client=client, auto_stop_interval=15)
+    backend = DaytonaSandboxBackend(client=client)
     native = await backend.get_client()
     try:
         yield backend

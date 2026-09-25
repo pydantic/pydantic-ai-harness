@@ -30,7 +30,6 @@ from daytona import DaytonaError, DaytonaNotFoundError, DaytonaValidationError, 
 
 
 class CreateParams(Protocol):
-    name: str | None
     snapshot: str | None
     auto_stop_interval: int | None
     auto_archive_interval: int | None
@@ -334,10 +333,9 @@ class _HostFileSystem(FakeFileSystem):
 
 
 class FakeSandbox:
-    def __init__(self, sandbox_id: str, name: str | None = None, host_root: Path | None = None) -> None:
+    def __init__(self, sandbox_id: str, host_root: Path | None = None) -> None:
         self.client: FakeClient | None = None
         self.id = sandbox_id
-        self.name = name or sandbox_id
         self.started = False
         self.state = SandboxState.STARTED
         self.purged = False
@@ -411,7 +409,7 @@ class FakeClient:
             raise self.owner.create_error
         # Like the SDK, the sandbox exists once the create request is accepted, before `create`
         # returns: it then waits for the sandbox to start.
-        sandbox = FakeSandbox(f'sb-{len(self.owner.sandboxes) + 1}', params.name, self.owner.host_root)
+        sandbox = FakeSandbox(f'sb-{len(self.owner.sandboxes) + 1}', host_root=self.owner.host_root)
         sandbox.client = self
         self.owner.sandboxes.append(sandbox)
         self.owner.create_params.append(params)
@@ -424,7 +422,7 @@ class FakeClient:
         if self.owner.get_gate is not None:
             await self.owner.get_gate.wait()
         for sandbox in self.owner.sandboxes:
-            if sandbox.id == sandbox_id or sandbox.name == sandbox_id:
+            if sandbox.id == sandbox_id:
                 sandbox.client = self
                 return sandbox
         raise DaytonaNotFoundError(f'no sandbox: {sandbox_id}')

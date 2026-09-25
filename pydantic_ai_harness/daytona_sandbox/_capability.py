@@ -14,7 +14,7 @@ from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 
 from pydantic_ai_harness._workspace import innermost_backend
 from pydantic_ai_harness._workspace_provider import check_integer, check_working_dir
-from pydantic_ai_harness.daytona_sandbox._backend import DEFAULT_AUTO_STOP_INTERVAL, DaytonaSandboxBackend
+from pydantic_ai_harness.daytona_sandbox._backend import DaytonaSandboxBackend
 
 if TYPE_CHECKING:
     from daytona import AsyncDaytona
@@ -57,16 +57,9 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
     """Environment variables every command in the sandbox gets; a command's own `env` is layered on
     top. Nothing is read from the agent process's environment."""
 
-    auto_stop_interval: int = DEFAULT_AUTO_STOP_INTERVAL
-    """Idle minutes before Daytona stops a newly created workspace; `0` disables it."""
-
-    auto_archive_interval: int | None = None
-    """Minutes a newly created workspace stays stopped before Daytona archives it; Daytona's
-    default (7 days) when `None`, its maximum when `0`."""
-
-    auto_delete_interval: int = -1
-    """Minutes a newly created workspace stays stopped before Daytona deletes it; negative (the
-    default) disables automatic deletion, `0` deletes it as soon as it stops."""
+    auto_stop_interval: int | None = None
+    """Idle minutes before Daytona stops a newly created workspace; `0` disables it, and `None`
+    keeps Daytona's default (15 minutes)."""
 
     network_block_all: bool = False
     """Whether to block outbound traffic from a newly created workspace."""
@@ -75,12 +68,7 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
         # Checked here rather than when the backend first creates a sandbox, so a bad value fails
         # where it is written instead of at the first workspace operation of some later run.
         check_working_dir(self.working_dir)
-        check_integer('auto_stop_interval', self.auto_stop_interval, minimum=0)
-        check_integer('auto_archive_interval', self.auto_archive_interval, minimum=0, optional=True)
-        if type(self.auto_delete_interval) is not int:
-            raise UserError(
-                f'auto_delete_interval must be an integer (negative disables deletion), got {self.auto_delete_interval!r}.'
-            )
+        check_integer('auto_stop_interval', self.auto_stop_interval, minimum=0, optional=True)
         if self.defer_loading:
             # Core skips deferred capabilities when it selects the run's workspace.
             raise UserError('DaytonaSandbox cannot be deferred: a deferred capability never supplies the workspace.')
@@ -95,8 +83,6 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
             ref=ref,
             snapshot=self.snapshot,
             auto_stop_interval=self.auto_stop_interval,
-            auto_archive_interval=self.auto_archive_interval,
-            auto_delete_interval=self.auto_delete_interval,
             working_dir=self.working_dir,
             env=self.env,
             network_block_all=self.network_block_all,

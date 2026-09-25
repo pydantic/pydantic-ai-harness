@@ -34,8 +34,6 @@ async def test_capability_is_lazy_and_forwards_options(fake_daytona: FakeDaytona
     capability = DaytonaSandbox(
         snapshot='python',
         auto_stop_interval=0,
-        auto_archive_interval=30,
-        auto_delete_interval=120,
         working_dir='/work',
         env={'A': 'b'},
         network_block_all=True,
@@ -48,11 +46,15 @@ async def test_capability_is_lazy_and_forwards_options(fake_daytona: FakeDaytona
     assert (
         params.snapshot,
         params.auto_stop_interval,
-        params.auto_archive_interval,
-        params.auto_delete_interval,
         params.env_vars,
         params.network_block_all,
-    ) == ('python', 0, 30, 120, {'A': 'b'}, True)
+    ) == ('python', 0, {'A': 'b'}, True)
+
+
+async def test_lifetimes_default_to_daytonas_own(fake_daytona: FakeDaytona) -> None:
+    await DaytonaSandboxBackend().get_client()
+    params = fake_daytona.create_params[0]
+    assert (params.auto_stop_interval, params.auto_archive_interval, params.auto_delete_interval) == (None, None, None)
 
 
 @pytest.mark.parametrize(
@@ -61,9 +63,6 @@ async def test_capability_is_lazy_and_forwards_options(fake_daytona: FakeDaytona
         ({'working_dir': 'repo'}, 'working_dir must be an absolute POSIX path'),
         ({'auto_stop_interval': -1}, 'auto_stop_interval must be an integer of at least 0'),
         ({'auto_stop_interval': 1.5}, 'auto_stop_interval must be an integer of at least 0'),
-        ({'auto_archive_interval': -1}, 'auto_archive_interval must be an integer of at least 0'),
-        ({'auto_delete_interval': 1.5}, 'auto_delete_interval must be an integer'),
-        ({'auto_delete_interval': True}, 'auto_delete_interval must be an integer'),
         ({'defer_loading': True, 'id': 'sandbox'}, 'cannot be deferred'),
     ],
 )

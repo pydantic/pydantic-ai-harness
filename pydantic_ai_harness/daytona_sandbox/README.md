@@ -128,9 +128,9 @@ Without `client=`, each run opens its own `AsyncDaytona` API client on first use
 
 ## Lifetime and cost
 
-A sandbox keeps running, and billing, after the run ends. Daytona stops it after `auto_stop_interval` idle minutes (default 60; `0` disables it), archives a stopped sandbox after `auto_archive_interval` minutes (Daytona's default, 7 days, when unset), and deletes a stopped sandbox after `auto_delete_interval` minutes (default `-1`, never). A stopped sandbox keeps its disk, and attaching to it starts it again. Deleting sandboxes you are done with is the application's job, through `get_client()` or the Daytona dashboard. These settings, `snapshot`, and `network_block_all` apply when a sandbox is created, not to one attached by reference.
+A sandbox keeps running, and billing, after the run ends. Daytona's own defaults apply: it stops a sandbox after 15 idle minutes (`auto_stop_interval=` changes that, and `0` disables it), archives one that has been stopped for 7 days, and never deletes it. A stopped sandbox keeps its disk, and attaching to it starts it again. Deleting sandboxes you are done with is your job, through `get_client()` or the Daytona dashboard. `auto_stop_interval`, `snapshot`, and `network_block_all` apply when a sandbox is created, not to one attached by reference.
 
-A command's `timeout` is enforced client-side; when it expires or the caller is cancelled, the backend deletes the command's session, which kills the command. A run cancelled while its sandbox is being created waits for creation to finish, so the sandbox is always recorded in `ref`. Only a creation that outlasts the backend's own creation bound can leave a sandbox nothing names; `auto_stop_interval` and `auto_delete_interval` bound what it costs.
+A command's `timeout` is enforced client-side; when it expires or the run is cancelled, the command is killed. A run cancelled while its sandbox is being created waits for creation to finish, so the sandbox is always recorded in `ref`.
 
 The capability emits no telemetry spans of its own; core agent and tool spans cover the calls made through tools.
 
