@@ -476,22 +476,20 @@ class TestLazyOperations:
         assert not fake_daytona.create_params
         assert not fake_daytona.sandboxes
 
-    async def test_deadline_during_creation_keeps_the_created_sandbox(self, fake_daytona: FakeDaytona) -> None:
+    async def test_command_timeout_starts_once_the_sandbox_is_acquired(self, fake_daytona: FakeDaytona) -> None:
         gate = fake_daytona.create_gate = asyncio.Event()
 
-        async def respond_after_the_deadline() -> None:
-            await fake_daytona.create_started.wait()
-            await anyio.sleep(0.05)
+        async def release() -> None:
+            # Creating the sandbox outlasts the timeout; the command itself fits in it comfortably.
+            await anyio.sleep(1.1)
             gate.set()
 
         backend = DaytonaSandboxBackend()
         async with anyio.create_task_group() as tasks:
-            tasks.start_soon(respond_after_the_deadline)
-            with pytest.raises(WorkspaceTimeoutError):
-                await backend.run(['true'], timeout=0.01)
-        assert backend.ref == WorkspaceRef(provider='daytona', id=fake_daytona.sandboxes[0].id)
-        await backend.run(['true'])
-        assert len(fake_daytona.sandboxes) == 1
+            tasks.start_soon(release)
+            result = await backend.run(['echo', 'ready'], timeout=1)
+            assert result.exit_code == 0
+        assert 'echo ready' in fake_daytona.sandboxes[0].process_command
 
     async def test_cancellation_during_creation_keeps_the_created_sandbox(self, fake_daytona: FakeDaytona) -> None:
         gate = fake_daytona.create_gate = asyncio.Event()
@@ -627,13 +625,6 @@ async def test_attach_timeout_is_transient(fake_daytona: FakeDaytona, monkeypatc
     fake_daytona.get_gate = asyncio.Event()
     with pytest.raises(TimeoutError, match='did not complete'):
         await DaytonaSandboxBackend(ref=WorkspaceRef(provider='daytona', id=existing.id)).get_client()
-
-
-async def test_deadline_bounds_attach(fake_daytona: FakeDaytona) -> None:
-    existing = fake_daytona.sandbox('sb-existing')
-    fake_daytona.get_gate = asyncio.Event()
-    with pytest.raises(WorkspaceTimeoutError):
-        await DaytonaSandboxBackend(ref=WorkspaceRef(provider='daytona', id=existing.id)).run(['true'], timeout=0.01)
 
 
 @pytest.mark.parametrize(

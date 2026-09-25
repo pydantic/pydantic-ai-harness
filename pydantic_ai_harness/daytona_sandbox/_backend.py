@@ -252,7 +252,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         would leave the loser billed and unreferenced. A failed acquisition releases an
         API client this backend owns, so a retry starts from a clean one. Attaching by `ref`
         to a sandbox that no longer exists raises `WorkspaceUnavailableError`; it does not
-        create a replacement. Creation is not cut short by cancellation or a `run()` deadline, so
+        create a replacement. Creation is not cut short by cancellation, so
         a sandbox Daytona created is always recorded in `ref` before the cancellation propagates.
         """
         async with self._lock:
@@ -461,10 +461,12 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     ) -> CommandResult:
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
+        # Acquiring the sandbox has its own bound; the timeout is the command's alone.
+        sandbox = await self.get_client()
         process: _DaytonaProcess | None = None
         with anyio.move_on_after(timeout) as scope:
             try:
-                process = await self._start(command, shell=shell, cwd=cwd, env=env)
+                process = await self._start(sandbox, command, shell=shell, cwd=cwd, env=env)
                 return await process.wait()
             finally:
                 if process is not None:
@@ -479,6 +481,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
     async def _start(
         self,
+        sandbox: AsyncSandbox,
         command: WorkspaceCommand,
         *,
         shell: bool,
@@ -492,7 +495,6 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             env={**self._env, **(env or {})},
         )
         session_id = f'pydantic-ai-{uuid.uuid4().hex}'
-        sandbox = await self.get_client()
         process = sandbox.process
         created = False
         with anyio.move_on_after(_REQUEST_TIMEOUT):
