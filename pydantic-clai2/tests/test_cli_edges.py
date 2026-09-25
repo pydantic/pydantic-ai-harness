@@ -73,6 +73,36 @@ def test_cli_recovers_unsupported_theme_without_losing_unknown_settings(tmp_path
         assert dict(connection.execute('SELECT key, value_json FROM settings')) == saved
 
 
+@pytest.mark.parametrize('interactive', [False, True])
+def test_cli_logfire_setup(tmp_path: Path, interactive: bool) -> None:
+    script = f"""
+import runpy
+import sys
+
+sys.stdin.isatty = lambda: {interactive!r}
+sys.stdout.isatty = lambda: {interactive!r}
+from pydantic_clai2 import logfire_onboarding
+logfire_onboarding.menu_key = iter(['down', 'enter']).__next__
+runpy.run_module('pydantic_clai2', run_name='__main__')
+"""
+    path = tmp_path / 'config.db'
+    result = subprocess.run(
+        [sys.executable, '-c', script, '--database', str(path), 'logfire'],
+        input='',
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    assert result.returncode == (0 if interactive else 2), result.stderr
+    if interactive:
+        assert 'Logfire disabled' in result.stdout
+        assert not SettingsStore(path).plugins()[0].enabled
+    else:
+        assert 'requires an interactive terminal' in result.stderr
+        assert not SettingsStore(path).plugins()
+
+
 def test_cli_startup_interrupt(tmp_path: Path) -> None:
     script = """
 import asyncio

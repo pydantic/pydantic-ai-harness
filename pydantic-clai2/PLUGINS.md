@@ -257,15 +257,45 @@ and binary image attachments by default, including retained history used by
 later turns. This may export source code, file contents, and screenshots; verify
 the configured telemetry destination first.
 
-Credentials are read from `LOGFIRE_TOKEN` or the SDK's `logfire_credentials.json`
-in `$XDG_CONFIG_HOME/pydantic-clai2/logfire/`, defaulting to
-`~/.config/pydantic-clai2/logfire/`. SDK configuration is read only from that user
-directory too. Repository-local configuration/credentials and the SDK's
-`LOGFIRE_CONFIG_DIR`/`LOGFIRE_CREDENTIALS_DIR` overrides are ignored. Relative
-`XDG_CONFIG_HOME` values fall back to `~/.config`. A checkout cannot select the
-telemetry destination through its own files. Without credentials the default
-`if-token-present` mode does not export to Logfire or start interactive setup. Console logging is disabled. Other SDK configuration,
-such as explicit OTLP exporters, still applies.
+```bash
+uv run clai2 logfire
+```
+
+The first interactive stock CLI launch shows a setup picker, including upgrades
+from versions without onboarding. The login choice, browser authentication, project
+choice, and project setup replace one another on a temporary screen. Success,
+skip, cancellation, or failure restores your terminal screen and adds only the
+final result. Scrollback is preserved. `Log in to Logfire` is selected by default;
+Up/Down moves and Enter selects. Login runs Logfire's browser authentication, then
+lets you use an existing project or create one. Selecting login starts setup, not
+conversation export. `Continue without Logfire`, or Esc at the initial picker,
+saves a disabled plugin override. Both choices persist across upgrades; the command
+above lets you choose again. Ctrl-C, or Esc at the project picker, cancels without
+changing your choice. The setup command refuses to replace custom `logfire` plugins from
+saved settings, drop-ins, or the project. Existing credentials, saved plugin
+entries, project declarations, and drop-in replacements skip the startup prompt.
+Headless runs, redirected input/output, `config`/`plugins` commands, and custom
+`chat()` launchers do not run onboarding. Setup failure or cancellation leaves
+plugin preferences unchanged and does not block chat startup.
+
+Project credentials go in CLAI's OS keyring. Without a keyring backend, they go
+in a private `0600` plaintext file at
+`$XDG_CONFIG_HOME/pydantic-clai2/credentials-logfire.json`; setup reports this
+fallback. A locked or failing keyring does not fall back to plaintext. The
+Logfire CLI manages its separate account login in `~/.logfire`, not CLAI's keyring.
+Project setup uses a private temporary directory that is removed after success,
+failure, or cancellation. Credentials are not saved in plugin settings or SQLite.
+
+`LOGFIRE_TOKEN` takes precedence over stored credentials. Legacy SDK
+`logfire_credentials.json` files in `$XDG_CONFIG_HOME/pydantic-clai2/logfire/`
+are migrated to the credential store and removed only after a successful save.
+SDK configuration is still read only from that user directory, defaulting to
+`~/.config/pydantic-clai2/logfire/`. Repository-local configuration/credentials and
+`LOGFIRE_CONFIG_DIR`/`LOGFIRE_CREDENTIALS_DIR` are ignored. Relative
+`XDG_CONFIG_HOME` values fall back to `~/.config` for Logfire storage. A checkout
+cannot select the telemetry destination through its own files. Without
+credentials, `if-token-present` does not export to Logfire. Console logging is
+disabled. Other SDK configuration, such as explicit OTLP exporters, still applies.
 
 Manage it with `/plugins disable logfire`, `/plugins enable logfire`, or
 `/plugins reload logfire`. To change its defaults:

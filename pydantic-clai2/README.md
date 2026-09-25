@@ -1356,18 +1356,51 @@ capability to CLAI turns for agent, model-request, and tool
 spans, including timing, token usage, and failures. It adds no separate CLAI spans
 and does not instrument HTTP clients or unrelated agents globally.
 
-Set `LOGFIRE_TOKEN` to a write token for your Logfire project. Alternatively,
-place the SDK's `logfire_credentials.json` in your user config directory at
-`$XDG_CONFIG_HOME/pydantic-clai2/logfire/` (default
-`~/.config/pydantic-clai2/logfire/`). SDK configuration is also read only from
-that directory. The plugin ignores repository-local Logfire configuration and
-credentials, plus `LOGFIRE_CONFIG_DIR` and `LOGFIRE_CREDENTIALS_DIR`, so a checkout
+```bash
+uv run clai2 logfire
+```
+
+Your first interactive launch shows a setup picker, including when you upgrade
+from a version without onboarding. `Log in to Logfire` is selected by default.
+The login choice, browser authentication, project choice, and project setup each
+replace the previous step on a temporary screen. When setup ends, your previous
+terminal screen returns with only the final result added. Scrollback is preserved.
+Use Up/Down to move and Enter to select. Login uses the installed
+[Logfire CLI](https://logfire.pydantic.dev/docs/reference/cli/) to authenticate
+in your browser, then offers an existing or new project. Selecting login starts
+setup; it does not send conversation traces before setup completes.
+
+Choose `Continue without Logfire`, or press Esc at the initial picker, to disable
+the plugin. CLAI remembers your choice as a plugin override; subsequent upgrades
+do not reset it. Run the command above to change your choice. Ctrl-C, or Esc at
+the project picker, cancels setup without changing your saved choice. The setup command refuses
+to replace a custom `logfire` plugin from saved settings, a drop-in, or the project.
+Existing credentials or an explicit plugin declaration skip the startup prompt.
+Project declarations and drop-in replacements also skip it. Headless runs,
+redirected input/output, and `config`/`plugins` commands do not prompt.
+
+CLAI saves the project write token in your OS keyring. If no keyring backend is
+available, it uses a private `0600` plaintext file at
+`$XDG_CONFIG_HOME/pydantic-clai2/credentials-logfire.json` and reports that fallback.
+A locked or failing keyring does not trigger a plaintext fallback. Logfire itself
+manages the separate account login in `~/.logfire`; CLAI does not move that login
+into keyring. Project setup uses a private temporary directory, removed after
+success, failure, or cancellation. Tokens do not go in the settings database.
+
+`LOGFIRE_TOKEN` takes precedence over saved project credentials. Legacy SDK
+`logfire_credentials.json` files in `$XDG_CONFIG_HOME/pydantic-clai2/logfire/`
+are migrated to the credential store and removed only after a successful save.
+SDK configuration is still read only from that user directory, defaulting to
+`~/.config/pydantic-clai2/logfire/`. Repository-local configuration and credentials,
+plus `LOGFIRE_CONFIG_DIR` and `LOGFIRE_CREDENTIALS_DIR`, are ignored so a checkout
 cannot choose the telemetry destination. Relative `XDG_CONFIG_HOME` values fall
-back to `~/.config`. Export uses `send_to_logfire='if-token-present'`: no credentials
-means no Logfire export and no interactive project setup. Logfire's
-terminal console output is disabled so it does not interfere with the editor.
-Standard SDK configuration, including explicitly configured OTLP exporters, still
-applies; disable the plugin to stop its instrumentation altogether.
+back to `~/.config` for Logfire storage.
+
+Export uses `send_to_logfire='if-token-present'`: without credentials there is no
+Logfire export. Setup failure or cancellation leaves your plugin choice unchanged
+and does not prevent chat startup. Logfire's terminal logging is disabled so it
+does not interfere with the editor. Standard SDK configuration, including explicit
+OTLP exporters, still applies; disable the plugin to stop its instrumentation.
 
 Prompts, responses, tool arguments/results, and binary image attachments are
 included by default, including retained history used by later turns. This can

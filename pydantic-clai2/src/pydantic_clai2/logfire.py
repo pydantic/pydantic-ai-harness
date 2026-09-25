@@ -1,7 +1,6 @@
 """Default-enabled Logfire instrumentation, owned by the plugin rather than the process."""
 
 import os
-from pathlib import Path
 from typing import Literal
 
 import logfire
@@ -12,11 +11,12 @@ from pydantic_ai.capabilities import Instrumentation
 from pydantic_ai.models.instrumented import InstrumentationSettings
 
 from . import theme
+from .logfire_credentials import load_logfire_credentials, logfire_directory
 from .plugins import PluginHost, SessionEnd
 
 
 class LogfireSettings(BaseModel):
-    """Non-secret telemetry options; credentials stay in Logfire's environment or credential file."""
+    """Non-secret telemetry options; credentials stay in the environment or credential store."""
 
     model_config = ConfigDict(extra='forbid', frozen=True, strict=True, hide_input_in_errors=True)
     service_name: str = Field(default='pydantic-clai2', min_length=1)
@@ -28,15 +28,16 @@ class LogfireSettings(BaseModel):
 def activate(host: PluginHost[None]) -> None:
     """Add core instrumentation without changing the supplied agent or global OTel providers."""
     config = host.settings(LogfireSettings)
-    config_home = Path(os.getenv('XDG_CONFIG_HOME', '')).expanduser()
-    if not config_home.is_absolute():
-        config_home = Path.home() / '.config'
-    private_dir = config_home / 'pydantic-clai2' / 'logfire'
+    private_dir = logfire_directory()
+    token = os.getenv('LOGFIRE_TOKEN')
+    credentials = load_logfire_credentials() if config.send_to_logfire and not token else None
     propagator = get_global_textmap()
     try:
         instance = logfire.configure(
             local=True,
             send_to_logfire=config.send_to_logfire,
+            token=token or (credentials.token if credentials else None),
+            advanced=logfire.AdvancedOptions(base_url=str(credentials.logfire_api_url)) if credentials else None,
             service_name=config.service_name,
             console=False,
             config_dir=private_dir,

@@ -131,9 +131,21 @@ appear in the transcript and reach the model as a one-item list under the questi
 
 The built-in logfire plugin (pydantic_clai2.logfire) is enabled by default in the
 stock CLI. It contributes core's Instrumentation capability using an isolated
-Logfire instance. It exports to Logfire only when credentials are present, with
-no interactive setup or console logging. Text and binary images are included by
-default, so review the telemetry destination before setting LOGFIRE_TOKEN. Use
+Logfire instance. The first interactive CLI launch shows a setup picker,
+including upgrades from versions without onboarding. Login choice, browser
+authentication, project choice, and project setup replace one another on a
+temporary screen. Setup restores the previous terminal screen on every exit;
+only the final result is added, with scrollback preserved. Log in to Logfire is selected
+by default; Up/Down moves and Enter selects. Login starts browser authentication,
+then an existing/new project picker. Conversation export starts after setup.
+Continue without Logfire, or Esc at the initial picker, disables the plugin;
+both choices persist across upgrades. Ctrl-C, or Esc at the project picker,
+cancels without changing preferences. Setup refuses to replace a custom logfire plugin from saved
+settings, a drop-in, or the project. Existing credentials or plugin declarations
+skip the prompt. Headless and custom chat() launchers do not prompt. Run
+clai2 logfire to change the choice. It exports to Logfire only when credentials
+are present, with no console logging. Text and binary images are included by
+default, so review the telemetry destination before connecting. Use
 /plugins disable logfire to remove it, or replace its settings with:
 
 ```text
@@ -142,11 +154,16 @@ default, so review the telemetry destination before setting LOGFIRE_TOKEN. Use
 
 Other options are service_name (default pydantic-clai2) and send_to_logfire
 (default "if-token-present", or false). This explicit option overrides
-LOGFIRE_SEND_TO_LOGFIRE. Use LOGFIRE_TOKEN or the SDK credential file in
-$XDG_CONFIG_HOME/pydantic-clai2/logfire (default ~/.config/pydantic-clai2/logfire).
-Both SDK configuration and credentials are read from that user directory, not
-from the checkout. LOGFIRE_CONFIG_DIR and LOGFIRE_CREDENTIALS_DIR are ignored;
-relative XDG_CONFIG_HOME falls back to ~/.config. Keep tokens out of plugin JSON. Disabling or reloading shuts down only the plugin's own
+LOGFIRE_SEND_TO_LOGFIRE. LOGFIRE_TOKEN overrides project credentials saved in the
+OS keyring. Without a keyring backend, CLAI reports a private 0600 plaintext
+fallback at $XDG_CONFIG_HOME/pydantic-clai2/credentials-logfire.json. A failing or
+locked keyring does not fall back. Logfire's CLI manages the separate account login
+in ~/.logfire. Project setup uses a private temporary directory removed on exit.
+Legacy logfire_credentials.json files in $XDG_CONFIG_HOME/pydantic-clai2/logfire
+are migrated and removed only after saving successfully. SDK configuration is
+still read from that user directory, not the checkout. LOGFIRE_CONFIG_DIR and
+LOGFIRE_CREDENTIALS_DIR are ignored; relative XDG_CONFIG_HOME falls back to ~/.config
+for Logfire storage. Keep tokens out of plugin JSON. Disabling or reloading shuts down only the plugin's own
 providers, without mutating the agent or global tracer/meter providers. The
 existing global propagator is preserved, but SDK-installed executor propagation
 helpers are not removed on unload. While enabled, its per-run instrumentation takes precedence over the supplied

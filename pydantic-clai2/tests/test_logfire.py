@@ -23,6 +23,7 @@ from rich.console import Console
 
 from pydantic_clai2 import DEFAULT_PLUGINS
 from pydantic_clai2.commands import Commands
+from pydantic_clai2.credential_store import save_codex_credentials
 from pydantic_clai2.logfire import activate
 from pydantic_clai2.plugin_loader import PluginError, PluginLoader
 from pydantic_clai2.plugins import PluginHost, SessionEnd, SessionStart
@@ -49,6 +50,8 @@ class Recorder:
         *,
         local: bool,
         send_to_logfire: Literal[False, 'if-token-present'],
+        token: str | None,
+        advanced: logfire.AdvancedOptions | None,
         service_name: str,
         console: Literal[False],
         config_dir: Path,
@@ -58,6 +61,8 @@ class Recorder:
             {
                 'local': local,
                 'send_to_logfire': send_to_logfire,
+                'token': token,
+                'base_url': advanced.base_url if advanced else None,
                 'service_name': service_name,
                 'console': console,
                 'config_dir': config_dir,
@@ -143,6 +148,8 @@ async def test_default_content_images_tools_and_usage_are_traced(recorder: Recor
         {
             'local': True,
             'send_to_logfire': 'if-token-present',
+            'token': None,
+            'base_url': None,
             'service_name': 'pydantic-clai2',
             'console': False,
             'config_dir': tmp_path / 'config/pydantic-clai2/logfire',
@@ -274,6 +281,24 @@ def test_activation_failure_closes_local_providers(recorder: Recorder, monkeypat
     with pytest.raises(RuntimeError, match='cannot construct'):
         activate(make_host())
     assert recorder.exporters[0].closed
+
+
+@pytest.mark.parametrize('source', ['keyring', 'environment', 'disabled'])
+async def test_keyring_destination_and_explicit_overrides(
+    recorder: Recorder, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    save_codex_credentials(
+        account='logfire',
+        value=json.dumps({'token': 'stored-token', 'logfire_api_url': 'https://logfire-eu.pydantic.dev'}),
+    )
+    if source == 'environment':
+        monkeypatch.setenv('LOGFIRE_TOKEN', 'environment-token')
+    host = make_host(send_to_logfire=False) if source == 'disabled' else make_host()
+    activate(host)
+    await close_host(host)
+    expected_token = {'keyring': 'stored-token', 'environment': 'environment-token', 'disabled': None}[source]
+    assert recorder.options[0]['token'] == expected_token
+    assert recorder.options[0]['base_url'] == ('https://logfire-eu.pydantic.dev/' if source == 'keyring' else None)
 
 
 async def test_no_credentials_needs_no_setup_or_console_output(capsys: pytest.CaptureFixture[str]) -> None:
