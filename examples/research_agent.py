@@ -41,7 +41,7 @@ def build_agent(model: Model | str = DEFAULT_MODEL) -> Agent:
         capabilities=[
             WebSearch(local=True),  # Use native search when supported, with DuckDuckGo as the local fallback.
             WebFetch(local=True),  # Use native URL fetching when supported, with a local fallback.
-            SubAgents(agents=[sub_researcher]),
+            SubAgents(agents=[sub_researcher], agent_folders=None),
             ToolOutputLimits(),  # Bound large search responses.
         ],
     )

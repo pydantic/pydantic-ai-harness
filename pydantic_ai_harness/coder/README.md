@@ -62,7 +62,7 @@ uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_
 4. [`RepoContext`](https://pydantic.dev/docs/ai/harness/repo-context/)`(workspace_dir=workspace, expose_inventory_tool=False)` for repository instructions and structure.
    Pass `repo_context=False` to leave it out when the agent already binds its own `RepoContext`, so the
    instruction files are not loaded twice.
-5. [`SubAgents`](https://pydantic.dev/docs/ai/harness/subagents/)`(include_self=True)`, so the agent can hand a self-contained
+5. [`SubAgents`](https://pydantic.dev/docs/ai/harness/subagents/)`(include_self=True, agent_folders=None)`, so the agent can hand a self-contained
    sub-task to a fresh run of itself (see below). Pass `sub_agents=False` to leave it out.
 
 Then the plumbing, which the agent never calls directly:
@@ -97,7 +97,7 @@ these rules. Coder does not include planning or the run-scoped `run_command` fam
 
 ## Sub-agents
 
-With `sub_agents=True` (the default), `Coder` adds [`SubAgents`](https://pydantic.dev/docs/ai/harness/subagents/)`(include_self=True)`,
+With `sub_agents=True` (the default), `Coder` adds [`SubAgents`](https://pydantic.dev/docs/ai/harness/subagents/)`(include_self=True, agent_folders=None)`,
 which gives the agent `delegate_task` and one delegate, `self`: a fresh run of the same agent `Coder` is bound
 to. The delegate starts without this conversation, so the agent passes it everything it needs, and it has
 everything the agent has -- the same model, workspace, instructions, and capabilities, including an approval
