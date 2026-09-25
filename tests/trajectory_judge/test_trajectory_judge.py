@@ -667,6 +667,52 @@ class TestTranscript:
         assert len(transcript) <= 25 * 4  # window tokens * ~4 chars per token
 
     @pytest.mark.parametrize(
+        ('messages', 'expected_start'),
+        [
+            pytest.param(
+                [ModelRequest(parts=[SpeechPart(speaker='user', transcript='Fix the login bug only.')])],
+                'user: Fix the login bug only.\n[...]\n',
+                id='user-speech',
+            ),
+            pytest.param(
+                [
+                    ModelRequest(parts=[UserPromptPart('Fix the login bug only.')]),
+                    ModelResponse(parts=[ThinkingPart('hmm'), TextPart('')]),
+                    ModelRequest(parts=[UserPromptPart('follow-up')]),
+                ],
+                'user: Fix the login bug only.\n[...]\n',
+                id='follow-up-after-silent-response',
+            ),
+            pytest.param(
+                [
+                    ModelRequest(parts=[UserPromptPart('Fix the login bug only.')]),
+                    ModelRequest(parts=[RetryPromptPart('bad output'), UserPromptPart('follow-up')]),
+                ],
+                'user: Fix the login bug only.\n[...]\n',
+                id='follow-up-after-retry',
+            ),
+        ],
+    )
+    async def test_original_request_ends_at_the_first_agent_activity(
+        self, messages: list[ModelMessage], expected_start: str
+    ) -> None:
+        seen: list[str] = []
+        done = asyncio.Event()
+        cap = TrajectoryJudge(model=_steer_model(seen=seen), every=1, window=100, on_verdict=lambda _: done.set())
+        ctx = _ctx()
+        run_cap = await cap.for_run(ctx)
+
+        history = [*messages, ModelRequest(parts=[ToolReturnPart('read_file', 'a' * 1000, tool_call_id='c1')])]
+        await run_cap.after_model_request(
+            ctx, request_context=_request_context(history), response=_text_response('recent-marker')
+        )
+        await asyncio.wait_for(done.wait(), timeout=_WAIT)
+
+        transcript = seen[0].split('<trajectory>\n', 1)[1].rsplit('\n</trajectory>', 1)[0]
+        assert transcript.startswith(expected_start)
+        assert 'follow-up' not in transcript
+
+    @pytest.mark.parametrize(
         ('window', 'expected'),
         [
             pytest.param(25, 'user: ' + 'x' * 32 + ' [truncated]', id='request-only'),

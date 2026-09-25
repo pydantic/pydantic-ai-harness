@@ -398,24 +398,29 @@ def _prompt_with(transcript: str) -> str:
 def _render_transcript(messages: Sequence[ModelMessage]) -> tuple[str, str]:
     """Render the trajectory as judge-readable lines, split into the original request and the rest.
 
-    The original request is the leading run of user prompts, before the first assistant or tool
-    activity. System prompts and thinking parts are omitted: the judge evaluates observable
+    The original request is the user prompts and user speech sent before the agent's first
+    response or tool activity, including responses that render nothing (thinking only). System prompts and thinking parts are omitted: the judge evaluates observable
     behavior (what was asked, said, called, and returned), not the agent's configuration or
     private reasoning.
     """
     request: list[str] = []
     lines: list[str] = []
+    user_lines = request
     for message in messages:
+        if isinstance(message, ModelResponse):
+            user_lines = lines
         for part in message.parts:
             if isinstance(part, UserPromptPart):
                 text = _prompt_text(part.content)
                 if text:
-                    (lines if lines else request).append(f'user: {text}')
+                    user_lines.append(f'user: {text}')
             elif isinstance(part, ToolReturnPart):
+                user_lines = lines
                 lines.append(f'tool {part.tool_name} returned: {part.model_response_str()}')
             elif isinstance(part, NativeToolReturnPart):
                 lines.append(f'native tool {part.tool_name} returned: {part.model_response_str()}')
             elif isinstance(part, RetryPromptPart):
+                user_lines = lines
                 lines.append(f'retry ({part.tool_name or "output"}): {part.model_response()}')
             elif isinstance(part, TextPart):
                 if part.content:
@@ -425,7 +430,7 @@ def _render_transcript(messages: Sequence[ModelMessage]) -> tuple[str, str]:
             elif isinstance(part, NativeToolCallPart):
                 lines.append(f'assistant called native tool {part.tool_name} with {part.args_as_json_str()}')
             elif isinstance(part, SpeechPart) and part.transcript:
-                lines.append(f'{part.speaker}: {part.transcript}')
+                (user_lines if part.speaker == 'user' else lines).append(f'{part.speaker}: {part.transcript}')
     return '\n'.join(request), '\n'.join(lines)
 
 
