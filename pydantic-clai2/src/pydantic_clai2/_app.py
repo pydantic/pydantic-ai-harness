@@ -30,7 +30,6 @@ from ._branding import print_banner
 from ._completion_adapter import COMPLETION_STYLE, PromptCompleter
 from ._rendering import StreamRenderer
 from ._session import Session
-from .capability_catalog import HARNESS_PLUGINS, adopt_promoted
 from .command_context import CommandContext, CommandProvider
 from .commands import (
     Command,
@@ -56,6 +55,7 @@ from .plugin_loader import PluginError, PluginLoader
 from .plugin_menu import open_plugins_menu
 from .plugins import Renderer, SessionEndReason, SessionStart, TurnEnd, TurnStart, bare_screen
 from .project_settings import ProjectSettings
+from .promoted_plugins import adopt_promoted
 from .prompt_transcript import TranscriptBuffer
 from .reloading import reload_clai
 from .screen import Screen
@@ -98,9 +98,10 @@ DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (
     PluginSettings(id='notifications', factory='pydantic_clai2.notifications'),
     PluginSettings(id='mcp', factory='pydantic_clai2.mcp'),
     PluginSettings(id='slack', factory='pydantic_clai2.slack', enabled=False),
-    *HARNESS_PLUGINS,
 )
-"""Built-in declarations, including opt-in harness capabilities. `remove` restores their defaults.
+"""Built-in declarations, each integrated with the shell. `remove` restores their defaults.
+
+Other harness capabilities are not listed here: a user adds one on purpose with `/plugins add` or a plugin module.
 
 `coder` leaves out its own `RepoContext` because `repo_context` binds one, so instruction files load once.
 """

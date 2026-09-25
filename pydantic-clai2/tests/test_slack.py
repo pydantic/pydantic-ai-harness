@@ -13,11 +13,11 @@ from rich.console import Console
 from pydantic_clai2 import DEFAULT_PLUGINS
 from pydantic_clai2 import slack as slack_plugin
 from pydantic_clai2.api_keys import load_keys, save_key
-from pydantic_clai2.capability_catalog import HARNESS_PLUGINS, adopt_promoted
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.plugin_loader import PluginError, PluginLoader
 from pydantic_clai2.plugins import SessionStart
+from pydantic_clai2.promoted_plugins import adopt_promoted
 from pydantic_clai2.settings_store import SettingsStore
 
 pytestmark = pytest.mark.anyio
@@ -47,7 +47,6 @@ def connection(token: str, *, read_only: bool = True) -> list[Slack[None]]:
 
 def test_declared_as_disabled_builtin() -> None:
     assert BUILTIN == PluginSettings(id='slack', factory='pydantic_clai2.slack', enabled=False)
-    assert all(plugin.id != 'slack' for plugin in HARNESS_PLUGINS)
 
 
 async def test_disabled_until_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
