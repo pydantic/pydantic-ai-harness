@@ -386,7 +386,7 @@ order plugin instructions, renderers, and status segments are consulted in.
 `/plugins` and `/plugins list` also include every other public harness capability,
 including each compaction strategy and guardrail. These entries start disabled.
 `Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
-appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
+appearing twice, and `Pylon` uses the [`pylon` plugin](#pylon-support-issues-and-accounts-in-pylon). Deprecated aliases, toolsets, stores, and the ACP server adapter
 are not separate capabilities.
 
 Press Space to enable an entry. Its preview shows the import path and any load
@@ -506,6 +506,34 @@ The request and its response are also emitted as `AskUserRequestedEvent` and
 `AskUserAnsweredEvent`, so a plugin that only wants to watch (log the question,
 show a "waiting for you" state) registers `@host.on(EventClass)` or
 `@host.render(EventClass)` without being the answerer.
+
+### `pylon`: support issues and accounts in Pylon
+
+`pylon` (`pydantic_clai2.pylon`) gives the agent harness
+[`Pylon`](../docs/pylon.md): Pylon's hosted MCP tools for
+searching, reading, creating, and updating support issues, looking up and
+updating accounts, and looking up contacts. It starts disabled;
+`/plugins enable pylon` turns it on. The agent acts as the Pylon user who signed
+in, so only Member and Admin users with Pylon's `MCP Access` role can use it.
+
+When `PYLON_ACCESS_TOKEN` is set, CLAI connects with that token. Otherwise the
+first run that uses Pylon opens the browser to sign in, as `/mcp` servers with
+OAuth do, and waits up to five minutes for you to finish. The tokens are kept in
+the keyring (account `mcp-plugin_pylon`, or a private `0600` file when there is no
+keyring) and refreshed as needed, so a restart does not sign in again. Pylon only
+accepts OAuth tokens, not its REST API keys.
+
+| Key | Default | Does |
+|---|---|---|
+| `browser_sign_in` | `true` | sign in through the browser when `PYLON_ACCESS_TOKEN` is unset; with `false`, the plugin fails to load without the variable |
+| `read_only` | `false` | keep only the tools Pylon's server labels read-only |
+
+```text
+/plugins add pylon pydantic_clai2.pylon '{"read_only": true}'
+```
+
+Set `"browser_sign_in": false` where no browser can reach this machine, such as
+over SSH, so a missing token fails at load instead of at the first run.
 
 ## Managing plugins
 

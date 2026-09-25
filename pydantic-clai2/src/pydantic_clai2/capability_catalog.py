@@ -2,7 +2,7 @@
 
 from .config import PluginSettings
 
-# Coder, AskUser and RepoContext already have shell-integrated built-in entries.
+# Coder, AskUser, RepoContext and Pylon already have shell-integrated built-in entries.
 _FACTORIES = (
     ('advisor', 'advisor:Advisor'),
     ('aws_lambda', 'aws_lambda:AWSLambdaDurability'),
@@ -45,7 +45,6 @@ _FACTORIES = (
     ('posthog', 'posthog:PostHog'),
     ('prompt_injection_defender', 'prompt_injection_defender:PromptInjectionDefender'),
     ('pydantic_ai_docs', 'pydantic_ai_docs:PydanticAIDocs'),
-    ('pylon', 'pylon:Pylon'),
     ('repair_tool_arguments', 'repair_tool_arguments:RepairToolArguments'),
     ('researcher', 'researcher:Researcher'),
     ('shell', 'shell:Shell'),
