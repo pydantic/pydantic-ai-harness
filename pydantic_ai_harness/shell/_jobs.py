@@ -148,7 +148,9 @@ class Job:
         """The job launched into `directory`, from its `handle` file, or `None` when there is none."""
         try:
             fields = (await workspace.read_bytes(posixpath.join(directory, 'handle'))).decode(errors='replace').split()
-        except (FileNotFoundError, NotADirectoryError):
+        except WorkspaceError:
+            raise
+        except OSError:  # missing, a directory, or unreadable: no job to attach to
             return None
         if len(fields) != 2 or not fields[0].isdigit():
             return None

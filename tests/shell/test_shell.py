@@ -1204,6 +1204,12 @@ class TestBackgroundCommands:
         ts = _shell_toolset(shell_dir)
         assert 'unknown command ID' in await ts.check_command(_ctx(shell_dir), command_id)
 
+    async def test_handle_that_is_a_directory_is_unknown(self, shell_dir: Path) -> None:
+        ts = _shell_toolset(shell_dir)
+        command_id = 'd' * 32
+        (Path(await ts._jobs_base(_ctx(shell_dir))) / command_id / 'handle').mkdir(parents=True)
+        assert 'unknown command ID' in await ts.check_command(_ctx(shell_dir), command_id)
+
     async def test_unreadable_handle_is_unknown(self, shell_dir: Path) -> None:
         ts = _shell_toolset(shell_dir)
         command_id = 'e' * 32
@@ -1847,6 +1853,11 @@ class _RaisingWorkspace(LocalWorkspaceBackend):
         raise self.error
 
 
+class _SlowReads(LocalWorkspaceBackend):
+    async def read_bytes(self, path: str) -> bytes:
+        raise WorkspaceTimeoutError('slow')
+
+
 class TestWorkspaceFailures:
     """Deliberate workspace failures reach the model as failed calls; a vanished workspace ends the run."""
 
@@ -1866,6 +1877,11 @@ class TestWorkspaceFailures:
         with pytest.raises(ToolFailed) as failed:
             await ts.call_tool('start_command', {'command': 'true'}, ctx, tools['start_command'])
         assert failed.value.message == message
+
+    async def test_timed_out_handle_read_is_not_an_unknown_id(self, shell_dir: Path) -> None:
+        ts = _shell_toolset(shell_dir)
+        with pytest.raises(ToolFailed, match='timed out'):
+            await ts.check_command(_run_context(Workspace(_SlowReads(shell_dir))), 'c' * 32)
 
     async def test_unavailable_workspace_ends_the_run(self, shell_dir: Path) -> None:
         ts = _shell_toolset(shell_dir)
