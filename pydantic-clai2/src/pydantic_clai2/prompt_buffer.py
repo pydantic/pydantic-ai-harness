@@ -105,6 +105,7 @@ class PromptBuffer:
             if matches:
                 index = (matches.index(self.text) + 1) % len(matches) if key == 'ctrl-r' and self.text in matches else 0
                 self.replace(matches[index])
+                self.history_index = None
 
     def edit(self, key: str) -> bool:
         """Apply an editing key; return false when the owner should handle it."""

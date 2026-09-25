@@ -355,6 +355,26 @@ async def test_deleting_from_a_recalled_queued_prompt_survives_navigation() -> N
         assert live.queued_messages == ('a', 'b')
 
 
+async def test_history_search_from_a_recalled_queued_prompt() -> None:
+    async with editor() as (live, _, _):
+        live.buffer.history = ['old']
+        queue(live, 'b')
+        live.feed('up')
+        for key in ('ctrl-r', 'o', 'enter', 'enter'):
+            live.feed(key)
+        # A picked history match is a new follow-up; the recalled queued prompt stays as it was.
+        assert live.queued_messages == ('b', 'old')
+        live.feed('up')
+        live.feed('up')
+        live.buffer.insert('x')
+        for key in ('ctrl-r', 'o', 'ctrl-g'):
+            live.feed(key)
+        assert live.buffer.text == 'bx'
+        live.feed('enter')
+        # Cancelling the search keeps editing the queued prompt it started from.
+        assert live.queued_messages == ('bx', 'old')
+
+
 async def test_clearing_a_recalled_queued_prompt_removes_it() -> None:
     async with editor() as (live, _, _):
         queue(live, 'only')

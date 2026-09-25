@@ -98,6 +98,7 @@ class LivePrompt:
         self._editing: _Queued | None = None
         self._recall_queue: list[_Queued] = []
         self._recall_target: _Queued | None = None
+        self._search_target: _Queued | None = None
         self._submitted = asyncio.Event()
         self._suspended = False
         self._completions: list[Completion] = []
@@ -176,8 +177,8 @@ class LivePrompt:
                 self.submit(EOFError())
         elif key in ('paste', 'ctrl-v', 'alt-v'):
             self.paste(data if key == 'paste' else None)
-        elif self.buffer.search is not None:
-            self.buffer.search_key(key)
+        elif key == 'ctrl-r' or self.buffer.search is not None:
+            self.search(key)
         elif key in ('tab', 'backtab'):
             self.complete(backwards=key == 'backtab')
         elif key == 'enter':
@@ -196,6 +197,14 @@ class LivePrompt:
             self.buffer.edit(key)
         if key not in ('tab', 'backtab', 'escape') and (key not in ('up', 'down') or not self._completions):
             self.refresh_completions()
+
+    def search(self, key: str) -> None:
+        """Search history; a picked match is a new prompt, not an edit of a recalled queued one."""
+        if self.buffer.search is None:
+            self._search_target = self._editing
+        self.buffer.edit(key)
+        # Cancelling (or finding nothing) leaves the original text, and with it the edit target.
+        self._editing = self._search_target if self.buffer.text == self.buffer.search_original else None
 
     def interrupt(self) -> None:
         """Cancel running work, or else drop the draft and signal the reader."""
