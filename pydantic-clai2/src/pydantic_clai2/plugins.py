@@ -245,6 +245,7 @@ class PluginHost(Generic[DepsT]):
         self.commands = Commands()
         self._settings = settings
         self._persist = save_settings
+        self._configurer: Callable[[], Awaitable[str]] | None = None
         self._hooks: Hooks[DepsT] = Hooks()
         self._hooks_used = False
         self._capabilities: list[AgentCapability[DepsT]] = []
@@ -298,6 +299,20 @@ class PluginHost(Generic[DepsT]):
         """
         self._settings = settings.model_dump(mode='json', by_alias=True)
         self._persist(self._settings)
+
+    @property
+    def configurer(self) -> Callable[[], Awaitable[str]] | None:
+        """The settings menu registered with `configure`, if any."""
+        return self._configurer
+
+    def configure(self, func: Callable[[], Awaitable[str]], /) -> Callable[[], Awaitable[str]]:
+        """Offer a settings menu, opened by `/plugins configure NAME`, `C` in `/plugins`, and `plugins enable` or `add`.
+
+        Save each change with `save_settings` as the user makes it and return a line to show. When the
+        settings changed, the loader loads the plugin again afterwards, so `activate` builds from them.
+        """
+        self._configurer = func
+        return func
 
     def add(self, capability: AgentCapability[DepsT], /) -> None:
         """Give the agent tools, instructions, or a capability chosen per run."""

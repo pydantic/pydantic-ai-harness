@@ -510,38 +510,46 @@ show a "waiting for you" state) registers `@host.on(EventClass)` or
 
 The `github` built-in (`pydantic_clai2.github`) gives the model harness
 [`GitHub`](../pydantic_ai_harness/github/README.md): the tools of GitHub's hosted
-MCP server, acting as the account behind a token. It starts disabled; turn it on
-with `/plugins enable github`.
+MCP server, acting as the account behind a token. It starts disabled.
+`/plugins enable github` loads it and opens its settings menu. To change the
+settings later, run `/plugins configure github` or press `C` on it in `/plugins`.
+You never need to reinstall it.
 
-The token lives in the named API key store, never in plugin settings: those are
-plaintext SQLite. Run `/github connect` to pick a saved key from `/keys`, or to type
-a new token into a masked prompt, which saves it in `/keys` as `GITHUB_TOKEN`.
-Replacing a key that already exists asks first, because other plugins and
-connections may share it. The plugin's settings then hold only the key's name,
-such as `{"token": {"name": "GITHUB_TOKEN"}}`, and a declaration that tries to hold
-a token is rejected. `GITHUB_TOKEN` is a label in `/keys`, not an environment
-variable: the plugin does not read the environment.
+The menu is the shared field editor that `/set` uses: type to filter, Enter to
+edit a row, `R` to reset one, Esc to close. Each change is saved as soon as you
+make it. When the menu closes, the plugin loads again, so the next turn uses the
+new settings.
+
+| Row | Default | Does |
+|---|---|---|
+| Token | `GITHUB_TOKEN` | the `/keys` entry to connect with: pick a saved key from a searchable list, or type a new one into a masked field |
+| GitHub host | github.com | github.com, or GitHub Enterprise Cloud with data residency; the latter asks for `octocorp.ghe.com` or the full MCP URL and connects to `https://copilot-api.octocorp.ghe.com/mcp` |
+| Tools | read-only | read-only, or read and write |
+| Tool groups | server defaults | `all`, a preset, or your own comma-separated groups such as `repos,issues,actions` |
+| Server instructions | forwarded | whether the GitHub server's own instructions reach the agent |
+
+GitHub Enterprise Server has no hosted MCP server, so it is not offered. The
+token's own permissions still limit what any of these settings can reach.
+
+The token lives in the named API key store that `/keys` manages. It is never
+stored in plugin settings, because those are plaintext SQLite. A new token typed
+in the menu is saved in `/keys` under the key's name. If a key of that name
+already exists, the menu asks before replacing it, because other plugins and
+connections may share it. The plugin's settings hold only the key's name, such as
+`{"token": {"name": "GITHUB_TOKEN"}}`, and a declaration that tries to hold a
+token is rejected. `GITHUB_TOKEN` is a label in `/keys`, not an environment
+variable: the plugin does not read the environment. Any plugin that names the
+same key shares it.
 
 The key is looked up on every run, so replacing it in `/keys` applies from the
-next turn. If the named key is missing when the plugin loads, it still loads, prints
-a warning, and keeps `/github connect` available; each run fails with an error
-naming the key until you save one, so the agent never runs without the account you
-chose. `/github` on its own shows which key is in use and whether it exists.
-Deleting or renaming that key in `/keys` has the same effect; `/keys` does not
-block renaming a key a plugin uses. The plugin does not use GitHub OAuth or your
-`/login github-copilot` login.
-
-It offers only GitHub's read tools by default (`read_only`), so the agent cannot
-change repositories, issues, or pull requests unless you allow it:
-
-```text
-/plugins add github pydantic_clai2.github '{"read_only": false}'
-```
-
-The token's own permissions still limit what either mode can reach. For other
-`GitHub` options, such as `toolsets` or a GitHub Enterprise Cloud `url`, write a
-plugin module that constructs `GitHub` and register it under the `github` id.
-The plugin emits no telemetry of its own; tool calls appear in core's spans.
+next turn. If the named key is missing when the plugin loads, the plugin still
+loads, prints a warning, and keeps its settings menu available. Until you save a
+key, each run fails with an error naming the key, so the agent never runs without
+the account you chose. Deleting or renaming the key in `/keys` has the same
+effect, because `/keys` does not stop you renaming a key that a plugin uses. The
+plugin does not use GitHub OAuth or your `/login github-copilot` login, and
+Copilot does not read the `GITHUB_TOKEN` key. The plugin emits no telemetry of
+its own; tool calls appear in core's spans.
 
 ## Managing plugins
 
@@ -557,13 +565,15 @@ for `/agent` and `/mcp`:
                                                      | adds    2 commands, 1 hook, 0 tools
                                                      | error   none
 
- Up/Down move - Space enable/disable - R reload - D remove - Enter/Q close
+ Up/Down move - Space enable/disable - C configure - R reload - D remove - Enter/Q close
 ```
 
 The left side lists every plugin with `[x]` for on and `[ ]` for off. The right
 side shows details for the highlighted one: where it came from, whether it
 loaded, what it registered, and the last error if loading failed. Every key
 acts immediately; there is no save step, so Enter, Q, Esc, and Ctrl-C all just close.
+`C` closes the list and opens the highlighted plugin's settings menu, if it has
+one; enabling such a plugin with Space shows a reminder to press it.
 Closing returns to the prompt without printing the plugin list. Use `/plugins list`
 to print it.
 Adding a plugin needs a name and a module, so that stays a typed command.
@@ -578,6 +588,7 @@ CLAI does the same thing:
 | `/plugins remove NAME` | forget an installed declaration; persistently disable a drop-in (delete its file yourself to remove it); reset a built-in or project-declared plugin to its declaration |
 | `/plugins enable NAME` / `disable NAME` | load or unload, remembered across restarts |
 | `/plugins reload NAME` | re-import the file and load it again (for editing a plugin while CLAI runs) |
+| `/plugins configure NAME` | open a loaded plugin's settings menu, if it registered one with `host.configure`; `enable` and `add` open it too |
 | `/reload` | reload CLAI's own Python modules for development and rebuild the shell without restarting the process |
 
 `/reload` takes no arguments. It uses `importlib.reload`, preserves the conversation,
@@ -954,13 +965,31 @@ def activate(host):
 
 `SavedKey` is a capability `auth` function. It looks the key up on every run and
 raises with `setup` when the key is missing, so a deleted key fails closed rather
-than falling back to something else. To let the user choose a key from a command,
-call `prompt_api_key(prompt=..., label=...)`: it returns a `KeyReference` to a
-saved key, a masked new value for you to `save_key(name=..., value=...)`, or `None`
-when cancelled. Then call `host.save_settings(settings)` with the new reference; it
-saves your plugin's declaration as `plugins add` would; `host.settings(Model)`
-returns the new values from then on, and the next load starts with them. The built-in `github` plugin's `/github connect` works this
-way.
+than falling back to something else. To let the user choose a key, call `prompt_api_key(prompt=..., label=...)`: it
+returns a `KeyReference` to a saved key, a masked new value for you to
+`save_key(name=..., value=...)`, or `None` when cancelled. Then call
+`host.save_settings(settings)` with the new reference. It saves your plugin's
+declaration as `plugins add` would, and `host.settings(Model)` returns the new
+values from then on.
+
+### Offer a settings menu: `@host.configure`
+
+```python
+from pydantic_clai2.field_menu import FieldMenu, run_flow
+from pydantic_clai2.menu_worker import run_worker
+
+
+@host.configure
+async def configure() -> str:
+    return '\n'.join(await run_worker(lambda: run_flow(FieldMenu(MySource(host)))))
+```
+
+`/plugins configure NAME`, `C` in `/plugins`, and `/plugins enable` or `add`
+(when they load the plugin) open it. Build it on `FieldMenu` and a `FieldSource`
+so it looks and behaves like `/set`. Save each edit with `host.save_settings` as
+it is made, keep secrets in `/keys` as above, and return the lines to show. If the
+saved settings changed, the loader loads the plugin again after the menu closes,
+so `activate` builds from them. The built-in `github` plugin is a complete example.
 
 ### Reach the conversation and the status row: `host.conversation`, `host.status`
 
