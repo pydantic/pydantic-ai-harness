@@ -11,7 +11,6 @@ from pydantic_ai_harness.github import GitHub
 from rich.console import Console
 
 from pydantic_clai2 import DEFAULT_PLUGINS, api_keys
-from pydantic_clai2.capability_catalog import HARNESS_PLUGINS
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.plugin_loader import PluginError, PluginLoader
 from pydantic_clai2.plugins import SessionStart
@@ -36,7 +35,6 @@ def test_declared_as_disabled_clai_plugin_not_raw_catalog_entry() -> None:
     assert BUILTIN.factory == 'pydantic_clai2.github'
     assert not BUILTIN.enabled
     assert BUILTIN.settings == {}
-    assert all(plugin.factory != 'pydantic_ai_harness.github:GitHub' for plugin in HARNESS_PLUGINS)
 
 
 async def test_enable_reads_environment_token_and_defaults_to_read_only(
