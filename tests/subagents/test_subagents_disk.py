@@ -141,20 +141,25 @@ class TestParseAgentMarkdown:
 
 
 class TestResolveFolders:
-    def test_str_convention_with_claude_fallback(self, tmp_path: Path) -> None:
-        # Project root has `.agents/`; home root has neither, so it falls back to `.claude/`.
+    def test_str_convention_scans_agents_and_claude(self, tmp_path: Path) -> None:
+        # Each root contributes `.agents/<leaf>` then `.claude/<leaf>`, project root first,
+        # whether or not either directory exists.
         project = tmp_path / 'project'
         project.mkdir()
         (project / '.agents').mkdir()
         home = tmp_path / 'home'
         home.mkdir()
         folders = resolve_folders('agents', project, home)
-        assert folders == [project / '.agents' / 'agents', home / '.claude' / 'agents']
+        assert folders == [
+            project / '.agents' / 'agents',
+            project / '.claude' / 'agents',
+            home / '.agents' / 'agents',
+            home / '.claude' / 'agents',
+        ]
 
     def test_str_overrides_leaf_name(self, tmp_path: Path) -> None:
-        (tmp_path / '.agents').mkdir()
         folders = resolve_folders('reviewers', tmp_path, tmp_path)
-        assert folders == [tmp_path / '.agents' / 'reviewers']
+        assert folders == [tmp_path / '.agents' / 'reviewers', tmp_path / '.claude' / 'reviewers']
 
     def test_sequence_used_verbatim(self, tmp_path: Path) -> None:
         paths = [tmp_path / 'a', tmp_path / 'b']
@@ -163,8 +168,10 @@ class TestResolveFolders:
     def test_cwd_equal_home_dedupes_folder(self, tmp_path: Path) -> None:
         # When the project root equals the home root, the project and home convention
         # folders resolve to the same directory and are deduped to a single entry.
-        (tmp_path / '.agents').mkdir()
-        assert resolve_folders('agents', tmp_path, tmp_path) == [tmp_path / '.agents' / 'agents']
+        assert resolve_folders('agents', tmp_path, tmp_path) == [
+            tmp_path / '.agents' / 'agents',
+            tmp_path / '.claude' / 'agents',
+        ]
 
     def test_duplicate_paths_in_sequence_deduped(self, tmp_path: Path) -> None:
         assert resolve_folders([tmp_path / 'a', tmp_path / 'a'], tmp_path, tmp_path) == [tmp_path / 'a']
@@ -192,6 +199,47 @@ class TestDiskLoading:
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             cap: SubAgents[object] = SubAgents()
+        assert 'planner' in cap._by_name
+
+    def test_claude_folder_loads_when_agents_dir_exists(self) -> None:
+        # A repo with `.agents/skills/` (so `.agents/` exists) and `.claude/agents/` still
+        # loads the `.claude/` agents: `.agents/` does not hide `.claude/`.
+        project = Path.cwd()
+        (project / '.agents' / 'skills').mkdir(parents=True)
+        _write_agent(project / '.claude' / 'agents', 'reviewer.md', '---\nname: reviewer\n---\nReview.')
+        cap: SubAgents[object] = SubAgents(agent_folders='agents')
+        assert 'reviewer' in cap._by_name
+
+    def test_agents_folder_shadows_claude_folder(self) -> None:
+        # Precedence: project `.agents` > project `.claude` > home `.agents` > home `.claude`.
+        project = Path.cwd()
+        home = Path.home()
+        _write_agent(project / '.agents' / 'agents', 'a.md', '---\nname: a\ndescription: project agents\n---\nB')
+        _write_agent(project / '.claude' / 'agents', 'a.md', '---\nname: a\ndescription: project claude\n---\nB')
+        _write_agent(project / '.claude' / 'agents', 'b.md', '---\nname: b\ndescription: project claude\n---\nB')
+        _write_agent(home / '.agents' / 'agents', 'b.md', '---\nname: b\ndescription: home agents\n---\nB')
+        _write_agent(home / '.agents' / 'agents', 'c.md', '---\nname: c\ndescription: home agents\n---\nB')
+        _write_agent(home / '.claude' / 'agents', 'c.md', '---\nname: c\ndescription: home claude\n---\nB')
+        _write_agent(home / '.claude' / 'agents', 'd.md', '---\nname: d\ndescription: home claude\n---\nB')
+        with pytest.warns(UserWarning, match='is shadowed') as record:
+            cap: SubAgents[object] = SubAgents(agent_folders='agents')
+        assert len(record) == 3
+        instructions = cap.get_instructions()
+        assert isinstance(instructions, str)
+        assert '- a: project agents' in instructions
+        assert '- b: project claude' in instructions
+        assert '- c: home agents' in instructions
+        assert '- d: home claude' in instructions
+
+    def test_claude_symlinked_to_agents_loads_once_without_shadow_warning(self) -> None:
+        # When `.claude/agents` resolves to the same dir as `.agents/agents`, it is
+        # scanned once, so its agents are not reported as shadowing themselves.
+        project = Path.cwd()
+        _write_agent(project / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        (project / '.claude').symlink_to(project / '.agents', target_is_directory=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            cap: SubAgents[object] = SubAgents(agent_folders='agents')
         assert 'planner' in cap._by_name
 
     def test_none_disables_loading(self) -> None:

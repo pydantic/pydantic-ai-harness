@@ -211,7 +211,7 @@ orchestrator = Agent(
 
 `agent_folders` controls where definitions come from. It defaults to `'agents'`, the conventional layout:
 
-- A folder-name `str` (the default `'agents'`): for the project root (cwd) then the home root, load from `<root>/.agents/<name>/`, falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
+- A folder-name `str` (the default `'agents'`): for the project root (cwd) then the home root, load from both `<root>/.agents/<name>/` and `<root>/.claude/<name>/`, so a repo that uses `.agents/` for something else (such as skills) still loads agents from `.claude/`.
 - A sequence of paths loads from exactly those folders, in order.
 - `None` disables disk loading, exposing only the explicitly-passed `agents`.
 
@@ -267,7 +267,7 @@ SubAgents(agent_folders='agents', tool_resolver=resolve)
 
 ### Precedence
 
-When the same name appears in more than one source, the higher-precedence one wins and the others are skipped with a warning: explicitly-passed `agents` first, then the project folder, then the home folder (and, for an explicit path sequence, earlier paths before later ones). A duplicate name within the explicitly-passed `agents` list is still an error.
+When the same name appears in more than one source, the higher-precedence one wins and the others are skipped with a warning: explicitly-passed `agents` first, then the project `.agents/` folder, the project `.claude/` folder, the home `.agents/` folder, and the home `.claude/` folder (and, for an explicit path sequence, earlier paths before later ones). A duplicate name within the explicitly-passed `agents` list is still an error.
 
 ## Configuration
 
