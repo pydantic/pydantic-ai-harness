@@ -23,21 +23,16 @@ pip/uv-add "pydantic-ai-harness[coder,anthropic]"
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness.coder import Coder
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[LocalWorkspace('.'), Coder()],
 )
-```
-
-```python
-result = agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caught.')
-print(result.output)
-#> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
+agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caught.')
 ```
 
 `LocalWorkspace('.')` is where the agent works: its file tools and commands run on your machine, in this directory. It is not a sandbox, so commands can reach anything you can. To run the same agent in an isolated cloud machine, swap it for a sandbox capability (Modal, E2B, Daytona, or Sprites); see [Workspaces](#workspaces).
@@ -45,7 +40,7 @@ print(result.output)
 Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus repository context and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
 
 ```bash
-uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-sonnet-5
+uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-opus-5-5
 ```
 
 The bundled `coder_agent` is the example above without a model.

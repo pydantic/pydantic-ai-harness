@@ -29,20 +29,16 @@ Add a provider extra such as `[coder,anthropic]` when needed.
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness.coder import Coder
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[LocalWorkspace('.'), Coder()],
 )
-```
-
-```python
-result = agent.run_sync('Investigate the failing parser test, fix the cause, and run focused checks.')
-print(result.output)
+agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caught.')
 ```
 
 File paths resolve from the workspace's working directory, and commands start there. To work in an isolated cloud machine instead, swap `LocalWorkspace` for a sandbox capability (Modal, E2B, Daytona, or Sprites); nothing else changes. Commands run without an allowlist, and the file tools' path limits don't apply to them.
@@ -53,7 +49,7 @@ The exported `pydantic_ai_harness.coder:coder_agent` is the same agent, model-le
 Use it with the Pydantic AI CLI:
 
 ```bash
-uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-sonnet-5
+uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-opus-5-5
 ```
 
 ### The command environment
@@ -64,7 +60,12 @@ Commands in a `LocalWorkspace` get your `PATH` and `HOME`, so they find your too
 
 A workspace outlives the run that used it. To continue the conversation in the same files, pass its messages:
 
-```python
+```python {names="defined"}
+from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai_harness.coder import Coder
+
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[LocalWorkspace('.'), Coder()])
 result = agent.run_sync('Add a --verbose flag to the CLI.')
 result = agent.run_sync('Document the new flag in the README.', message_history=result.all_messages())
 ```
@@ -73,11 +74,18 @@ Message history can't move a `LocalWorkspace` to another directory.
 
 To hand the work to another agent, or start a fresh conversation in the same files, pass the workspace itself:
 
-```python
+```python {names="defined"}
+from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai_harness.coder import Coder
+
+coder = Agent('anthropic:claude-opus-5-5', capabilities=[LocalWorkspace('.'), Coder()])
 reviewer = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[Coder(instructions='Review the uncommitted change and run the tests. Do not edit files.')],
 )
+
+result = coder.run_sync('Add a --verbose flag to the CLI.')
 review = reviewer.run_sync('Review the change.', workspace=result.workspace)
 ```
 

@@ -7,8 +7,8 @@ description: Give a Pydantic AI agent shell command execution with allow/deny co
 
 `Shell` gives an agent the ability to run shell commands, with allow/deny
 controls, environment scrubbing, and managed background processes. It exposes
-command-execution tools that run in the agent's workspace and cleans up any
-background processes automatically when the agent run ends.
+command-execution tools that run in the agent's workspace, with background
+processes that keep running across the runs of a conversation.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/shell/)
 
@@ -18,14 +18,14 @@ background processes automatically when the agent run ends.
 
 Agents frequently need to run a build, a test suite, a linter, or a quick
 `grep`. Wiring up subprocess handling -- streaming output, timeouts, truncation,
-killing runaway processes, and cleaning up background jobs at the end of a run --
+killing runaway processes, and tracking background jobs across runs --
 is fiddly boilerplate that every agent reinvents.
 
 `Shell` bundles that plumbing into a single [capability](/ai/capabilities/overview/):
 configurable allow/deny lists, output truncation tuned to keep the useful tail,
 optional sticky working directory, environment control that can keep host
-secrets out of spawned commands, and automatic cleanup of background processes
-when the run finishes.
+secrets out of spawned commands, and background processes the model can check
+and stop by ID.
 
 ## Usage
 
@@ -38,7 +38,7 @@ from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import Shell
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[
         LocalWorkspace('./workspace'),
         Shell(allowed_commands=['ls', 'cat', 'rg']),
@@ -206,7 +206,7 @@ from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import Shell
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[
         LocalWorkspace('./app'),
         Shell(allowed_commands=['npm', 'curl']),
@@ -292,21 +292,21 @@ from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import Shell
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[LocalWorkspace('.'), Shell(persist_cwd=True, allowed_commands=['cd', 'ls', 'pwd'])],
 )
 ```
 
-Each run gets a fresh toolset instance, so the tracked directory and any
-background processes are isolated between concurrent runs and always start back
-at the workspace's working directory.
+Each run gets a fresh toolset instance, so the tracked directory is isolated
+between concurrent runs and always starts back at the workspace's working
+directory.
 
 ## Configuration
 
 Every field of `Shell` with its default:
 
-```python
-from pydantic_ai_harness import Shell
+```python {names="defined"}
+from pydantic_ai_harness.shell import RUN_SCOPED_TOOL_NAMES, Shell
 
 Shell(
     allowed_commands=[],           # allowlist (mutually exclusive with denied)
@@ -334,7 +334,7 @@ config file instead of Python:
 
 ```yaml
 # agent.yaml
-model: anthropic:claude-sonnet-5
+model: anthropic:claude-opus-5-5
 capabilities:
   - Shell:
       allowed_commands: ['ls', 'cat', 'rg', 'pytest']

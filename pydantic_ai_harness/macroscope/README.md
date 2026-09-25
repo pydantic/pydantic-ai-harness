@@ -38,9 +38,9 @@ print(result.output)
 
 ## Prerequisites: install and sign in
 
-The capability drives the `macroscope` binary installed in the run's workspace
-(`ctx.workspace`): your machine with `LocalWorkspace`, or the sandbox when the
-run uses one. A run without a workspace fails at its start. The review runs in
+The capability drives the `macroscope` binary installed in the agent's
+[workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/): your machine
+with `LocalWorkspace`, or the sandbox when the run uses one. A run without a workspace fails at its start. The review runs in
 the workspace's working directory, which should be the repository. The
 capability cannot install or authenticate on your behalf, so do this once
 wherever the review runs:

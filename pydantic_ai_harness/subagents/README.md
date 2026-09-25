@@ -16,11 +16,11 @@ A single agent that does everything accumulates a large tool set and a long cont
 from pydantic_ai import Agent
 from pydantic_ai_harness import SubAgent, SubAgents
 
-researcher = Agent('anthropic:claude-sonnet-4-6', name='researcher', description='Researches a topic and reports findings')
-writer = Agent('anthropic:claude-sonnet-4-6', name='writer', description='Turns notes into polished prose')
+researcher = Agent('anthropic:claude-opus-5-5', name='researcher', description='Researches a topic and reports findings')
+writer = Agent('anthropic:claude-opus-5-5', name='writer', description='Turns notes into polished prose')
 
 orchestrator = Agent(
-    'anthropic:claude-opus-4-7',
+    'anthropic:claude-opus-5-5',
     capabilities=[SubAgents(agents=[SubAgent(researcher), SubAgent(writer)])],
 )
 
@@ -59,11 +59,11 @@ from pydantic_ai import Agent
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness import SubAgent, SubAgents
 
-reproducer = Agent('anthropic:claude-sonnet-4-6', instructions='Reproduce the reported bug from a minimal script.')
-librarian = Agent('anthropic:claude-sonnet-4-6', instructions='Find relevant docs, issues, and prior art.')
+reproducer = Agent('anthropic:claude-opus-5-5', instructions='Reproduce the reported bug from a minimal script.')
+librarian = Agent('anthropic:claude-opus-5-5', instructions='Find relevant docs, issues, and prior art.')
 
 orchestrator = Agent(
-    'anthropic:claude-opus-4-7',
+    'anthropic:claude-opus-5-5',
     capabilities=[
         SubAgents(
             agents=[
@@ -94,19 +94,19 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai_harness import SubAgent, SubAgents
 from pydantic_ai_harness.subagents import ModelOption
 
-reviewer = Agent('anthropic:claude-sonnet-4-6', name='reviewer', description='Reviews a diff')
-linter = Agent('anthropic:claude-sonnet-4-6', name='linter', description='Runs the linter and reports failures')
+reviewer = Agent('anthropic:claude-opus-5-5', name='reviewer', description='Reviews a diff')
+linter = Agent('anthropic:claude-opus-5-5', name='linter', description='Runs the linter and reports failures')
 
 orchestrator = Agent(
-    'anthropic:claude-opus-4-7',
+    'anthropic:claude-opus-5-5',
     capabilities=[
         SubAgents(
             agents=[SubAgent(reviewer), SubAgent(linter, models=['fast'])],
             models={
                 'fast': 'anthropic:claude-haiku-4-5',
-                'standard': 'anthropic:claude-sonnet-4-6',
+                'standard': 'anthropic:claude-sonnet-5',
                 'deep': ModelOption(
-                    'anthropic:claude-opus-4-7',
+                    'anthropic:claude-opus-5-5',
                     description='hard reasoning, multi-file changes',
                     settings=ModelSettings(thinking='xhigh'),
                 ),
@@ -162,9 +162,9 @@ class ReportDelegations(AbstractCapability):
         print(f'{event.agent_name}: {event.outcome} in {event.duration_seconds:.1f}s')
 
 
-researcher = Agent('anthropic:claude-sonnet-4-6', name='researcher')
+researcher = Agent('anthropic:claude-opus-5-5', name='researcher')
 agent = Agent(
-    'anthropic:claude-opus-4-7',
+    'anthropic:claude-opus-5-5',
     capabilities=[SubAgents(agents=[SubAgent(researcher)]), ReportDelegations()],
 )
 ```
@@ -186,7 +186,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import SubAgents
 
 orchestrator = Agent(
-    'anthropic:claude-opus-4-7',
+    'anthropic:claude-opus-5-5',
     capabilities=[SubAgents(inherit_tools=True)],  # auto-loads .agents/agents/ from the run's workspace
 )
 ```
@@ -232,7 +232,7 @@ from pydantic_ai_harness.subagents import AgentOverride
 
 SubAgents(
     agent_folders='agents',
-    agent_overrides={'researcher': AgentOverride(model='anthropic:claude-sonnet-4-6', effort='high')},
+    agent_overrides={'researcher': AgentOverride(model='anthropic:claude-opus-5-5', effort='high')},
 )
 ```
 
@@ -242,11 +242,17 @@ Every agent the capability builds runs at a minimum thinking-effort floor. `MINI
 
 A disk agent gets no tools by default (`inherit_tools` is `False`); set `inherit_tools=True` to expose the parent's tools to it through the `inherit_tools` mechanism, in which case its `tools` frontmatter is ignored. To map the frontmatter tool names to specific toolsets instead, pass a `tool_resolver`: it receives each tool name (so it can honor entries like `Bash(git:*)`) and returns the toolsets that provide it, or `None` for an unknown name, which is skipped with a warning.
 
-```python
+```python {names="defined"}
+from collections.abc import Sequence
+
+from pydantic_ai.toolsets import AgentToolset
 from pydantic_ai_harness import SubAgents
 
-def resolve(tool_name: str):
-    return TOOLSETS.get(tool_name)  # -> Sequence[AgentToolset[object]] | None
+TOOLSETS: dict[str, Sequence[AgentToolset[object]]] = {}  # your tool name -> toolsets mapping
+
+
+def resolve(tool_name: str) -> Sequence[AgentToolset[object]] | None:
+    return TOOLSETS.get(tool_name)
 
 SubAgents(agent_folders='agents', tool_resolver=resolve)
 ```
@@ -257,7 +263,9 @@ When the same name appears in more than one source, the higher-precedence one wi
 
 ## Configuration
 
-```python
+```python {names="defined"}
+from pydantic_ai_harness import SubAgents
+
 SubAgents(
     agents=(),             # Sequence[SubAgent[AgentDepsT]] -- each pairs an agent with its run controls
     models={},             # Mapping[str, Model | str | ModelOption] -- per-delegation model menu (off when empty)
@@ -275,7 +283,12 @@ SubAgents(
 )
 ```
 
-```python
+```python {names="defined"}
+from pydantic_ai import Agent
+from pydantic_ai_harness import SubAgent
+
+agent = Agent('anthropic:claude-opus-5-5')
+
 SubAgent(
     agent,                 # AbstractAgent[AgentDepsT, Any] -- the child agent to run
     name=None,             # delegate name; defaults to the agent's own `name`

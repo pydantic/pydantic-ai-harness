@@ -27,7 +27,7 @@ from pydantic_ai_harness import Memory
 from pydantic_ai_harness.memory import FileStore
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[LocalWorkspace('.'), Memory(FileStore('.agent-memory'))],
     defer_model_check=True,
 )
@@ -140,7 +140,7 @@ class AppDeps:
 
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     deps_type=AppDeps,
     capabilities=[
         Memory(
@@ -170,7 +170,7 @@ from pydantic_ai_harness.memory import FileStore
 
 store = FileStore('.', workspace=LocalWorkspaceBackend('/var/lib/myapp/memory'))
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[
         Memory(store, heading='Your notes'),
         Memory(store, agent_name='org', heading='Org notes').prefix_tools('org'),
@@ -225,7 +225,7 @@ from pydantic_ai_harness import Memory
 
 agent = Agent.from_spec(
     {
-        'model': 'anthropic:claude-sonnet-4-6',
+        'model': 'anthropic:claude-opus-5-5',
         'capabilities': [
             {'Memory': {'backend': 'file', 'directory': '.agent-memory'}},
         ],

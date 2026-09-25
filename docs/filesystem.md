@@ -34,7 +34,7 @@ from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import FileSystem
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[LocalWorkspace('./workspace'), FileSystem()],
 )
 
@@ -204,7 +204,7 @@ from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import FileSystem
 from pydantic_ai_harness.filesystem import FileChangeRequestEvent
 
-agent = Agent('anthropic:claude-sonnet-5', capabilities=[LocalWorkspace('.'), FileSystem()])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[LocalWorkspace('.'), FileSystem()])
 
 @agent.on_event(FileChangeRequestEvent)
 async def hold_migrations(ctx, event):
@@ -305,7 +305,7 @@ from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import FileSystem
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[
         LocalWorkspace('.'),
         FileSystem(
@@ -346,8 +346,8 @@ reject them.
 
 ## Configuration
 
-```python
-from pydantic_ai_harness import FileSystem
+```python {names="defined"}
+from pydantic_ai_harness.filesystem import DEFAULT_TOOL_NAMES, FileSystem
 
 FileSystem(
     root_dir=None,                 # str | Path -- containment boundary (None = the working directory; '/' = no checks)
@@ -376,7 +376,7 @@ dropped.
 [agent spec](/ai/core-concepts/agent-spec/):
 
 ```yaml
-model: anthropic:claude-sonnet-5
+model: anthropic:claude-opus-5-5
 capabilities:
   - FileSystem:
       allowed_patterns: ['*.py', '*.toml']

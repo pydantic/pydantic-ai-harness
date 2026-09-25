@@ -58,7 +58,7 @@ from pydantic_ai_harness import ToolOutputLimits
 from pydantic_ai_harness.tool_output_limits import Band, Spill, Summarize, Truncate
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[
         LocalWorkspace('.'),
         ToolOutputLimits(
@@ -98,7 +98,7 @@ from pydantic_ai_harness import ToolOutputLimits
 from pydantic_ai_harness.tool_output_limits import Band, Truncate, TruncationStrategy
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[
         LocalWorkspace('.'),
         ToolOutputLimits(
@@ -163,7 +163,7 @@ from pydantic_ai_harness.tool_output_limits import (
 
 tail = Truncate(max_chars=4_000, strategy=TruncationStrategy.tail)
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[
         LocalWorkspace('.'),
         Shell(allowed_commands=['git', 'rg', 'pytest'], max_output_chars=100_000),
@@ -265,7 +265,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness.tool_output_limits import LocalFileStore, ToolOutputLimits
 
 store = LocalFileStore(cleanup_after=timedelta(hours=6))  # default: None = keep forever
-agent = Agent('anthropic:claude-sonnet-5', capabilities=[ToolOutputLimits(store=store)])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ToolOutputLimits(store=store)])
 ```
 
 `LocalFileStore` keeps its directory owner-only. Set `cleanup_after` to delete spills older than

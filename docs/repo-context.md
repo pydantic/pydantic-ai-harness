@@ -27,7 +27,7 @@ from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import RepoContext
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[LocalWorkspace('.'), RepoContext(home_dir=Path.home())],
 )
 
@@ -63,7 +63,7 @@ from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import FileSystem, RepoContext
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[
         LocalWorkspace('.'),
         FileSystem(),

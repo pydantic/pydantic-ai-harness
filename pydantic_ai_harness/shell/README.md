@@ -9,14 +9,14 @@ managed background processes.
 
 Agents frequently need to run a build, a test suite, a linter, or a quick
 `grep`. Wiring up subprocess handling -- streaming output, timeouts, truncation,
-killing runaway processes, and cleaning up background jobs at the end of a run --
+killing runaway processes, and tracking background jobs across runs --
 is fiddly boilerplate that every agent reinvents.
 
 ## The solution
 
 `Shell` exposes command-execution tools that run in the agent's workspace, with
-configurable allow/deny lists and automatic cleanup of background processes
-when the agent run ends.
+configurable allow/deny lists and background processes the model can check and
+stop by ID.
 
 ```python
 from pydantic_ai import Agent
@@ -24,7 +24,7 @@ from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import Shell
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[
         LocalWorkspace('./workspace'),
         Shell(allowed_commands=['ls', 'cat', 'rg']),
@@ -241,7 +241,9 @@ to stdout) so command output can never spoof the tracked directory.
 
 ## Configuration
 
-```python
+```python {names="defined"}
+from pydantic_ai_harness.shell import RUN_SCOPED_TOOL_NAMES, Shell
+
 Shell(
     allowed_commands=[],           # allowlist (mutually exclusive with denied)
     denied_commands=[...],         # denylist (defaults to destructive commands)
@@ -267,7 +269,7 @@ greater than zero and at most 270 seconds; that is checked at construction.
 
 ```yaml
 # agent.yaml
-model: anthropic:claude-sonnet-5
+model: anthropic:claude-opus-5-5
 capabilities:
   - Shell:
       allowed_commands: ['ls', 'cat', 'rg', 'pytest']
