@@ -34,6 +34,8 @@ class ServerEntry:
     name: str
     server: Server
     source: Source
+    path: Path | None = None
+    """The file that defines the server; `None` for plugin settings."""
 
 
 @dataclass(kw_only=True)
@@ -63,16 +65,16 @@ class MCPServers:
         self._connections: dict[str, _Connection] = {}
 
     def entries(self) -> list[ServerEntry]:
-        """User servers, then plugin settings, then the trusted project file; the first name wins."""
+        """User servers, then plugin settings, then trusted project files; the first name wins."""
         merged: dict[str, ServerEntry] = {}
-        sources: tuple[tuple[Source, Servers], ...] = (
-            ('user', self.store.load().servers),
-            ('plugin', self._plugin_servers),
-            ('project', self.store.project_servers()),
-        )
-        for source, servers in sources:
+        sources: list[tuple[Source, Path | None, Servers]] = [
+            ('user', self.store.path, self.store.load().servers),
+            ('plugin', None, self._plugin_servers),
+            *(('project', path, servers) for path, servers in self.store.project_servers().items()),
+        ]
+        for source, path, servers in sources:
             for name, server in servers.items():
-                merged.setdefault(name, ServerEntry(name=name, server=server, source=source))
+                merged.setdefault(name, ServerEntry(name=name, server=server, source=source, path=path))
         return list(merged.values())
 
     def get(self, name: str) -> ServerEntry:
@@ -168,7 +170,7 @@ class MCPServers:
 
     async def remove(self, name: str) -> None:
         """Forget a user server; project and plugin servers live in files `/mcp` does not own."""
-        reason = not_owned(self.get(name), self.store)
+        reason = not_owned(self.get(name))
         if reason:
             raise ValueError(reason)
         await self.disconnect(name)
@@ -279,10 +281,10 @@ class MCPServers:
         return MCPToolset(transport, id=f'mcp_{entry.name}', init_timeout=timeout)
 
 
-def not_owned(entry: ServerEntry, store: MCPStore) -> str | None:
+def not_owned(entry: ServerEntry) -> str | None:
     """Why `/mcp` cannot change this server's saved configuration, or `None` when it can."""
     if entry.source == 'user':
         return None
     if entry.source == 'project':
-        return f'{entry.name} is defined in {store.project_file()}; change that file instead.'
+        return f'{entry.name} is defined in {entry.path}; change that file instead.'
     return f'{entry.name} is configured through /plugins settings for mcp; change it there.'
