@@ -1,6 +1,7 @@
 """Pinned editor and scrollback ownership, without a PromptSession renderer."""
 
 import asyncio
+import sys
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
@@ -29,6 +30,11 @@ from .prompt_transcript import TranscriptBuffer
 from .shell_passthrough import shell_command
 from .spinners import BUILTIN_SPINNERS, DEFAULT_SPINNER, Spinner
 from .tool_output import terminal_text
+
+
+def steer_key() -> str:
+    """Name the steer chord the way the user's keyboard labels it."""
+    return 'Option+Enter' if sys.platform == 'darwin' else 'Alt+Enter'
 
 
 class LivePrompt:
@@ -152,13 +158,13 @@ class LivePrompt:
                 self.buffer.edit('delete')
             else:
                 self.submit(EOFError())
-        elif key in ('paste', 'ctrl-v', 'alt-v'):
+        elif key in ('paste', 'ctrl-v', 'ctrl-shift-v', 'alt-v'):
             self.paste(data if key == 'paste' else None)
         elif self.buffer.search is not None:
             self.buffer.search_key(key)
         elif key in ('tab', 'backtab'):
             self.complete(backwards=key == 'backtab')
-        elif key == 'enter':
+        elif key in ('enter', 'ctrl-enter'):
             self.accept()
         elif key == 'alt-enter':
             self.steer_queued()
@@ -317,7 +323,7 @@ class LivePrompt:
         title = ''
         if self.interrupts.active:
             head, glyph = ' Working ', self.spinner().frame(self.clock())
-            title = truncate(f'{head}{glyph} | Enter: queue | Alt+Enter: steer queued ', width)
+            title = truncate(f'{head}{glyph} | Enter: queue | {steer_key()}: steer queued ', width)
             if title.startswith(head + glyph):
                 title = f'{head}{theme.sgr(theme.ACCENT)}{glyph}{reset}{muted}{title[len(head + glyph) :]}'
         rows.append(muted + title + '─' * max(0, width - visible_length(title)) + reset)

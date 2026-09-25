@@ -88,10 +88,12 @@ text intended for a dark background. Bundled themes supply their own ANSI colour
 
 ## Word deletion
 
-Option+Backspace (Alt+Backspace) deletes the word before the cursor, like Ctrl-W,
-including trailing whitespace. Spaces, tabs, and newlines separate words. Text
-after the cursor is preserved. Your terminal must send Option as Alt/Meta for
-this shortcut; legacy and modified-key encodings are supported.
+Option+Backspace (Alt+Backspace) and Ctrl+Backspace delete the word before the
+cursor, like Ctrl-W, including trailing whitespace. Spaces, tabs, and newlines
+separate words. Text after the cursor is preserved. Legacy (Esc-prefixed) and
+modified-key encodings are supported. Terminals that do not honour CLAI's
+modified key reporting request must send Option as Alt/Meta for the Option
+chord; iTerm2 needs no profile change.
 
 ## Interrupting a turn
 
@@ -691,14 +693,19 @@ paste of existing image paths creates attachments as described in
 Up/down move through multiline drafts, then recall saved prompt history.
 Enter submits a prompt when idle and queues a separate follow-up turn when busy.
 To steer instead, first queue the message with Enter, then press Alt+Enter
-(Option+Enter). This sends the oldest queued follow-up to the active run at its
+(Option+Enter on macOS). This sends the oldest queued follow-up to the active run at its
 next opportunity without cancelling in-flight tools or changing your draft.
 Each Alt+Enter sends one message. If the run is no longer accepting steering,
 the message stays queued. Slash commands, `!` shell commands, and exit signals
 are not steered or skipped over. With no queued message, Alt+Enter does nothing.
-While running, the input box shows both shortcuts.
-Shift-Enter inserts a newline. CLAI requests modified
-key reporting while the editor is active and releases it for menus and on exit.
+While running, the input box shows both shortcuts, named for your platform.
+Shift-Enter inserts a newline. Ctrl-Enter submits like Enter. CLAI requests
+modified key reporting (xterm `modifyOtherKeys` level 2) while the editor is
+active and releases it for menus and on exit. In iTerm2 this reports
+Option+Enter as a distinct key even with the default "Normal" Option key
+setting, so no profile change is needed. Terminals that ignore that request
+(Terminal.app, kitty) must send Option as Alt/Meta (Terminal.app: "Use Option
+as Meta key"; kitty: `macos_option_as_alt yes`).
 Ctrl-R searches history; Enter accepts a search
 result without submitting it. Ctrl-D exits when the draft is empty. Ctrl-C at
 input clears the line; during a run it cancels the turn and returns to input. No cancelled run is automatically retried.

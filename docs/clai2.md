@@ -8,12 +8,29 @@ not protect secret files or repository metadata. OS permissions still apply.
 Relative paths use the launch workspace. Use a custom agent with `Coder()` to
 retain workspace-scoped file tools. Shell output is displayed dimly.
 
+## Steering a running turn
+
+Enter submits a prompt when idle and queues a separate follow-up turn when busy.
+To steer instead, queue the message with Enter, then press Alt+Enter
+(Option+Enter on macOS). This sends the oldest queued follow-up to the active
+run at its next opportunity without cancelling in-flight tools or changing your
+draft. While running, the input box shows both shortcuts, named for your
+platform. Shift-Enter inserts a newline; Ctrl-Enter submits like Enter.
+
+CLAI requests modified key reporting (xterm `modifyOtherKeys` level 2) while the
+editor is active and releases it for menus and on exit. In iTerm2 this reports
+Option+Enter as a distinct key even with the default "Normal" Option key
+setting, so no profile change is needed. Terminals that ignore that request
+(Terminal.app, kitty) must send Option as Alt/Meta (Terminal.app: "Use Option
+as Meta key"; kitty: `macos_option_as_alt yes`).
+
 ## Word deletion
 
-Option+Backspace (Alt+Backspace) deletes the word before the cursor, like Ctrl-W,
-including trailing whitespace. Spaces, tabs, and newlines separate words. Text
-after the cursor is preserved. Your terminal must send Option as Alt/Meta for
-this shortcut; legacy and modified-key encodings are supported.
+Option+Backspace (Alt+Backspace) and Ctrl+Backspace delete the word before the
+cursor, like Ctrl-W, including trailing whitespace. Spaces, tabs, and newlines
+separate words. Text after the cursor is preserved. Legacy and modified-key
+encodings are supported; the Option chord needs the same terminal support as
+Option+Enter above.
 
 ## Interrupting a turn
 

@@ -779,18 +779,21 @@ has to wait for streamed text to finish and the editor and status row to
 get out of the way. `host.full_screen()` flushes pending output, suspends the
 editor's input reader, and restores the editor and its draft when the block exits.
 The editor remains active during agent turns. Enter queues a separate turn with
-its own `turn_start` and `turn_end` hooks. Alt+Enter (Option+Enter) sends the oldest
+its own `turn_start` and `turn_end` hooks. Alt+Enter (Option+Enter on macOS) sends the oldest
 queued follow-up to the active run through core's
 `RunContext.enqueue(priority='asap')`, without starting another turn, cancelling
 tools, or changing the draft. Each press sends one message. If the run is no
 longer accepting steering, the message stays queued. Slash commands and exit
 signals are not steered or skipped over. With no queued message, Alt+Enter does
 nothing. When idle, Enter starts a turn. Shift-Enter inserts a newline.
-Modified-key reporting is enabled only while the editor owns input.
-Option+Backspace (Alt+Backspace) deletes the word before the cursor, like Ctrl-W,
-including trailing whitespace. Spaces, tabs, and newlines separate words. Text
-after the cursor is preserved. Your terminal must send Option as Alt/Meta for
-this shortcut; legacy and modified-key encodings are supported.
+Modified-key reporting (xterm `modifyOtherKeys` level 2) is enabled only while
+the editor owns input; it is what lets iTerm2 report Option+Enter without the
+Option-as-Meta profile setting. Terminals that ignore the request must send
+Option as Alt/Meta for the Option chords.
+Option+Backspace (Alt+Backspace) and Ctrl+Backspace delete the word before the
+cursor, like Ctrl-W, including trailing whitespace. Spaces, tabs, and newlines
+separate words. Text after the cursor is preserved. Legacy and modified-key
+encodings are supported.
 
 Completion rows remain visible while a replacement lookup runs, but stale results
 cannot be selected. Popup height changes reuse available space without adding

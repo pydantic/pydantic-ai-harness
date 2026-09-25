@@ -100,9 +100,9 @@ class PromptBuffer:
             self.replace_range(len(before[:-1]), self.cursor, '')
         elif key == 'delete':
             self.replace_range(self.cursor, min(len(self.text), self.cursor + 1), '')
-        elif key in ('ctrl-u', 'ctrl-k', 'ctrl-w', 'alt-backspace'):
+        elif key in ('ctrl-u', 'ctrl-k', 'ctrl-w', 'alt-backspace', 'ctrl-backspace'):
             start = 0
-            if key in ('ctrl-w', 'alt-backspace'):
+            if key in ('ctrl-w', 'alt-backspace', 'ctrl-backspace'):
                 stripped = before.rstrip()
                 words = stripped.rsplit(maxsplit=1)
                 start = len(stripped) - len(words[-1]) if words else 0

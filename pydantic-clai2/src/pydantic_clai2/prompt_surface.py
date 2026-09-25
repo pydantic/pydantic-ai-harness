@@ -131,12 +131,15 @@ class PromptSurface(io.StringIO):
         changed_geometry = self._geometry != (width, height) or len(rows) != len(self._rows)
         parts: list[str] = []
         if not self._active:
+            # modifyOtherKeys level 2 reports Option+Enter from iTerm2 (and Alt+Enter
+            # from xterm) as `CSI 27;3;13~` even when Option types characters, so the
+            # steer chord does not depend on the terminal's Option-as-Meta setting.
             # Scroll only as far as the rows need, then return to the writer's row.
             # Jumping to the region bottom instead left a blank band under short
             # history, visible after startup and whenever a menu hands the screen back.
             up = f'\x1b[{len(rows)}A' if rows else ''
             parts.extend(
-                ['\x1b[?25l\x1b[?2004h\x1b[>4;1m', '\r\n' * len(rows), up, '\x1b7', f'\x1b[1;{bottom}r', '\x1b8']
+                ['\x1b[?25l\x1b[?2004h\x1b[>4;2m', '\r\n' * len(rows), up, '\x1b7', f'\x1b[1;{bottom}r', '\x1b8']
             )
             self._active = True
         elif changed_geometry:

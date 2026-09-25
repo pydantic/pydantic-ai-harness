@@ -96,9 +96,9 @@ async def test_input_queue_and_controls() -> None:
 
 @pytest.mark.parametrize(
     'sequence',
-    ['\x1b\x7f', '\x1b\x08', '\x1b[27;3;127~', '\x1b[27;3;8~', '\x1b[127;3u', '\x1b[8;3u'],
+    ['\x1b\x7f', '\x1b\x08', '\x1b[27;3;127~', '\x1b[27;3;8~', '\x1b[127;3u', '\x1b[8;3u', '\x1b[27;5;127~'],
 )
-async def test_option_backspace_deletes_word_before_cursor(sequence: str) -> None:
+async def test_option_or_ctrl_backspace_deletes_word_before_cursor(sequence: str) -> None:
     async with editor() as (live, pipe, _):
         pipe.send_text('one two three' + '\x1b[D' * 6 + sequence + '\n')
         assert await live.read() == 'one  three'
@@ -220,6 +220,9 @@ async def test_image_paste_and_failure_notice(monkeypatch: pytest.MonkeyPatch) -
         monkeypatch.setattr('pydantic_clai2.live_prompt.clipboard_images', fail)
         live.feed('ctrl-v')
         assert 'clipboard unavailable' in live.images.notice
+        live.images.notice = ''
+        live.feed('ctrl-shift-v')
+        assert 'clipboard unavailable' in live.images.notice
         live.feed('paste', 'plain\r\ntext')
         assert live.buffer.text.endswith('plain\ntext')
 
@@ -303,6 +306,32 @@ async def test_shift_enter_inserts_newline_and_plain_enter_submits(sequence: str
         assert await live.read() == 'first\nsecond'
         assert live.queued_messages == ()
         assert live.buffer.text == ''
+
+
+async def test_shifted_printable_reports_type_their_characters() -> None:
+    async with editor() as (live, pipe, _):
+        pipe.send_text('a\x1b[27;2;81~\x1b[27;2;33~\x1b[27;2;32~\x1b[113;2ub\r')
+        assert await live.read() == 'aQ! Qb'
+
+
+async def test_ctrl_enter_submits_like_enter() -> None:
+    async with editor() as (live, pipe, _):
+        pipe.send_text('draft\x1b[27;5;13~')
+        assert await live.read() == 'draft'
+        assert live.buffer.text == ''
+
+
+@pytest.mark.parametrize(('platform', 'label'), [('darwin', 'Option+Enter'), ('linux', 'Alt+Enter')])
+async def test_working_title_names_the_steer_chord_for_the_platform(
+    monkeypatch: pytest.MonkeyPatch, platform: str, label: str
+) -> None:
+    monkeypatch.setattr(sys, 'platform', platform)
+    async with editor() as (live, _, _):
+
+        async def operation() -> None:
+            assert any(f'| {label}: steer queued' in Text.from_ansi(row).plain for row in live.frame())
+
+        assert await live.interrupts.run(operation())
 
 
 @pytest.mark.parametrize('colorterm', ['', 'truecolor'])
