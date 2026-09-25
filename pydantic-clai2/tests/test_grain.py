@@ -174,6 +174,11 @@ async def test_enabling_the_builtin_adds_grain_and_the_menu_saves_settings(
     rebuilt = build(run_context())
     assert isinstance(rebuilt, Grain) and not rebuilt.read_only, 'and applied to the next prompt without a reload'
 
+    await loader.disable('grain')
+    await loader.enable('grain')
+    [saved] = store.plugins()
+    assert saved.settings == {'read_only': False, 'include_instructions': True}, 'toggling keeps what the menu saved'
+
 
 async def test_token_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('GRAIN_ACCESS_TOKEN', 'grain-token')
