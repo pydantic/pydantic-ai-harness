@@ -63,7 +63,7 @@ from pydantic_core import SchemaValidator, core_schema
 from pydantic_monty import NOT_HANDLED, Monty, MountDir, OSAccess, OsFunction
 from typing_extensions import Never, TypedDict
 
-from pydantic_ai_harness import CodeMode
+from pydantic_ai_harness import CodeMode, ToolOutputLimits
 from pydantic_ai_harness.code_mode import CodeModeResourceLimits, CodeModeToolset
 from pydantic_ai_harness.code_mode._capability import (
     _extract_discovered_names,  # pyright: ignore[reportPrivateUsage]
@@ -71,8 +71,8 @@ from pydantic_ai_harness.code_mode._capability import (
 from pydantic_ai_harness.code_mode._toolset import (  # pyright: ignore[reportPrivateUsage]
     _SEARCH_TOOLS_MODIFIER,
     _TOOL_SEARCH_ADDENDUM,
-    _global_mode_is_sequential,
     _sanitize_tool_name,
+    global_mode_is_sequential,
 )
 
 _entered_toolsets: list[CodeModeToolset[Never]] = []
@@ -632,6 +632,53 @@ class TestCodeMode:
         # No print output → result returned directly (not wrapped in a dict).
         assert result.return_value == 3
 
+    @pytest.mark.parametrize(
+        ('code', 'expected'),
+        [
+            pytest.param("type('a')", "<class 'str'>", id='type'),
+            pytest.param('len', '<built-in function len>', id='builtin'),
+            pytest.param("ValueError('boom')", "ValueError('boom')", id='exception'),
+            pytest.param('...', 'Ellipsis', id='ellipsis'),
+            pytest.param("[float('nan'), float('-inf'), 1.5]", ['nan', '-inf', 1.5], id='non-finite-float'),
+            pytest.param(
+                "{'kind': type(1), 'rows': [1, (int, 'a')], 'ok': b'raw'}",
+                {'kind': "<class 'int'>", 'rows': [1, ("<class 'int'>", 'a')], 'ok': b'raw'},
+                id='nested',
+            ),
+            pytest.param('{int: 1}', {"<class 'int'>": 1}, id='key'),
+            pytest.param(
+                "{'<class \\'int\\'>': 'text', int: 1}",
+                "{\"<class 'int'>\": 'text', <class 'int'>: 1}",
+                id='key-collision',
+            ),
+        ],
+    )
+    async def test_run_code_renders_results_without_json_form_as_repr(self, code: str, expected: object) -> None:
+        """Monty hands back host objects no serializer handles; they would abort the run."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == expected
+
+    async def test_agent_run_survives_type_result_under_tool_output_limits(self) -> None:
+        """Regression: `type(x)` as a snippet's last line crashed `ToolOutputLimits` and the run."""
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            last_request = messages[-1]
+            assert isinstance(last_request, ModelRequest)
+            returned = [part for part in last_request.parts if isinstance(part, ToolReturnPart)]
+            if not returned:
+                return ModelResponse(parts=[ToolCallPart('run_code', {'code': "x = {'a': 1}\ntype(x)"})])
+            return ModelResponse(parts=[TextPart(returned[0].model_response_str())])
+
+        agent: Agent[object, str] = Agent(
+            FunctionModel(model_fn), capabilities=[CodeMode[object](), ToolOutputLimits[object]()]
+        )
+        result = await agent.run('what type is x?')
+        assert result.output == "<class 'dict'>"
+
     async def test_run_code_treats_none_as_no_expression_result(self) -> None:
         """A final `None` uses the same return shapes as no final expression."""
         wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
@@ -785,9 +832,78 @@ class TestCodeMode:
 
         assert executed == [0, 1, 2]
         message = exc_info.value.message
-        assert '3 nested tool calls started before the limit was reached' in message
+        assert '3 nested tool calls started before execution stopped' in message
         for value in (0, 1, 2):
             assert f"record({{'value': {value}}}) returned {value}" in message
+
+    async def test_suspensions_are_cumulative_and_need_explicit_restart(self) -> None:
+        executed: list[int] = []
+
+        def record(value: int) -> int:
+            executed.append(value)
+            return value
+
+        wrapper = CodeMode[object](resource_limits={'max_suspensions': 4}).get_wrapper_toolset(
+            _build_function_toolset(record)
+        )
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+
+        first = await wrapper.call_tool(
+            'run_code', {'code': 'saved = await record(value=0)\nsaved'}, ctx, tools['run_code']
+        )
+        assert first.return_value == 0
+        with pytest.raises(ModelRetry) as exhausted:
+            await wrapper.call_tool(
+                'run_code', {'code': 'for i in range(1, 4):\n    await record(value=i)'}, ctx, tools['run_code']
+            )
+        assert executed == [0, 1]
+        message = exhausted.value.message
+        assert 'suspension limit 4 exceeded' in message
+        assert "record({'value': 1}) returned 1" in message
+        assert '`max_suspensions`' in message
+        assert '`restart: true`' in message
+        assert 'discards all REPL variables, imports and definitions' in message
+        assert 'do not replay completed side effects' in message
+
+        with pytest.raises(ModelRetry, match='suspension limit 4 exceeded'):
+            await wrapper.call_tool('run_code', {'code': 'await record(value=2)'}, ctx, tools['run_code'])
+        assert executed == [0, 1]
+        kept = await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
+        assert kept.return_value == 0
+
+        fresh = await wrapper.call_tool(
+            'run_code', {'code': 'await record(value=99)', 'restart': True}, ctx, tools['run_code']
+        )
+        assert fresh.return_value == 99
+        assert executed == [0, 1, 99]
+        with pytest.raises(ModelRetry, match="name 'saved' is not defined"):
+            await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
+
+    async def test_suspension_wording_in_tool_error_does_not_require_restart(self) -> None:
+        def boom() -> None:
+            raise RuntimeError('suspension limit 1000 exceeded')
+
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(boom))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        await wrapper.call_tool('run_code', {'code': 'saved = 42'}, ctx, tools['run_code'])
+        with pytest.raises(ModelRetry) as error:
+            await wrapper.call_tool('run_code', {'code': 'await boom()'}, ctx, tools['run_code'])
+        assert "If this reports the sandbox session's `max_suspensions` limit" in error.value.message
+        assert 'before the limit was reached' not in error.value.message
+        result = await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
+        assert result.return_value == 42
+
+    @pytest.mark.parametrize('limit', [0, -1])
+    async def test_suspension_budget_must_be_positive(self, limit: int) -> None:
+        wrapper = CodeModeToolset[object](
+            wrapped=_build_function_toolset(add), resource_limits={'max_suspensions': limit}
+        )
+        with pytest.raises(UserError, match='`max_suspensions` must be at least 1'):
+            await wrapper.__aenter__()
 
     async def test_duration_exhaustion_points_at_restart(self) -> None:
         """A spent duration allowance tells the model to restart, not to rewrite the snippet.
@@ -913,6 +1029,7 @@ class TestCodeMode:
                 'y = 0\nfor i in range(100_000_000):\n    y += i\ny',
             ),
             'max_memory': ({'max_memory': 8 * 1024 * 1024}, 'x = [0] * 50_000_000\nlen(x)'),
+            'max_suspensions': ({'max_suspensions': 2}, 'await add(a=3, b=4)'),
         }
         assert set(exhaust_by_limit) == set(CodeModeResourceLimits.__annotations__), (
             'a new resource limit needs a case here, so that exhausting it is shown to still '
@@ -1177,7 +1294,7 @@ class TestCodeMode:
         assert 'more not shown' in message
         # The count is the part that survives truncation, so it has to stay exact: it is what
         # tells the model the visible list is incomplete.
-        assert '30 nested tool calls started before the limit was reached' in message
+        assert '30 nested tool calls started before execution stopped' in message
         assert 'Account for all 30 before retrying' in message
 
     async def test_exhausted_budget_on_sequential_tool_preserves_completed_calls(self) -> None:
@@ -3769,7 +3886,7 @@ def _search_tool_def(description: str = 'Search for tools.') -> ToolDefinition:
 
 
 class TestGlobalModeIsSequential:
-    """`_global_mode_is_sequential` dispatches across pydantic-ai v1 and v2.
+    """`global_mode_is_sequential` dispatches across pydantic-ai v1 and v2.
 
     v1's `get_parallel_execution_mode` takes the pending calls list; v2 dropped
     the argument. The helper inspects arity and calls the matching shape, so
@@ -3783,8 +3900,8 @@ class TestGlobalModeIsSequential:
         def sequential(calls: list[ToolCallPart]) -> ParallelExecutionMode:
             return 'sequential'
 
-        assert _global_mode_is_sequential(parallel) is False
-        assert _global_mode_is_sequential(sequential) is True
+        assert global_mode_is_sequential(parallel) is False
+        assert global_mode_is_sequential(sequential) is True
 
     def test_v2_signature_without_arguments(self) -> None:
         def parallel() -> ParallelExecutionMode:
@@ -3793,5 +3910,5 @@ class TestGlobalModeIsSequential:
         def sequential() -> ParallelExecutionMode:
             return 'sequential'
 
-        assert _global_mode_is_sequential(parallel) is False
-        assert _global_mode_is_sequential(sequential) is True
+        assert global_mode_is_sequential(parallel) is False
+        assert global_mode_is_sequential(sequential) is True

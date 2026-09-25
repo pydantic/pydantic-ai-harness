@@ -1,6 +1,6 @@
 ---
 title: Pydantic AI Harness
-description: "Your agent's favorite harness, built on Pydantic AI: 30+ capabilities and complete agents assembled from them, from a coding agent to your own custom stack."
+description: "Pydantic AI Harness is the official capability library for Pydantic AI: a coding agent, file and shell tools, memory, subagents, and context management."
 ---
 
 # Pydantic AI Harness
@@ -32,10 +32,10 @@ print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-That's a complete [coding agent](coder.md): [workspace-rooted file access](filesystem.md), [allowlisted shell](shell.md), [repo orientation](repo-context.md), [planning](planning.md), a read-only [explorer sub-agent](subagents.md), and [context management](compaction.md) that survives long sessions, and it runs anywhere a Pydantic AI agent runs. [`agent.to_cli_sync()`](/ai/cli/) opens it as a chat in your terminal, [`agent.to_web()`](/ai/web/) in the browser, and [`Coder`](coder.md)'s exported [`coder_agent`](coder.md#api-reference) runs without writing a file at all, combined with [`clai`](/ai/cli/) (the Pydantic AI CLI) and [`uvx`](https://docs.astral.sh/uv/guides/tools/):
+Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus repository context and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
 
 ```bash
-uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
+uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
 ```
 
 Every model works: swap the string for [any provider's](/ai/models/overview/). Need more? Add capabilities to the list; here's the same coder on `gpt-5.6-sol`, with web search and cross-session memory:
@@ -60,70 +60,26 @@ agent = Agent(
 )
 ```
 
-[Skills](skills.md) (your `SKILL.md` procedures, loaded on demand; point it at a `skills/` directory and add the `skills` extra), [Web Fetch](/ai/capabilities/web-fetch/), [Guardrails](guardrails.md), and [Dynamic Workflow](dynamic-workflow.md) slot in the same way; the [Coder page](coder.md#not-included-by-default) lists what pairs well.
+[Skills](skills.md) (your `SKILL.md` procedures, loaded on demand; point it at a `skills/` directory and add the `skills` extra), [Web Fetch](/ai/capabilities/web-fetch/), [Guardrails](guardrails.md), and [Dynamic Workflow](dynamic-workflow.md) slot in the same way; the [Coder page](coder.md#composition) lists what pairs well.
 
 ## No magic: it's capabilities all the way down
 
-`Coder` is not a framework inside the framework; it's a [`CombinedCapability`](/ai/capabilities/custom/) bundling the same blocks you can use directly. This is the exact agent the [Coder page](coder.md)'s exported `coder_agent` gives you, written out block by block:
+`Coder` is a regular combined capability: [`FileSystem`](filesystem.md) with five of its tools and content hashes off, [`Shell`](shell.md) with its persistent `shell` tool and no allowlist, [`RepoContext`](repo-context.md), [`ClearToolResults` and `WarnNearLimits`](compaction.md), and a bounded [`ToolOutputLimits`](tool-output-limits.md), plus its default instructions and JSON argument repair. Use it whole, or build the same agent from those capabilities to change any setting; the [Coder page](coder.md) lists the exact configuration.
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
 ```python
-from pathlib import Path
-
 from pydantic_ai import Agent
-from pydantic_ai_harness import (
-    ClearToolResults,
-    FileSystem,
-    LLM_API_KEY_ENV_PATTERNS,
-    Planning,
-    RepoContext,
-    Shell,
-    SubAgent,
-    SubAgents,
-    ToolOutputLimits,
-    WarnNearLimits,
-)
-
-allowed_commands = [
-    'git', 'rg', 'grep', 'find', 'ls', 'cat', 'sed', 'head', 'tail',
-    'python', 'uv', 'pytest', 'ruff', 'make',
-]
-
-explorer = SubAgent(
-    Agent(
-        name='explorer',
-        description='Explore the codebase and answer questions without modifying anything',
-        instructions='Answer with concrete paths and evidence.',
-        capabilities=[
-            FileSystem('.', read_only=True),
-            RepoContext(workspace_dir=Path('.')),
-        ],
-    )
-)
+from pydantic_ai_harness.coder import Coder
 
 agent = Agent(
     'anthropic:claude-fable-5',
     name='coder',
-    instructions='You are a coding agent built on Pydantic AI.',
-    capabilities=[
-        FileSystem('.'),  # read/write/edit/search, path-traversal safe
-        Shell(  # allowlisted commands, LLM API keys stripped from their environment
-            cwd='.',
-            allowed_commands=allowed_commands,
-            denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
-        ),
-        RepoContext(workspace_dir=Path('.')),  # loads AGENTS.md/CLAUDE.md + repo structure
-        Planning(),  # structured task plans the model maintains
-        SubAgents(agents=[explorer], agent_folders=None),  # delegate exploration off the main context
-        ClearToolResults(max_fraction=0.7),  # clears old tool results near the limit
-        WarnNearLimits(max_context_fraction=0.9),  # warns the model before it hits limits
-        ToolOutputLimits(),  # bounds oversized tool results
-    ],
+    capabilities=[Coder('.')],
 )
 ```
 
-Start from the harness and remove what you don't want, or start from the blocks and build up; both are first-class. Constructor arguments (working directory, command allowlist, window sizes) thread through to the underlying capabilities.
+See the Coder documentation for tool signatures, persistent shell lifecycle, and migration from the previous planning/delegation composition.
 
 ## Capabilities
 
@@ -135,7 +91,7 @@ Complete agent stacks as regular combined capabilities: one import gives you a w
 
 | Harness | Package | What it provides |
 |---|---|---|
-| [Coder](coder.md) | Harness | A complete coding-agent stack: files, shell, repo context, planning, a read-only explorer sub-agent, and context controls |
+| [Coder](coder.md) | Harness | Six coding tools, persistent shell commands, autonomous guidance, and context controls |
 | [Researcher](researcher.md) | Harness | A complete web-research stack: search, page fetching, a delegated sub-researcher, and bounded tool output |
 
 ### Execution environments
@@ -144,8 +100,8 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 
 | Capability | Package | What it does |
 |---|---|---|
-| [FileSystem](filesystem.md) | Harness | Read, write, edit, search files under a root; path-traversal and symlink safe, secrets read-only |
-| [Shell](shell.md) | Harness | Command execution with allowlists, denylists, timeouts, and credential-stripping |
+| [FileSystem](filesystem.md) | Harness | Read, write, edit, list, and search files under a root, with opt-in ripgrep tools; path-traversal and symlink safe, secrets read-only |
+| [Shell](shell.md) | Harness | Command execution with allowlists, denylists, timeouts, credential-stripping, and opt-in commands that outlive the run |
 | [Modal Sandbox](modal-sandbox.md) | Harness | Commands and files in an isolated [Modal](https://modal.com) cloud sandbox |
 
 ### Tools & native abilities
@@ -156,7 +112,13 @@ Connections to systems outside the agent's workspace, and abilities the provider
 |---|---|---|
 | [MCP](/ai/capabilities/mcp/) | Core | Connect any MCP server's tools; local by default, provider-native connectors opt-in |
 | [Image Generation](/ai/capabilities/image-generation/) | Core | Generate and edit images; provider-native where supported, sub-agent fallback elsewhere |
+| [GitHub](github.md) | Harness | Read and change GitHub repositories, issues, pull requests, and other accessible resources. |
+| [Linear](linear.md) | Harness | Read and change Linear issues, projects, teams, and comments. |
+| [Notion](notion.md) | Harness | Search and change Notion workspace content. |
+| [Google Workspace](google-workspace.md) | Harness | Use Gmail, Calendar, Drive, and other Google Workspace tools. |
 | [StackOne](stackone.md) | Harness | Act on linked SaaS accounts (HRIS, ATS, CRM, …) via [StackOne](https://www.stackone.com) |
+| [Slack](slack.md) | Harness | Give an agent Slack messages, channels, and canvas tools. |
+| [Ordinal](ordinal.md) | Harness | Draft, schedule, and analyze social posts through [Ordinal](https://www.tryordinal.com)'s hosted MCP server |
 | [LocalStack](localstack.md) | Harness | An emulated AWS environment with AWS CLI tools |
 | [Macroscope](macroscope.md) | Harness | Run a local [Macroscope](https://docs.macroscope.com/cli) code review and hand the findings to the agent |
 
@@ -188,6 +150,7 @@ How the agent thinks and divides the work.
 | [Subagents](subagents.md) | Harness | Delegate self-contained tasks to named child agents |
 | [Dynamic Workflow](dynamic-workflow.md) | Harness | The model orchestrates sub-agents from one Python script: fan-out, chain, vote in a single tool call, with hard `max_agent_calls` budgets |
 | [Advisor](advisor.md) | Harness | Let an executor consult a stronger model mid-run |
+| [Background Tools](background-tools.md) | Harness | Run selected tools concurrently; results arrive as follow-up messages |
 
 ### Context management
 
@@ -220,9 +183,11 @@ Bounding what the agent may do, and keeping it on-instructions.
 
 | Capability | Package | What it does |
 |---|---|---|
+| [Repair Tool Arguments](repair-tool-arguments.md) | Harness | Repair malformed JSON tool arguments before schema validation. |
 | [Guardrails](guardrails.md) | Harness | Validate/block/redact user input, tool calls, tool results, and output, including secret masking and parallel async guards |
 | [Prompt Injection Defender](prompt-injection-defender.md) | Harness | Classify local tool results for indirect prompt injection and optionally withhold high-risk results |
 | [Spend Limits](spend.md) | Harness | Cross-window USD/token budgets and per-response cost tracking, per model and per tenant |
+| [Ask User](ask-user.md) | Harness | Let the model ask the user multiple-choice questions mid-run; you supply the answerer (terminal, web, test) |
 | [Tool approval](/ai/tools-toolsets/deferred-tools/#human-in-the-loop-tool-approval) | Core | Flag tool calls that need human approval before they run |
 | [Handle Deferred Tool Calls](/ai/capabilities/handle-deferred-tool-calls/) | Core | Resolve approval-deferred tool calls programmatically |
 | [System Reminders](system-reminders.md) | Harness | Cache-safe re-injection of guidance mid-run to counter instruction fade |
@@ -244,6 +209,7 @@ Outside the loop: how runs persist, survive failures, and get observed and confi
 | [AWS Lambda durability](aws-lambda.md) | Harness | Checkpoint model requests and tool calls into AWS Lambda durable function steps |
 | [Step Persistence](step-persistence.md) | Harness | Save, restore, resume (`continue_run`), and fork (`fork_run`) runs; file/SQLite/Mongo backends |
 | [Instrumentation](/ai/capabilities/instrumentation/) | Core | OpenTelemetry GenAI spans for every model and tool call; the raw material for [Logfire](https://pydantic.dev/logfire) traces |
+| [Logfire MCP](logfire-mcp.md) | Harness | Query Logfire telemetry and manage observability resources. |
 | [Managed Prompt](managed-prompt.md) | Harness | Back instructions with a [Logfire](https://pydantic.dev/logfire)-managed prompt; version and roll out without redeploying |
 | [Thread Executor](/ai/capabilities/thread-executor/) | Core | Run sync tools on a shared thread pool |
 

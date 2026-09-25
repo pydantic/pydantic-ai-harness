@@ -9,7 +9,7 @@
 	@prek --version || echo 'Please install prek: https://github.com/j178/pre-commit-rs'
 
 install: .uv .prek
-	uv sync --frozen --all-extras --group lint
+	uv sync --frozen --all-packages --all-extras --group lint
 	prek install --install-hooks
 
 format:
@@ -21,7 +21,7 @@ lint:
 	uv run ruff check
 
 typecheck:
-	uv run pyright
+	uv run --all-packages --group lint pyright
 
 test:
 	uv run pytest

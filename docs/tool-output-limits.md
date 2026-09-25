@@ -1,6 +1,6 @@
 ---
 title: Tool Output Limits
-description: Reduce oversized tool returns when they are produced -- truncate, spill to a queryable file, or summarize -- so a large payload does not persist in history.
+description: "Keep large tool outputs from filling a Pydantic AI agent's context window: truncate them, spill them to a file the model can page through, or summarize them."
 ---
 
 # Tool Output Limits
@@ -213,6 +213,15 @@ reduces both with the same band logic (they spill to distinct handles). Text `co
 reduced in place; non-text `content` (multimodal parts) that overflows is left unreduced with
 a `warnings.warn`, since it cannot be safely truncated.
 
+### `ToolReturn.metadata` is preserved
+
+Spill keys (`overflow_handle`, `overflow_bytes`, `overflow_content_handle`) live in
+`ToolReturn.metadata` alongside whatever the tool put there. A pre-existing mapping is copied
+in with stringified keys; a pre-existing non-mapping value (a string, a dataclass, anything
+that is not a `Mapping`) is kept under `original_metadata` rather than dropped. Either way the
+caller's own metadata survives a spill and is readable from `metadata` on the resulting
+`ToolReturnPart` after `Agent.run`.
+
 ## Size unit
 
 Thresholds are measured in characters by default. Set `over_tokens=True` to measure in
@@ -317,7 +326,7 @@ for path in root.rglob('*'):
 A built-in `Summarize` call is a real request to the model, so its full usage -- tokens and the
 request itself -- folds into the run's `ctx.usage`, exactly like `SummarizingCompaction`. Its nested
 run receives the parent limits unchanged except that a finite request limit reserves one request for
-the pending parent request.
+the pending parent request, and is filed under the parent run's `conversation_id`.
 
 By default `Summarize` inherits the running agent's model (`ctx.model`). Pass a model id or
 instance to `Summarize(model=...)` to override, or a `summarize` callable to bypass the

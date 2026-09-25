@@ -50,7 +50,7 @@ denylist active -- `Shell()` alone is a working (if permissive) configuration.
 
 ## Tools
 
-`Shell` contributes four tools to the agent:
+`Shell` contributes four run-scoped tools by default, plus the opt-in persistent `shell` tool:
 
 | Tool | Purpose |
 |---|---|
@@ -58,6 +58,7 @@ denylist active -- `Shell()` alone is a working (if permissive) configuration.
 | `start_command` | Launch a long-running command (server, watcher) in the background; returns an ID. |
 | `check_command` | Report the status and accumulated output of a background command. |
 | `stop_command` | Terminate a background command and return its final output. |
+| `shell` | Opt-in: run a command that outlives the run, in `foreground` (wait up to `timeout`, then hand back the still-running process) or `background` mode. Returns the PID and the paths of its output log and JSON status file. |
 
 `run_command` accepts an optional `timeout_seconds` argument that overrides
 `default_timeout` for a single call. `check_command` and `stop_command` take the
@@ -109,6 +110,34 @@ size limit, and an invalid character in an application-supplied `env`.
     `python`, `git`, `uv`, and `make` can spawn arbitrary processes. A model that
     wants to work around the allowlist can. For untrusted work, run the agent
     inside OS-level isolation such as [`ModalSandbox`](modal-sandbox.md) or a container.
+
+## Limit files written by commands
+
+Set `Shell(max_file_bytes=10_000_000)` to bound the size of each regular file
+written by `run_command` and `start_command`, including redirected output and
+background stdout/stderr logs. `None` (the default) adds no limit. This is
+separate from `max_output_chars`, which bounds the returned tool result.
+
+The positive integer is applied as POSIX `RLIMIT_FSIZE` in a child launcher
+before executing the shell. Descendants inherit it; the harness parent's limits
+are unchanged. A lower inherited hard limit takes precedence. Unsupported
+platforms, `persist_cwd=True`, and `tools=['shell']` (the persistent tool) raise
+`ValueError` when the toolset is constructed rather than ignoring the setting.
+Working-directory persistence uses a child-written capture file, which would
+also be subject to the limit.
+
+A process killed by the file-size signal gets a diagnosed tool result; other
+nonzero exits include the configured limit as context because programs can
+catch the write error and choose their own exit code. The agent can reduce its
+output and retry. Background failures appear in `check_command` or
+`stop_command`. Commands that handle the error and exit successfully cannot be
+diagnosed from their exit status. Results still obey `max_output_chars`.
+
+This is a per-file bound, not a disk quota or a sandbox: it does not remove
+partial files, shrink existing files, or prevent creating many smaller files.
+Use filesystem quotas or OS isolation for aggregate disk protection and
+untrusted commands. No additional telemetry spans are emitted; the existing
+tool-call result carries the failure and limit context.
 
 ## Environment control
 
@@ -190,6 +219,69 @@ result = agent.run_sync(
 print(result.output)
 ```
 
+## Persistent commands
+
+The four tools above are run-scoped: their processes die with the run. Name
+`shell` in `tools` to register the persistent tool instead:
+
+```python
+from pydantic_ai_harness import Shell
+
+Shell(cwd='./repo', tools=['shell'])
+```
+
+`shell(command, mode='foreground', timeout=None)` hands the command to a small
+supervisor process started in its own session. The supervisor appends the
+command's combined stdout and stderr to an output log, publishes a JSON status
+file (`{"pid": ..., "exit_code": ...}`, with `exit_code` null until the command
+exits), and reaps the command. The tool returns the supervisor's PID and both
+paths, so the model reads progress with its other tools and stops the process
+with `kill -- -PID` on POSIX or `taskkill /PID <PID> /T /F` on Windows (the
+process group or tree; the result names the right one). Foreground waits up to
+`timeout` seconds (default `default_timeout`, at most `MAX_FOREGROUND_WAIT`,
+270) for the exit status and returns the last 16,000 bytes of the log followed
+by the handles, even if the command is still running; background returns the
+handles at once. The handles come last so that `max_output_chars`, which keeps
+the tail of an over-long result, cannot drop them. The 270-second cap keeps a tool call shorter than typical provider
+request timeouts, so a long build or test run does not stall the conversation:
+the model gets the handles back, does other work, and polls the status file.
+
+The command outlives the agent run, the event loop, and (once it has started)
+the calling interpreter, so a server the model starts keeps serving. Nothing
+wakes the agent when the command finishes; the model polls. A foreground call
+that is cancelled (a run cancellation, say) cannot hand back its handles, so it
+kills the supervisor's whole session and removes the log directory instead. A
+log directory that was handed back is never rotated or deleted: the caller owns
+cleaning it up, and a verbose command should bound its own output. A supervisor that exits without
+publishing a status (a broken interpreter, say) surfaces as a retry naming the
+log directory.
+
+`allowed_commands`, `denied_commands`, `denied_operators`, `allow_interactive`,
+`env`, and `denied_env_patterns` apply to `shell` exactly as to `run_command`.
+`persist_cwd` does not: every `shell` command starts in the configured `cwd`,
+whatever `run_command` has tracked. Commands and logs are host-local, not durable
+workflow activities, and are not replay-safe.
+
+Each `shell` call emits progress events in the `shell` namespace, so a UI can
+show output as it arrives without parsing the tool result:
+
+| Event | Dispatch | Payload |
+|---|---|---|
+| `CommandStartedEvent` | stream | `command`, `pid` |
+| `CommandOutputEvent` | stream | `text`: a chunk of the combined log, decoded incrementally |
+| `CommandFinishedEvent` | stream | `pid`, `output_path`, `status_path`, `exit_code`, `truncated`, `total_lines` |
+
+Output events are emitted while a foreground call waits: at most the first
+16,000 bytes of the log per call, in chunks of up to 4,096 bytes, polled every
+50 ms. A background call emits only the started and finished events. `finished`
+means the tool stopped waiting, not that the command exited: `exit_code` is
+`None` while no status has been published, and `truncated` says the log held
+more than the events showed. `total_lines` counts logical lines in logs up to
+1 MiB and is `None` for larger logs, which are not scanned. A cancelled call may
+emit no finished event. Events carry command text and command output, so treat
+them as untrusted when rendering. They add no telemetry spans; core already
+traces the tool call.
+
 ## Working directory
 
 By default each command runs in `cwd` and `cd` has no lasting effect. Set
@@ -227,12 +319,17 @@ Shell(
     denied_operators=[],           # blocked shell operators
     default_timeout=30.0,          # seconds, per run_command
     max_output_chars=50_000,       # output cap returned to the model
+    max_file_bytes=None,          # POSIX per-file size limit (None = no added limit)
     persist_cwd=False,             # make cd sticky across calls
     allow_interactive=False,       # allow TTY-style commands
     env=None,                      # explicit env, replacing inheritance (None = inherit)
     denied_env_patterns=[],        # glob patterns stripped from the env
+    tools=RUN_SCOPED_TOOL_NAMES,   # which tools to register ('shell' for persistent commands)
 )
 ```
+
+With `tools=['shell']`, `default_timeout` is also the foreground wait and must be
+greater than zero and at most 270 seconds; that is checked at construction.
 
 ## Agent spec (YAML/JSON)
 

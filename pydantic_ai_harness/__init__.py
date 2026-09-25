@@ -6,10 +6,12 @@ from ._warn import HarnessDeprecationWarning
 
 if TYPE_CHECKING:
     from .advisor import Advisor
+    from .ask_user import AskUser
+    from .background_tools import BackgroundTools
     from .browser_use import BrowserUse
     from .capability_creation import CapabilityCreation
     from .code_mode import CodeMode
-    from .coder import DEFAULT_ALLOWED_COMMANDS, Coder
+    from .coder import Coder
     from .compaction import (
         ClampOversizedMessages,
         ClearToolResults,
@@ -42,6 +44,7 @@ if TYPE_CHECKING:
     from .macroscope import Macroscope
     from .memory import Memory
     from .modal_sandbox import ModalSandbox
+    from .ordinal import Ordinal
     from .planning import Planning
     from .prompt_injection_defender import PromptInjectionDefender
     from .pydantic_ai_docs import PydanticAIDocs
@@ -61,6 +64,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     'Advisor',
+    'AskUser',
+    'BackgroundTools',
     'BrowserUse',
     'CapabilityCreation',
     'ClampOversizedMessages',
@@ -68,7 +73,6 @@ __all__ = [
     'CodeMode',
     'Coder',
     'ConversationSearch',
-    'DEFAULT_ALLOWED_COMMANDS',
     'DEFAULT_RESEARCHER_INSTRUCTIONS',
     'DeduplicateFileReads',
     'DynamicWorkflow',
@@ -89,6 +93,7 @@ __all__ = [
     'ManagedPrompt',
     'Memory',
     'ModalSandbox',
+    'Ordinal',
     'OutputBlocked',
     'OutputGuardrail',
     'OutputGuardrailFunc',
@@ -121,6 +126,8 @@ __all__ = [
 
 _CAPABILITY_EXPORTS = {
     'Advisor': 'advisor',
+    'AskUser': 'ask_user',
+    'BackgroundTools': 'background_tools',
     'BrowserUse': 'browser_use',
     'CapabilityCreation': 'capability_creation',
     'ClampOversizedMessages': 'compaction',
@@ -140,6 +147,7 @@ _CAPABILITY_EXPORTS = {
     'ManagedPrompt': 'logfire',
     'Memory': 'memory',
     'ModalSandbox': 'modal_sandbox',
+    'Ordinal': 'ordinal',
     'Planning': 'planning',
     'PromptInjectionDefender': 'prompt_injection_defender',
     'PydanticAIDocs': 'pydantic_ai_docs',
@@ -166,7 +174,6 @@ _CAPABILITY_EXPORTS = {
 }
 
 _CONSTANT_EXPORTS = {
-    'DEFAULT_ALLOWED_COMMANDS': 'coder',
     'DEFAULT_RESEARCHER_INSTRUCTIONS': 'researcher',
     'LLM_API_KEY_ENV_PATTERNS': 'shell',
     'READ_ONLY_TOOL_NAMES': 'filesystem',

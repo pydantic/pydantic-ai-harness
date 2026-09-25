@@ -17,7 +17,7 @@ The three answers, and what picks between them:
 
 Declaring a default `id` is the whole policy: there is no `combine` to write unless the merge needs
 something the field-by-field default cannot express, such as a budget that should take the *smaller*
-value. None of this package's capabilities needs one.
+value.
 
 The core half of this lives in `pydantic-ai`'s `tests/test_capability_combine.py`.
 
@@ -60,6 +60,7 @@ from pydantic_ai.models.test import TestModel
 import pydantic_ai_harness
 from pydantic_ai_harness import (
     Advisor,
+    BackgroundTools,
     Coder,
     Memory,
     Planning,
@@ -72,9 +73,16 @@ from pydantic_ai_harness import (
     SystemReminders,
     ToolOutputLimits,
 )
+from pydantic_ai_harness.ask_user import AskUserRequest, AskUserResponse
 from pydantic_ai_harness.system_reminders import Reminder
 
 pytestmark = pytest.mark.anyio
+
+
+async def _decline(request: AskUserRequest) -> AskUserResponse:
+    """Only here to construct `AskUser`; the combine tests never call a tool."""
+    return AskUserResponse(cancelled=True)  # pragma: no cover
+
 
 _TMP_A = Path(tempfile.mkdtemp(prefix='combine-a-'))
 _TMP_B = Path(tempfile.mkdtemp(prefix='combine-b-'))
@@ -133,7 +141,22 @@ class Combines:
     check: Callable[[Any], None]
 
 
-Policy = Anonymous | Collides | Combines | Rejected
+@dataclass
+class Narrows:
+    """A default `id` and a `combine` that narrows rather than unions: two that disagree raise.
+
+    The access-boundary case in "Deciding What Two Of It Mean" (`agent_docs/capability-authoring.md`),
+    for connections to a provider: merging two field by field could send one account's credential to
+    another's server or drop `read_only`. `make` takes the class, like `Collides`, because these live in
+    optional groups that a module-level import would break.
+    """
+
+    reason: str
+    make: Callable[[type[Any]], tuple[AbstractCapability[Any], AbstractCapability[Any]]]
+    """Builds two that differ, from the discovered class, without credentials or a network."""
+
+
+Policy = Anonymous | Collides | Combines | Narrows | Rejected
 
 
 def _check_memory(merged: Any) -> None:
@@ -167,6 +190,10 @@ def _check_tool_output_limits(merged: Any) -> None:
 
 def _check_advisor(merged: Any) -> None:
     assert merged.max_tokens == 4096
+
+
+def _check_background_tools(merged: Any) -> None:
+    assert callable(merged.tools)
 
 
 def _check_sub_agents(merged: Any) -> None:
@@ -233,22 +260,35 @@ COMBINE_POLICY: dict[str, Policy] = {
         ),
         _check_advisor,
     ),
+    'BackgroundTools': Combines(
+        'one background scheduler per agent; selectors combine without wrapping a tool twice',
+        lambda: (BackgroundTools[Any](tools=['first']), BackgroundTools[Any](tools=['second'])),
+        _check_background_tools,
+    ),
     # -- Several of these is the normal case, so they stay anonymous. --
+    'RepairToolArguments': Anonymous('repairing valid arguments again is a no-op'),
+    '_BoundToolOutputs': Anonymous('Coder-local truncation composes with standalone output policies'),
     'Coder': Anonymous('a packaged harness; composing two is composing their members'),
     'Researcher': Anonymous('a packaged harness; composing two is composing their members'),
     'ClampOversizedMessages': Anonymous('clamping twice is a no-op; several thresholds compose'),
     'ClearToolResults': Anonymous('several form an escalation ladder, like `TieredCompaction` tiers'),
     'DeduplicateFileReads': Anonymous('file-read identification is agent-specific; one per `file_key`'),
     'DynamicWorkflow': Anonymous('one per workflow definition'),
+    'FallbackCompaction': Anonymous('drives a fallback chain; several independent chains compose'),
     'InputGuardrail': Anonymous('several guards is the design'),
     'OutputGuardrail': Anonymous('several guards is the design'),
     'PromptInjectionDefender': Anonymous('one per `tool_filter`; several scopes compose'),
     'ToolGuardrail': Anonymous('several guards is the design'),
     'ManagedPrompt': Anonymous('one per prompt name'),
+    'LogfireMCP': Narrows(
+        'one Logfire connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
     'RepoContext': Anonymous('one per workspace root'),
     'ReportContextUsage': Anonymous('a passive observer; several callbacks compose'),
     'Skills': Anonymous('a factory: one deferred capability per skill, each named after the skill'),
     'SlidingWindowCompaction': Anonymous('composes as a tier under `TieredCompaction`'),
+    'GoogleWorkspace': Anonymous('one per set of products, and `services` is what names it'),
     'StackOne': Anonymous('one per linked account, and `account_id` is what names it'),
     'TieredCompaction': Anonymous('drives other strategies; one per tier list'),
     'WarnNearLimits': Anonymous('a passive observer; several thresholds compose'),
@@ -263,6 +303,11 @@ COMBINE_POLICY: dict[str, Policy] = {
         'its toolset registers `read_file` and friends under fixed names',
         lambda cls: (cls(str(_TMP_A)), cls(str(_TMP_B))),
     ),
+    'AskUser': Collides(
+        'its toolset registers `ask_user_question` under a fixed name, and two answerers is a conflict, '
+        'not one configuration stated twice',
+        lambda cls: (cls(answerer=_decline), cls(answerer=_decline)),
+    ),
     'Shell': Collides(
         'its toolset registers `run_command` and friends under fixed names',
         lambda cls: (cls(cwd=str(_TMP_A)), cls(cwd=str(_TMP_B))),
@@ -275,6 +320,10 @@ COMBINE_POLICY: dict[str, Policy] = {
         'its toolset registers `read_pyai_docs` under a fixed name',
         lambda cls: (cls(), cls()),
     ),
+    'Notion': Narrows(
+        'one Notion connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
     'PyaiDocs': Collides('deprecated alias of `PydanticAIDocs`, and collides the same way'),
     'Macroscope': Collides(
         'its toolset registers `run_macroscope_review` under a fixed name',
@@ -284,6 +333,14 @@ COMBINE_POLICY: dict[str, Policy] = {
         'its toolset registers `aws_cli` and `localstack_health` under fixed names',
         lambda cls: (cls(), cls()),
     ),
+    'Linear': Narrows(
+        'one Linear connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
+    'Ordinal': Narrows(
+        'one Ordinal connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
     'CodeMode': Collides('`run_code` is reserved, so a second one is rejected by name'),
     'BrowserUse': Collides('its toolset registers its browser tools under fixed names'),
     'PlaywrightBrowser': Collides('its toolset registers `click` and friends under fixed names'),
@@ -291,11 +348,19 @@ COMBINE_POLICY: dict[str, Policy] = {
     'ConversationSearch': Collides('its toolset registers `search_conversation_history` under a fixed name'),
     'ExaAgent': Collides('its toolset registers `web_search` and friends under fixed names'),
     'ExaSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
+    'GitHub': Narrows(
+        'one GitHub connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
     'YouResearch': Collides('its toolset registers `research` and friends under fixed names'),
     'YouSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
     'KeenableSearch': Collides(
         'its toolset registers `web_search` and `get_page` under fixed names',
         lambda cls: (cls(), cls(num_results=3)),
+    ),
+    'Slack': Narrows(
+        'one Slack connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
     ),
 }
 
@@ -458,8 +523,15 @@ def test_capability_combine_policy_holds(name: str) -> None:
         return
 
     assert declares_default_id(capability_type), (
-        f'{name} is declared `Combines` but its class declares no default id, so two never meet'
+        f'{name} is declared `{type(policy).__name__}` but its class declares no default id, so two never meet'
     )
+    if isinstance(policy, Narrows):
+        first, second = policy.make(capability_type)
+        assert first.id is not None and first.id == second.id
+        assert capability_type.combine([first, first]) is first
+        with pytest.raises(UserError, match='disagree on'):
+            capability_type.combine([first, second])
+        return
     first, second = policy.make()
     assert first.id is not None and first.id == second.id, (
         f'{name} is declared `Combines` but two instances do not share an id'
@@ -562,33 +634,13 @@ def _child(name: str) -> Agent[Any, str]:
     reason='`Researcher` needs the `researcher` optional group.',
 )
 async def test_coder_and_researcher_compose() -> None:
-    """The composition #7781 was filed for: two packaged harnesses on one agent.
-
-    Both build a `ToolOutputLimits` and both delegate, so before `combine` they collided twice --
-    on the capability id, and then on the `delegate_task` tool name.
-    """
+    """Coder's private limits coexist with Researcher's independent tools and limits."""
     tree = CombinedCapability([Coder[Any](), Researcher[Any]()])
-    counts = Counter(type(leaf).__name__ for leaf in leaf_capabilities(tree))
-    assert counts['ToolOutputLimits'] == 2
-    assert counts['SubAgents'] == 2
-
-    # One layer: both harnesses are on the same agent, which is what makes them merge rather
-    # than one replacing the other.
     combined = combine_duplicate_capabilities(tree, [tree.capabilities])
-
     leaves = leaf_capabilities(combined)
-    merged_counts = Counter(type(leaf).__name__ for leaf in leaves)
-    assert merged_counts['ToolOutputLimits'] == 1
-    assert merged_counts['SubAgents'] == 1
-    # Neither harness loses a delegate: the rosters union under one `delegate_task` tool.
+    counts = Counter(type(leaf).__name__ for leaf in leaves)
+    assert counts['ToolOutputLimits'] == 1
+    assert counts['_BoundToolOutputs'] == 1
+    assert counts['SubAgents'] == 1
     sub_agents = next(leaf for leaf in leaves if isinstance(leaf, SubAgents))
-    assert [entry.agent.name for entry in sub_agents.agents] == ['explorer', 'researcher']
-
-    # And what the model is told, not just what the field holds. `_by_name` is a `compare=False`
-    # cache built in `__post_init__`, so a merge that unions `agents` without rebuilding it leaves
-    # the roster reading as composed while the delegate tool offers only the last harness's agents.
-    instructions = sub_agents.get_instructions()
-    assert isinstance(instructions, str)
-    assert 'explorer' in instructions and 'researcher' in instructions, (
-        'the delegate tool is built from the derived roster, so merging has to rebuild it'
-    )
+    assert [entry.agent.name for entry in sub_agents.agents] == ['researcher']

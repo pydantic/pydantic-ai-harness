@@ -1,9 +1,7 @@
 # Compaction
 
 A menu of strategies for keeping an agent's conversation history within a model's context
-window. Most are Pydantic AI `Capability` classes that edit the message history just before each
-request goes out. `FallbackCompaction` is instead a composing `CompactionStrategy` used through
-`TieredCompaction` or `compact_now`; it has no request trigger of its own. Edits **persist** into the
+window. These Pydantic AI `Capability` classes edit the message history just before each request goes out. `FallbackCompaction` optionally triggers its chain at a token threshold and also works as a composing `CompactionStrategy`. Edits **persist** into the
 run's message history, so a trim, clear, or summary carries forward to later steps (it is not
 recomputed from the full history every turn).
 
@@ -243,6 +241,11 @@ A compaction that changes the history emits the same `compact_messages` span the
 so an instrumented application sees one shape however compaction was triggered. Pass `tracer=` to
 record it; without one the span goes to a no-op tracer.
 
+Pass `conversation_id=` with the id of the conversation being compacted. It is set on the throwaway
+context, so the summary run of `SummarizingCompaction` is recorded under that conversation (its
+messages and its `gen_ai.conversation.id` span attribute) rather than under a fresh id of its own.
+Inside a run, the summary run takes the parent run's `conversation_id` without this.
+
 ## `FallbackCompaction`: recover when a strategy fails
 
 `TieredCompaction` advances when a successful tier does not reclaim enough. `FallbackCompaction`
@@ -259,6 +262,7 @@ subclasses pass through immediately; `fallback_on` rejects types that do not der
 from pydantic_ai_harness import FallbackCompaction, SlidingWindowCompaction, SummarizingCompaction
 
 fallback = FallbackCompaction(
+    max_fraction=0.85,
     fallback_chain=[
         SummarizingCompaction(max_messages=1, keep_tokens=20_000),
         SlidingWindowCompaction(max_messages=1, keep_tokens=20_000),
@@ -266,9 +270,17 @@ fallback = FallbackCompaction(
 )
 ```
 
-The strategies' trigger fields are not consulted when a composing strategy calls `compact`
-directly. Put `fallback` inside `TieredCompaction` to give the chain a context trigger, or pass it
-to `compact_now` for manual compaction.
+Register `fallback` directly with `Agent(..., capabilities=[fallback])`. Its optional
+`max_tokens` or `max_fraction` trigger runs the chain only when estimated context tokens
+exceed the threshold. Fractions resolve against the request's model; `context_window`
+overrides its window and `fallback_context_window` supplies an unknown model's window.
+`tokenizer` customizes token estimation. The hook preserves pinned parts and persists
+compacted history, emitting the standard `compact_messages` span when history changes.
+
+With neither trigger configured, the request hook does nothing. Direct `compact()` and
+`compact_now()` calls run the chain regardless of its threshold, so it remains usable
+inside other composing strategies and for manual compaction. Each child's own trigger
+is bypassed when the chain calls its `compact()` method.
 
 ## `ClampOversizedMessages`: surviving a runaway generation
 
@@ -387,7 +399,8 @@ from the edit point onward -- the next request pays a cache-write. Use `ClearToo
 running agent's model. Its nested summary run inherits the parent usage limits and reserves one request from a
 finite request limit for the pending parent request. Pass `model_settings` to give the dedicated summary call
 settings that differ from defaults carried by that model; the supplied settings merge over the model defaults
-without mutating the model or the settings dictionary.
+without mutating the model or the settings dictionary. Pass `summarization_capabilities` to attach
+capabilities to the summary agent; capabilities on the outer agent do not run on the summary call.
 
 The summary request is non-streaming unless `event_stream_handler` is set. Supply a handler to watch
 the summary as it is written, or pass `drain_summary_events` to take the streaming request path
@@ -435,6 +448,8 @@ itself -- is folded into the run's `ctx.usage`. This is deliberate: it keeps cos
 request count consistent (a model request that didn't count as one would be the surprise), and lets a
 `UsageLimits` request limit catch a runaway compaction. The nested run receives the other parent limits unchanged;
 the finite request limit is reduced by one so it cannot spend the slot already approved for the parent request.
+The summary run is filed under the parent run's `conversation_id`, so its requests, spans, and cost
+group with the conversation it compacts.
 A run-request / iteration limiter will therefore see compaction calls among its requests.
 
 With a durable-execution capability attached, the summary call runs as a contributed durable

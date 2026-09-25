@@ -12,6 +12,7 @@ import os
 import re
 import stat
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
+from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 from typing import BinaryIO, Concatenate, ParamSpec, TypedDict
 
@@ -29,13 +30,45 @@ from pydantic_ai_harness.filesystem._events import (
     FileWrittenEvent,
     SearchKind,
 )
+from pydantic_ai_harness.filesystem._ripgrep import Record, run_ripgrep
 
 _P = ParamSpec('_P')
 
+DEFAULT_TOOL_NAMES: tuple[str, ...] = (
+    'read_file',
+    'write_file',
+    'edit_file',
+    'list_directory',
+    'search_files',
+    'find_files',
+    'create_directory',
+    'file_info',
+)
+"""The tools `FileSystem` registers by default; all are pure Python."""
+
+RIPGREP_TOOL_NAMES: tuple[str, ...] = ('list_files', 'grep')
+"""Opt-in tools backed by the `rg` executable, which respects `.gitignore` and skips hidden files."""
+
+FILE_SYSTEM_TOOL_NAMES: tuple[str, ...] = (*DEFAULT_TOOL_NAMES, *RIPGREP_TOOL_NAMES)
+"""Every tool `FileSystem` can register, in registration order."""
+
+_MAX_MATCH_COLUMNS = 4096
+"""Bytes of a matching or context line `grep` shows before ripgrep cuts it with an omission marker."""
+
 READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
-    {'read_file', 'list_directory', 'search_files', 'find_files', 'file_info'}
+    {'read_file', 'list_directory', 'search_files', 'find_files', 'file_info', *RIPGREP_TOOL_NAMES}
 )
 """Names of filesystem tools that do not modify the workspace."""
+
+
+@dataclass
+class Replacement:
+    """One exact replacement: `old_text` must occur exactly once and is replaced by `new_text`."""
+
+    _: KW_ONLY
+    old_text: str
+    new_text: str
+
 
 # Errors that mean "the model asked for something the tool couldn't do" -- a
 # missing file, a denied path, a stale edit. pyai only feeds `ModelRetry` back
@@ -143,8 +176,17 @@ def _recoverable(
     return wrapper
 
 
-def _format_lines(lines: Sequence[str], offset: int, limit: int) -> str:
-    """Format pre-split lines with line numbers and continuation hint."""
+_NOTICE_CHARS = 200
+"""Room reserved for the longest continuation or oversized-line notice `_format_lines` appends."""
+
+
+def _format_lines(lines: Sequence[str], offset: int, limit: int, max_chars: int | None = None) -> str:
+    """Format pre-split lines with line numbers and continuation hint.
+
+    With `max_chars`, the numbered lines end on the last complete one that
+    fits, so the continuation offset always names the first line not shown.
+    The notice appended after them is not counted; callers reserve `_NOTICE_CHARS`.
+    """
     total = len(lines)
 
     if total == 0:
@@ -153,15 +195,27 @@ def _format_lines(lines: Sequence[str], offset: int, limit: int) -> str:
     if offset >= total:
         raise ValueError(f'Offset {offset} exceeds file length ({total} lines).')
 
-    selected = lines[offset : offset + limit]
-    numbered = [f'{i:>6}\t{line}' for i, line in enumerate(selected, start=offset + 1)]
+    numbered: list[str] = []
+    budget = max_chars
+    for number, line in enumerate(lines[offset : offset + limit], start=offset + 1):
+        rendered = f'{number:>6}\t{line}'
+        if budget is not None and len(rendered) > budget:
+            if not numbered:
+                return (
+                    f'... (Line {number} is {len(line):,} characters and does not fit the read window. '
+                    f'Use offset={number} to skip it, or a shell byte range to inspect it.)\n'
+                )
+            break
+        numbered.append(rendered)
+        if budget is not None:
+            budget -= len(rendered)
     result = ''.join(numbered)
     if not result.endswith('\n'):
         result += '\n'
 
-    remaining = total - (offset + len(selected))
+    remaining = total - (offset + len(numbered))
     if remaining > 0:
-        next_offset = offset + len(selected)
+        next_offset = offset + len(numbered)
         result += f'... ({remaining} more lines. Use offset={next_offset} to continue reading.)\n'
 
     return result
@@ -245,19 +299,13 @@ def _disk_hash(chunks: Iterable[bytes]) -> str:
     return digest.hexdigest()[:12]
 
 
-def _read_canonical_text(path: Path) -> str:
-    """Read a text file as the canonical hash view, without newline translation.
-
-    `Path.open` is used because `Path.read_text` only accepts `newline` on
-    Python 3.13+, while `open` has had it since 3.10. Keep `errors` strict,
-    matching `read_text`'s default, so invalid UTF-8 surfaces the same way
-    it did before the `newline` handling was made explicit.
-    """
-    with path.open(encoding='utf-8', newline='') as f:
-        return f.read()
-
-
-def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) -> tuple[str | None, str | None]:
+def _announced_state(
+    resolved: Path,
+    path: str,
+    *,
+    expected_hash: str | None,
+    open_read: Callable[[Path], BinaryIO],
+) -> tuple[str | None, str | None]:
     """The text a listener is shown a write replacing, and the hash the write is then guarded with.
 
     A stale `expected_hash` for a file that exists is rejected here first, so
@@ -276,9 +324,7 @@ def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) ->
     if not resolved.is_file():
         return '', _ABSENT_HASH
     try:
-        # Opened like `_open_for_write`, so a special file swapped onto the
-        # path after the `is_file` check cannot stall this read.
-        with os.fdopen(os.open(resolved, os.O_RDONLY | _SPECIAL_FILE_FLAGS), 'rb') as source:
+        with open_read(resolved) as source:
             head = source.read(_DIFF_SOURCE_BYTES + 1)
             current_hash = _disk_hash(itertools.chain([head], _chunks(source)))
     except OSError:
@@ -346,38 +392,57 @@ def _open_for_write(resolved: Path, path: str, *, read_back: bool, create: bool)
         raise
 
 
-def _write_content(resolved: Path, path: str, content: str, *, expected_hash: str | None, create: bool) -> None:
-    """Replace the file's content, checking that an existing file hashes to `expected_hash` under the open descriptor.
+def _write_content(source: BinaryIO, path: str, content: str, *, expected_hash: str | None, created: bool) -> None:
+    """Check the existing stream's hash before truncating and writing UTF-8 bytes.
 
-    Checking under the descriptor is what guards the write: the file cannot
-    change between the check and the write the way it can while a change is
-    announced. The bytes are hashed as `read_file` hashes them, so a file that
-    is not valid UTF-8 is compared instead of failing to decode.
+    This uses the same stream for checking and writing, but does not lock out
+    concurrent writers. Invalid UTF-8 is hashed as `read_file` hashes it.
     """
-    descriptor, created = _open_for_write(resolved, path, read_back=expected_hash is not None, create=create)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ModelRetry(f'Path {path!r} exists and is not a regular file.')
+    with source:
+        if expected_hash is not None and not created:
+            _check_expected_hash(path, _disk_hash(_chunks(source)), expected_hash)
 
-        binary_file = os.fdopen(descriptor, 'rb+' if expected_hash is not None else 'wb')
-        descriptor = -1
-        with binary_file:
-            if expected_hash is not None and not created:
-                _check_expected_hash(path, _disk_hash(_chunks(binary_file)), expected_hash)
+        source.seek(0)
+        source.truncate(0)
+        source.write(content.encode('utf-8'))
 
-            binary_file.seek(0)
-            binary_file.truncate(0)
-            binary_file.write(content.encode('utf-8'))
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+
+def _replacements(
+    old_text: str | None, new_text: str | None, replacements: Sequence[Replacement] | None
+) -> list[Replacement]:
+    """Normalize the two argument forms of `edit_file` into one ordered list."""
+    if replacements is None:
+        if old_text is None or new_text is None:
+            raise ModelRetry('Provide old_text and new_text, or a non-empty replacements list.')
+        return [Replacement(old_text=old_text, new_text=new_text)]
+    if old_text is not None or new_text is not None or not replacements:
+        raise ModelRetry('Provide either old_text and new_text or a non-empty replacements list, not both.')
+    return list(replacements)
+
+
+def _apply_replacements(text: str, replacements: Sequence[Replacement], path: str) -> str:
+    """Apply `replacements` in order, each matching exactly once; nothing is written on failure."""
+    for index, replacement in enumerate(replacements, start=1):
+        label = f'replacement {index}' if len(replacements) > 1 else 'old_text'
+        if not replacement.old_text:
+            raise ValueError(f'{label} is empty; old_text must be the exact text to replace.')
+        count = text.count(replacement.old_text)
+        if count == 0:
+            raise ValueError(f'{label} not found in {path}. No changes were written.')
+        if count > 1:
+            raise ValueError(
+                f'{label} found {count} times in {path}. Include more surrounding context to make the match '
+                'unique. No changes were written.'
+            )
+        text = text.replace(replacement.old_text, replacement.new_text, 1)
+    return text
 
 
 class FileSystemToolset(FunctionToolset[AgentDepsT]):
     """Toolset providing filesystem operations scoped to a root directory.
 
     Security model:
-    - All paths resolved relative to root with canonical path checks
+    - Relative paths resolved from `cwd` and checked for containment in `root_dir`
     - Symlinks resolved before authorization, and again after a listener has
       held a change request; a rename on the path between that check and the
       by-name I/O remains possible, as the documented security model says
@@ -394,30 +459,79 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         denied_patterns: Sequence[str],
         protected_patterns: Sequence[str],
         max_read_lines: int,
+        max_read_chars: int | None = None,
         max_list_results: int,
         max_search_results: int,
         max_find_results: int,
         id: str | None = None,
+        cwd: Path | None = None,
+        content_hashes: bool = True,
+        tools: Sequence[str] = DEFAULT_TOOL_NAMES,
     ) -> None:
         super().__init__(id=id)
         self._root = root_dir.resolve()
         self._real_root = Path(os.path.realpath(self._root))
+        self._cwd = self._root if cwd is None else cwd.resolve()
+        if not Path(os.path.realpath(self._cwd)).is_relative_to(self._real_root):
+            raise ValueError(f'cwd {os.fspath(self._cwd)!r} is outside root_dir {os.fspath(root_dir)!r}.')
         self._allowed_patterns = list(allowed_patterns)
         self._denied_patterns = list(denied_patterns)
         self._protected_patterns = list(protected_patterns)
         self._max_read_lines = max_read_lines
+        self._max_read_chars = max_read_chars
         self._max_list_results = max_list_results
         self._max_search_results = max_search_results
         self._max_find_results = max_find_results
+        self._content_hashes = content_hashes
+        self._tools = tuple(tools)
+        if unknown := sorted(set(self._tools) - set(FILE_SYSTEM_TOOL_NAMES)):
+            raise ValueError(
+                f'Unknown filesystem tools: {", ".join(unknown)}. Available: {", ".join(FILE_SYSTEM_TOOL_NAMES)}.'
+            )
 
-        self.add_function(self._read_file_tool, name='read_file')
-        self.add_function(self._write_file_tool, name='write_file')
-        self.add_function(self._edit_file_tool, name='edit_file')
-        self.add_function(self._list_directory_tool, name='list_directory')
-        self.add_function(self._search_files_tool, name='search_files')
-        self.add_function(self._find_files_tool, name='find_files')
-        self.add_function(self._create_directory_tool, name='create_directory')
-        self.add_function(self.file_info, name='file_info')
+        registrations: dict[str, Callable[..., Awaitable[str]]] = {
+            'read_file': self._read_file_tool,
+            'write_file': self._write_file_tool if content_hashes else self._write_file_tool_unhashed,
+            'edit_file': self._edit_file_tool if content_hashes else self._edit_file_tool_unhashed,
+            'list_directory': self._list_directory_tool,
+            'search_files': self._search_files_tool,
+            'find_files': self._find_files_tool,
+            'create_directory': self._create_directory_tool,
+            'file_info': self.file_info,
+            'list_files': self._list_files_tool,
+            'grep': self._grep_tool,
+        }
+        for name in FILE_SYSTEM_TOOL_NAMES:
+            if name in self._tools:
+                self.add_function(registrations[name], name=name)
+
+    def open_read(self, resolved: Path) -> BinaryIO:
+        """Open an authorized path for a write's pre-change snapshot or an edit's source.
+
+        The caller closes the binary stream. Override alongside `open_write`
+        for storage without local file descriptors.
+        """
+        return os.fdopen(os.open(resolved, os.O_RDONLY | _SPECIAL_FILE_FLAGS), 'rb')
+
+    def open_write(self, resolved: Path, *, read_back: bool, create: bool) -> tuple[BinaryIO, bool]:
+        """Open an authorized regular file without truncating it, returning `(stream, created)`.
+
+        The caller closes the seekable binary stream and checks the hash before
+        truncation. `read_back` requires read access from position zero. With
+        `create=False`, a missing file must raise `FileNotFoundError`; otherwise
+        creation must be exclusive so `created` describes this open, not a prior
+        existence check. Overrides own their backend's file-type and race checks.
+        """
+        path = self._relative_to_root(resolved)
+        descriptor, created = _open_for_write(resolved, path, read_back=read_back, create=create)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ModelRetry(f'Path {path!r} exists and is not a regular file.')
+            source = os.fdopen(descriptor, 'rb+' if read_back else 'wb')
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return source, created
 
     def _matches(self, path: str, pattern: str) -> bool:
         """Glob-match a relative path, treating a leading `**/` as 'any directory, including the root'.
@@ -437,12 +551,12 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         return next((p for p in patterns if self._matches(path, p)), None)
 
     def _resolve_path(self, path: str) -> Path:
-        """Resolve path relative to root, rejecting traversal.
+        """Resolve path relative to `cwd`, rejecting traversal outside the root.
 
         Uses os.path.realpath for symlink resolution before checking containment.
         """
         try:
-            candidate = (self._root / path).resolve()
+            candidate = (self._cwd / path).resolve()
         except RuntimeError as e:
             # Python 3.10-3.12 signal a symlink loop this way.
             raise ModelRetry(f'Path {path!r} resolves through a symlink loop.') from e
@@ -518,6 +632,10 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Canonical path of a resolved location relative to the real root."""
         return str(resolved.relative_to(self._real_root))
 
+    def _relative_to_cwd(self, path: Path) -> str:
+        """Format an authorized discovery path for reuse as a tool input."""
+        return os.path.relpath(path, self._cwd)
+
     def _event_location(self, resolved: Path) -> _EventLocation:
         """Path fields for an event about `resolved`.
 
@@ -553,7 +671,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to the root directory.
+            path: File path relative to `cwd`.
             offset: Zero-based line offset to start reading from.
             limit: Maximum number of lines to return (default: 2000).
 
@@ -584,14 +702,30 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         text = raw.decode('utf-8', errors='replace')
         lines = text.splitlines(keepends=True)
+        header = self._read_header(path, len(lines), content_hash)
         # Format before emitting: an out-of-range offset is a failed read, and
         # a failed read must not look like a successful one to subscribers.
-        body = _format_lines(lines, offset, limit)
+        body = _format_lines(lines, offset, limit, self._body_budget(header))
         if ctx is not None:
             await ctx.emit(FileReadEvent(**self._event_location(resolved), content_hash=content_hash))
-
-        header = f'[{path} | {len(lines)} lines | hash:{content_hash}]\n'
         return header + body
+
+    def _read_header(self, path: str, total: int, content_hash: str) -> str:
+        label = path
+        if self._max_read_chars is not None and len(path) > self._max_read_chars // 4:
+            # The label echoes what the model passed; keep a long one from eating the window.
+            label = '...' + path[-(self._max_read_chars // 4) :]
+        return f'[{label} | {total} lines{" | hash:" + content_hash if self._content_hashes else ""}]\n'
+
+    def _body_budget(self, header: str) -> int | None:
+        """Characters left for numbered lines once the header and the longest notice are counted."""
+        if self._max_read_chars is None:
+            return None
+        return max(self._max_read_chars - len(header) - _NOTICE_CHARS, 0)
+
+    def _hash_suffix(self, content_hash: str) -> str:
+        """The hash a write or edit result shows the model, or nothing when `content_hashes` is off."""
+        return f' [hash:{content_hash}]' if self._content_hashes else ''
 
     async def write_file(self, path: str, content: str, *, expected_hash: str | None = None) -> str:
         """Write a text file directly, outside an agent run."""
@@ -609,7 +743,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to the root directory.
+            path: File path relative to `cwd`.
             content: The text content to write.
             expected_hash: If provided, the write is rejected when the file exists
                 and its current hash doesn't match (optimistic concurrency).
@@ -618,6 +752,16 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             Confirmation message with new hash.
         """
         return await self._write_file(ctx, path, content, expected_hash=expected_hash)
+
+    async def _write_file_tool_unhashed(self, ctx: RunContext[AgentDepsT], path: str, content: str) -> str:
+        """Create a file or replace its whole content.
+
+        Args:
+            ctx: The current agent run context.
+            path: File path relative to `cwd`.
+            content: The text content to write.
+        """
+        return await self._write_file(ctx, path, content)
 
     @_recoverable
     async def _write_file(
@@ -647,18 +791,19 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         # and the descriptor check of `expected_hash` is the whole contract.
         guard = expected_hash
         if ctx is not None:
-            old, guard = _announced_state(resolved, path, expected_hash=expected_hash)
+            old, guard = _announced_state(resolved, path, expected_hash=expected_hash, open_read=self.open_read)
             change = Change.propose(**self._event_location(resolved), operation='write', old=old, new=content)
             if (refusal := await self._request(ctx, change, path=path, resolved=resolved)) is not None:
                 return refusal
 
-        _write_content(resolved, path, content, expected_hash=guard, create=True)
+        source, created = self.open_write(resolved, read_back=guard is not None, create=True)
+        _write_content(source, path, content, expected_hash=guard, created=created)
 
         new_hash = _content_hash(content)
         lines = len(content.splitlines())
         if ctx is not None:
             await ctx.emit(FileWrittenEvent(**self._event_location(resolved), content_hash=new_hash))
-        return f'Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]'
+        return f'Wrote {len(content)} chars ({lines} lines) to {path}.{self._hash_suffix(new_hash)}'
 
     async def _request(
         self, ctx: RunContext[AgentDepsT] | None, change: Change, *, path: str, resolved: Path
@@ -680,79 +825,102 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
     async def edit_file(self, path: str, old_text: str, new_text: str, *, expected_hash: str | None = None) -> str:
         """Edit a text file directly, outside an agent run."""
-        return await self._edit_file(None, path, old_text, new_text, expected_hash=expected_hash)
+        replacements = [Replacement(old_text=old_text, new_text=new_text)]
+        return await self._edit_file(None, path, replacements, expected_hash=expected_hash)
 
     async def _edit_file_tool(
         self,
         ctx: RunContext[AgentDepsT],
         path: str,
-        old_text: str,
-        new_text: str,
+        old_text: str | None = None,
+        new_text: str | None = None,
         *,
+        replacements: list[Replacement] | None = None,
         expected_hash: str | None = None,
     ) -> str:
         """Edit a file by exact string replacement with conflict detection.
 
-        The old_text must appear exactly once in the file. Include surrounding
-        context lines to ensure uniqueness.
+        Pass one `old_text`/`new_text` pair, or several as `replacements`. Each
+        old_text must appear exactly once in the file as edited by the previous
+        replacements; include surrounding context lines to ensure uniqueness.
+        The file is only written once every replacement has matched.
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to the root directory.
+            path: File path relative to `cwd`.
             old_text: The exact text to find (must appear exactly once).
             new_text: The replacement text.
+            replacements: Replacements to apply in order, instead of a single pair.
             expected_hash: If provided, rejects the edit when the file's
                 current hash doesn't match (optimistic concurrency).
 
         Returns:
             Summary with new hash for subsequent operations.
         """
-        return await self._edit_file(ctx, path, old_text, new_text, expected_hash=expected_hash)
+        edits = _replacements(old_text, new_text, replacements)
+        return await self._edit_file(ctx, path, edits, expected_hash=expected_hash)
+
+    async def _edit_file_tool_unhashed(
+        self,
+        ctx: RunContext[AgentDepsT],
+        path: str,
+        old_text: str | None = None,
+        new_text: str | None = None,
+        *,
+        replacements: list[Replacement] | None = None,
+    ) -> str:
+        """Edit a file by exact string replacement.
+
+        Pass one `old_text`/`new_text` pair, or several as `replacements`. Each
+        old_text must appear exactly once in the file as edited by the previous
+        replacements; include surrounding context lines to ensure uniqueness.
+        The file is only written once every replacement has matched.
+
+        Args:
+            ctx: The current agent run context.
+            path: File path relative to `cwd`.
+            old_text: The exact text to find (must appear exactly once).
+            new_text: The replacement text.
+            replacements: Replacements to apply in order, instead of a single pair.
+        """
+        return await self._edit_file(ctx, path, _replacements(old_text, new_text, replacements))
 
     @_recoverable
     async def _edit_file(
         self,
         ctx: RunContext[AgentDepsT] | None,
         path: str,
-        old_text: str,
-        new_text: str,
+        replacements: Sequence[Replacement],
         *,
         expected_hash: str | None = None,
     ) -> str:
         resolved = self._safe_resolve(path, write=True)
         if not resolved.is_file():
             raise FileNotFoundError(f'File not found: {path}')
-
-        # Reading and writing with `newline=''` disables universal-newline
-        # translation, so the text is the canonical bytes-on-disk view that
-        # `read_file` hashes, and the replacement preserves `\r\n` exactly
-        # instead of writing `\r\r\n` through a translating writer on Windows.
-        text = _read_canonical_text(resolved)
+        with self.open_read(resolved) as source:
+            head = source.read(8192)
+            if _is_binary(head):
+                raise ValueError(f'{path} is a binary file; edit_file only edits text files.')
+            # Decode without universal-newline translation to preserve CRLF and hashes.
+            text = (head + source.read()).decode('utf-8')
         current_hash = _content_hash(text)
 
         if expected_hash is not None:
             _check_expected_hash(path, current_hash, expected_hash)
 
-        count = text.count(old_text)
-        if count == 0:
-            raise ValueError(f'old_text not found in {path}.')
-        if count > 1:
-            raise ValueError(
-                f'old_text found {count} times in {path}. Include more surrounding context to make the match unique.'
-            )
-
-        new_content = text.replace(old_text, new_text, 1)
+        new_content = _apply_replacements(text, replacements, path)
         change = Change.propose(**self._event_location(resolved), operation='edit', old=text, new=new_content)
         if (refusal := await self._request(ctx, change, path=path, resolved=resolved)) is not None:
             return refusal
         # A listener may take a while (a human approving the diff, say). The
         # edit was computed from `text`, so the write checks that the file
         # still holds it, and reports a file deleted in the meantime as missing.
-        _write_content(resolved, path, new_content, expected_hash=current_hash, create=False)
+        source, created = self.open_write(resolved, read_back=True, create=False)
+        _write_content(source, path, new_content, expected_hash=current_hash, created=created)
         new_hash = _content_hash(new_content)
         if ctx is not None:
             await ctx.emit(change.edited(content_hash=new_hash))
-        return f'Edited {path}. [hash:{new_hash}]'
+        return f'Edited {path}.{self._hash_suffix(new_hash)}'
 
     async def list_directory(self, path: str = '.') -> str:
         """List a directory directly, outside an agent run."""
@@ -763,10 +931,10 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: Directory path relative to the root directory.
+            path: Directory path relative to `cwd`.
 
         Returns:
-            A newline-separated listing with type indicators and sizes.
+            Paths relative to `cwd`, with type indicators and sizes.
         """
         return await self._list_directory(ctx, path)
 
@@ -793,7 +961,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             target = self._resolve_walk_entry(entry)
             if target is None:
                 continue
-            rel = str(rel_path)
+            rel = self._relative_to_cwd(entry)
             if target.is_dir():
                 line = f'{rel}/'
             else:
@@ -827,11 +995,11 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Args:
             ctx: The current agent run context.
             pattern: Regex pattern to search for.
-            path: Directory to search in, relative to the root directory.
-            include_glob: If provided, only search files matching this glob (e.g. '*.py').
+            path: Directory to search in, relative to `cwd`.
+            include_glob: If provided, match this glob against root-relative paths (e.g. '*.py').
 
         Returns:
-            str: Matching lines formatted as file:line_number:text.
+            str: Matching lines formatted as file:line_number:text, with paths relative to `cwd`.
         """
         return await self._search_files(ctx, pattern, path=path, include_glob=include_glob)
 
@@ -882,7 +1050,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if _is_binary(raw):
                 continue
             text = raw.decode('utf-8', errors='replace')
-            matches, capped = _matching_lines(text, compiled, rel_str, self._max_search_results - len(results))
+            matches, capped = _matching_lines(
+                text, compiled, self._relative_to_cwd(file_path), self._max_search_results - len(results)
+            )
             results.extend(matches)
             if capped:
                 break
@@ -915,10 +1085,10 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             ctx: The current agent run context.
             pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
                 '**/*.json'). Absolute patterns are rejected.
-            path: Directory to search in, relative to the root directory.
+            path: Directory to search in, relative to `cwd`.
 
         Returns:
-            Newline-separated list of matching file paths relative to root.
+            Newline-separated list of matching file paths relative to `cwd`.
         """
         return await self._find_files(ctx, pattern, path=path)
 
@@ -967,7 +1137,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if len(matches) >= self._max_find_results:
                 capped = True
                 break
-            rel = str(rel_path)
+            rel = self._relative_to_cwd(match)
             suffix = '/' if target.is_dir() else ''
             matches.append(f'{rel}{suffix}')
 
@@ -976,6 +1146,179 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if capped:
             matches.append(f'[... truncated at {self._max_find_results} matches]')
         return '\n'.join(matches) if matches else 'No matches found.'
+
+    async def list_files(self, path: str = '.', *, glob: str | None = None) -> str:
+        """List files with ripgrep directly, outside an agent run."""
+        return await self._list_files(None, path, glob=glob)
+
+    async def _list_files_tool(self, ctx: RunContext[AgentDepsT], path: str = '.', *, glob: str | None = None) -> str:
+        """List files under a directory, recursively, sorted by path, respecting ignore files and skipping hidden files.
+
+        Args:
+            ctx: The current agent run context.
+            path: Directory to list, relative to `cwd`.
+            glob: If provided, only list files matching this glob (e.g. '*.py' or 'src/**').
+
+        Returns:
+            One file path per line, relative to `cwd`.
+        """
+        return await self._list_files(ctx, path, glob=glob)
+
+    @_recoverable
+    async def _list_files(self, ctx: RunContext[AgentDepsT] | None, path: str = '.', *, glob: str | None) -> str:
+        resolved = self._safe_resolve(path, check_allowed=False)
+        if not resolved.is_dir():
+            raise NotADirectoryError(f'Path {path!r} is not a directory.')
+        arguments = ['--files', '--sort', 'path', *(['--glob', glob] if glob is not None else [])]
+        results, capped = await run_ripgrep(
+            arguments,
+            cwd=resolved,
+            limit=self._max_find_results,
+            listing=True,
+            accept=lambda record: self._ripgrep_entry(resolved, record),
+        )
+        if ctx is not None:
+            await ctx.emit(
+                self._searched(resolved, glob or '', search='find', match_count=len(results), truncated=capped)
+            )
+        if capped:
+            results.append(f'[... truncated at {self._max_find_results} files]')
+        return '\n'.join(results) if results else 'No files found.'
+
+    async def grep(
+        self,
+        pattern: str,
+        *,
+        path: str = '.',
+        glob: str | None = None,
+        file_type: str | None = None,
+        ignore_case: bool = False,
+        literal: bool = False,
+        context: int = 0,
+    ) -> str:
+        """Search file contents with ripgrep directly, outside an agent run."""
+        return await self._grep(
+            None,
+            pattern,
+            path=path,
+            glob=glob,
+            file_type=file_type,
+            ignore_case=ignore_case,
+            literal=literal,
+            context=context,
+        )
+
+    async def _grep_tool(
+        self,
+        ctx: RunContext[AgentDepsT],
+        pattern: str,
+        *,
+        path: str = '.',
+        glob: str | None = None,
+        file_type: str | None = None,
+        ignore_case: bool = False,
+        literal: bool = False,
+        context: int = 0,
+    ) -> str:
+        """Search file contents with ripgrep, respecting ignore files and skipping hidden files.
+
+        Args:
+            ctx: The current agent run context.
+            pattern: Regular expression (ripgrep syntax), or exact text when `literal` is set.
+            path: Directory or file to search, relative to `cwd`.
+            glob: If provided, only search files matching this glob (e.g. '*.py').
+            file_type: If provided, only search this ripgrep file type (e.g. 'py', 'rust').
+            ignore_case: Match case-insensitively.
+            literal: Treat `pattern` as exact text rather than a regular expression.
+            context: Lines of context to show around each match (0 to 20).
+
+        Returns:
+            Matches as `file:line:text`; context lines as `file-line-text`. Paths are relative to `cwd`.
+        """
+        return await self._grep(
+            ctx,
+            pattern,
+            path=path,
+            glob=glob,
+            file_type=file_type,
+            ignore_case=ignore_case,
+            literal=literal,
+            context=context,
+        )
+
+    @_recoverable
+    async def _grep(
+        self,
+        ctx: RunContext[AgentDepsT] | None,
+        pattern: str,
+        *,
+        path: str,
+        glob: str | None,
+        file_type: str | None,
+        ignore_case: bool,
+        literal: bool,
+        context: int,
+    ) -> str:
+        if not 0 <= context <= 20:
+            raise ValueError('context must be between 0 and 20.')
+        resolved = self._safe_resolve(path, check_allowed=False)
+        if resolved.is_dir():
+            cwd, target = resolved, '.'
+        elif resolved.is_file():
+            cwd, target = resolved.parent, os.path.join('.', resolved.name)
+        else:
+            raise FileNotFoundError(f'Path {path!r} is not a file or directory.')
+        arguments = [
+            '--line-number',
+            '--with-filename',
+            '--sort',
+            'path',
+            '--max-columns',
+            str(_MAX_MATCH_COLUMNS),
+            '--max-columns-preview',
+            '--context',
+            str(context),
+        ]
+        if glob is not None:
+            arguments.extend(['--glob', glob])
+        if file_type is not None:
+            arguments.extend(['--type', file_type])
+        if ignore_case:
+            arguments.append('--ignore-case')
+        if literal:
+            arguments.append('--fixed-strings')
+        arguments.extend(['--regexp', pattern, '--', target])
+        results, capped = await run_ripgrep(
+            arguments,
+            cwd=cwd,
+            limit=self._max_search_results,
+            accept=lambda record: self._match_line(cwd, record),
+        )
+        if ctx is not None:
+            await ctx.emit(self._searched(resolved, pattern, search='grep', match_count=len(results), truncated=capped))
+        if capped:
+            results.append(f'[... truncated at {self._max_search_results} lines]')
+        return '\n'.join(results) if results else 'No matches found.'
+
+    def _ripgrep_entry(self, cwd: Path, record: Record) -> str | None:
+        """Authorize a path `rg` printed and return it relative to the configured `cwd`, or `None` to drop it.
+
+        A `glob` makes ripgrep surface hidden files it would otherwise skip;
+        dropping dot-prefixed entries here keeps these walkers in step with the
+        pure-Python ones, which skip dotfiles regardless of patterns.
+        """
+        if any(part.startswith('.') for part in Path(record.path).parts if part != '.'):
+            return None
+        target = self._resolve_walk_entry(cwd / record.path)
+        return None if target is None else self._relative_to_cwd(target)
+
+    def _match_line(self, cwd: Path, record: Record) -> str | None:
+        """Rebuild ripgrep's `path:line:text` (match) or `path-line-text` (context) line for an authorized path."""
+        entry = self._ripgrep_entry(cwd, record)
+        if entry is None:
+            return None
+        digits = len(record.text) - len(record.text.lstrip('0123456789'))
+        return f'{entry}{record.text[digits : digits + 1]}{record.text}'
 
     async def create_directory(self, path: str) -> str:
         """Create a directory directly, outside an agent run."""
@@ -986,7 +1329,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: Directory path relative to the root directory.
+            path: Directory path relative to `cwd`.
 
         Returns:
             Confirmation message.
@@ -1028,7 +1371,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Get metadata about a file or directory.
 
         Args:
-            path: File or directory path relative to the root directory.
+            path: File or directory path relative to `cwd`.
 
         Returns:
             Formatted metadata including size, type, and permissions.
@@ -1038,7 +1381,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             raise FileNotFoundError(f'Path not found: {path}')
 
         # Check if the original (pre-resolve) path is a symlink
-        original = self._root / path
+        original = self._cwd / path
         is_link = original.is_symlink()
 
         stat = resolved.stat()
