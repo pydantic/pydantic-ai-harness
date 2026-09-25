@@ -8,8 +8,10 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit
 
+import anyio
 import httpx
 import pytest
+from anyio import to_thread
 from pydantic import SecretStr
 from pydantic_ai.exceptions import UserError
 
@@ -185,6 +187,29 @@ async def test_an_already_approved_app_redirecting_at_once_is_not_lost() -> None
     endpoint = TokenEndpoint(granted())
     signed = await session(endpoint, open_browser=redirects_at_once, timeout=5).sign_in()
     assert signed.access_token == SecretStr('at-1')
+
+
+async def test_cancelling_while_the_tokens_are_saved_waits_for_the_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    saving, release = threading.Event(), threading.Event()
+    order: list[str] = []
+    real_save = pkce.save_codex_credentials
+
+    def slow_save(*, account: str, value: str) -> None:
+        saving.set()
+        release.wait(5)  # As if another CLAI held the credential lock.
+        real_save(account=account, value=value)
+        order.append('saved')
+
+    monkeypatch.setattr(pkce, 'save_codex_credentials', slow_save)
+    sign_in = session(TokenEndpoint(granted()), open_browser=browser(approve))
+    async with anyio.create_task_group() as group:
+        group.start_soon(sign_in.sign_in)
+        await to_thread.run_sync(saving.wait, 5)
+        group.cancel_scope.cancel()
+        threading.Timer(0.2, release.set).start()
+    order.append('returned')
+    assert order == ['saved', 'returned']
+    assert sign_in.signed_in()
 
 
 def test_stored_tokens_hold_the_secrets_and_nothing_else_reveals_them() -> None:

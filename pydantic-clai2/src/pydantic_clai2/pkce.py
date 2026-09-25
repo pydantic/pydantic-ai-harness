@@ -17,12 +17,12 @@ token = await sign_in.token()  # per run: refreshes when close to expiry, raises
 import asyncio
 import time
 import webbrowser
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from contextlib import AbstractContextManager
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
-from anyio import fail_after
+from anyio import CancelScope, fail_after
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.providers._oauth import OAuthFlow
@@ -161,6 +161,22 @@ async def refresh(
     return renewed if renewed.refresh_token else renewed.model_copy(update={'refresh_token': tokens.refresh_token})
 
 
+async def finish_write(write: Coroutine[object, object, object]) -> None:
+    """Let a started credential write complete even when cancelled, then re-raise the cancellation.
+
+    A thread cannot be interrupted and the write is atomic, so waiting is the only way for a cancelled caller to
+    know nothing changes after it returns. The wait is shielded because an anyio cancel scope keeps cancelling
+    every await inside it, not just the first.
+    """
+    task = asyncio.ensure_future(write)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with CancelScope(shield=True):
+            await task
+        raise
+
+
 async def _until_listening(redirect_uri: str, callback: asyncio.Future[Tokens]) -> None:
     """Return once the callback server answers, or when it has already failed (to bind, usually).
 
@@ -232,7 +248,8 @@ class PKCESignIn:
     async def sign_in(self, flow: PKCEFlow | None = None, *, show: Callable[[str], object] = print) -> Tokens:
         """Open the browser and wait up to `timeout` for the callback; save and return the tokens.
 
-        `show` receives the URL to open by hand when no browser starts. Cancelling leaves any earlier sign-in.
+        `show` receives the URL to open by hand when no browser starts. Cancelling before the callback leaves any
+        earlier sign-in; once the tokens are being saved, cancelling waits for the save, so it is never half done.
         """
         if flow is not None and flow.client != self.client:
             raise ValueError(f'That sign-in attempt is for another {self.service} app.')
@@ -261,7 +278,7 @@ class PKCESignIn:
         finally:
             callback.cancel()
             await asyncio.gather(callback, return_exceptions=True)
-        await asyncio.to_thread(self._locked_save, tokens)
+        await finish_write(asyncio.to_thread(self._locked_save, tokens))
         return tokens
 
     def _locked_save(self, tokens: Tokens) -> None:
