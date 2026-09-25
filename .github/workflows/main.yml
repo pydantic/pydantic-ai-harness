@@ -36,7 +36,7 @@ jobs:
       localstack: ${{ steps.detect.outputs.localstack }}
       mongodb: ${{ steps.detect-mongodb.outputs.mongodb }}
       redis: ${{ steps.detect-redis.outputs.redis }}
-      modal: ${{ steps.detect-modal.outputs.modal }}
+      sandbox_live: ${{ steps.detect-sandbox-live.outputs.providers }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -120,40 +120,14 @@ jobs:
             echo 'redis=true' >> "$GITHUB_OUTPUT"
           fi
 
-      # A fourth step: the Modal live tier starts real, billed sandboxes, so it runs only
-      # when the Modal capability, the shared provider code and test setup it builds on, or
-      # the files that pin its dependencies change.
-      - id: detect-modal
+      # The sandbox live tests start real, billed sandboxes, one provider at a time. The
+      # script names the providers this change can affect (their own code, their SDK in
+      # `uv.lock`, the shared workspace code, or the `pydantic-ai-slim` pin) as a JSON list.
+      - id: detect-sandbox-live
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
-        run: |
-          if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
-            pydantic_ai_harness/modal_sandbox \
-            tests/modal_sandbox \
-            docs/modal-sandbox.md \
-            pydantic_ai_harness/__init__.py \
-            pydantic_ai_harness/_workspace.py \
-            pydantic_ai_harness/_workspace_provider.py \
-            pydantic_ai_harness/_warn.py \
-            'pydantic_ai_harness/coder/**' \
-            'pydantic_ai_harness/shell/**' \
-            'pydantic_ai_harness/filesystem/**' \
-            tests/conftest.py \
-            tests/_workspace.py \
-            tests/_tool_calls.py \
-            pyproject.toml \
-            uv.lock \
-            .github/workflows/main.yml
-          then
-            echo 'modal=false' >> "$GITHUB_OUTPUT"
-          else
-            status=$?
-            if [ "$status" -ne 1 ]; then
-              exit "$status"
-            fi
-            echo 'modal=true' >> "$GITHUB_OUTPUT"
-          fi
+        run: echo "providers=$(python3 scripts/sandbox_live_changes.py changed "$BASE_SHA" "$HEAD_SHA")" >> "$GITHUB_OUTPUT"
 
   clai-test:
     name: CLAI test (${{ matrix.python }})
@@ -573,42 +547,31 @@ jobs:
 
       - run: make integration-redis
 
-  modal-live:
+  sandbox-live:
     needs: [changes]
-    # Same condition as `localstack-integration`, for the same reason: MODAL_TOKEN_ID and
-    # MODAL_TOKEN_SECRET are repository secrets, so fork and Dependabot pull requests, which
-    # cannot read them, skip instead of failing. Tags always run it.
+    # Same fork and Dependabot clause as `localstack-integration`: the provider tokens are
+    # repository secrets those pull requests cannot read. `sandbox-live-nightly.yml` covers
+    # them on demand. Tags run every provider and gate the release.
     if: >-
       ${{ always()
-          && (github.ref_type == 'tag' || needs.changes.outputs.modal == 'true')
+          && (github.ref_type == 'tag' || (needs.changes.outputs.sandbox_live != '' && needs.changes.outputs.sandbox_live != '[]'))
           && (github.event_name != 'pull_request'
               || (github.event.pull_request.head.repo.full_name == github.repository
                   && github.actor != 'dependabot[bot]')) }}
-    runs-on: ubuntu-latest
-    name: Modal live tests
-    # Sandbox creation goes through Modal's control plane; bound a wedged run.
-    timeout-minutes: 15
-    env:
-      # Missing or empty Modal secrets fail the live tier instead of skipping every test.
-      MODAL_REQUIRE_LIVE: '1'
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
-        with:
-          python-version: '3.14'
-          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
-          cache-suffix: modal
-
-      - run: uv sync --locked --group dev --extra modal
-
-      - run: PYDANTIC_AI_HARNESS_MODAL_LIVE=1 uv run --no-sync pytest -m modal_live tests/modal_sandbox -q
-        env:
-          # Scoped to this step so checkout and setup never see the secrets.
-          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }} # zizmor: ignore[secrets-outside-env]
-          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }} # zizmor: ignore[secrets-outside-env]
+    # A new push to a pull request cancels its running live tests; pushes to `main` and tags
+    # always finish.
+    concurrency:
+      group: sandbox-live-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    uses: ./.github/workflows/sandbox-live.yml
+    with:
+      providers: ${{ github.ref_type == 'tag' && 'all' || needs.changes.outputs.sandbox_live }}
+    secrets:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+      DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+      SPRITE_TOKEN: ${{ secrets.SPRITE_TOKEN }}
 
   coverage:
     needs: [test]
@@ -635,7 +598,7 @@ jobs:
 
   check:
     if: always()
-    needs: [changes, lint, test, test-floor, test-latest, base-import, coverage, clai-test, clai-coverage, localstack-integration, mongodb-integration, redis-integration, modal-live]
+    needs: [changes, lint, test, test-floor, test-latest, base-import, coverage, clai-test, clai-coverage, localstack-integration, mongodb-integration, redis-integration, sandbox-live]
     runs-on: ubuntu-latest
     steps:
       - uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
@@ -645,10 +608,10 @@ jobs:
           # (no secrets there), and `changes` is skipped on tag events.
           # mongodb-integration and redis-integration are skipped only on the path
           # filter -- neither needs a secret, so both run on fork pull requests too.
-          # modal-live is skipped like localstack-integration: on the path filter and
-          # where secrets are unavailable.
+          # sandbox-live is skipped like localstack-integration: when no provider is
+          # affected and where secrets are unavailable.
           # All five still vote (block the merge) when they actually run and fail.
-          allowed-skips: changes, localstack-integration, mongodb-integration, redis-integration, modal-live
+          allowed-skips: changes, localstack-integration, mongodb-integration, redis-integration, sandbox-live
           jobs: ${{ toJSON(needs) }}
 
   release:
