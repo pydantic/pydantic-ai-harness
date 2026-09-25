@@ -10,6 +10,7 @@ import anyio
 import httpx
 import keyring
 import pytest
+from keyring.errors import KeyringError
 from pydantic import JsonValue
 
 from pydantic_clai2 import logfire_oauth
@@ -430,6 +431,22 @@ class TestDeviceAuth:
                     tasks.start_soon(client.post, RESOURCE)
         assert opened == [LINK]
         assert logfire.bearers == ['access-1'] * 3
+
+    async def test_a_sign_in_the_store_refuses_lasts_the_session(
+        self, monkeypatch: pytest.MonkeyPatch, opened: list[str]
+    ) -> None:
+        def locked(service: str, account: str, value: str) -> None:
+            raise KeyringError('locked')
+
+        monkeypatch.setattr(keyring, 'set_password', locked)
+        logfire = Logfire()
+        lines: list[str] = []
+        auth = DeviceAuth(resource=RESOURCE, read_only=True, announce=lines.append, http=logfire.client)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(logfire.handle), auth=auth) as client:
+            for _ in range(2):
+                assert (await client.post(RESOURCE)).status_code == 200
+        assert lines[-1] == 'Signed in to Logfire for this session only: saving the sign-in failed (KeyringError).'
+        assert (opened, logfire.bearers, load(RESOURCE)) == ([LINK], ['access-1', 'access-1'], None)
 
     def test_sync_clients_are_refused(self) -> None:
         auth = DeviceAuth(resource=RESOURCE, read_only=True, announce=print)
