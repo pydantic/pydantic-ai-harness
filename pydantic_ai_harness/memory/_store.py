@@ -500,11 +500,13 @@ class FileStore:
         return posixpath.join(root, path)
 
     @staticmethod
-    async def _confine(workspace: Workspace, root: str, target: str, path: str) -> None:
-        """Refuse a mutation whose target leaves the store directory through a symlink."""
+    async def _confine(workspace: Workspace, root: str, target: str, path: str) -> str:
+        """Return `target` with symlinks resolved, refusing one that leaves the store directory."""
         real_root = await workspace.realpath(root)
-        if not (await workspace.realpath(target)).startswith(real_root.rstrip('/') + '/'):
+        real_target = await workspace.realpath(target)
+        if not real_target.startswith(real_root.rstrip('/') + '/'):
             raise ValueError(f'memory path {path!r} resolves outside the store directory')
+        return real_target
 
     @staticmethod
     async def _content(workspace: Workspace, target: str) -> str | None:
@@ -555,7 +557,8 @@ class FileStore:
             raise ValueError('max_chars must be positive')
         workspace = self._workspace()
         root = await self._root(workspace)
-        content = await self._content(workspace, self._target(root, path))
+        target = await self._confine(workspace, root, self._target(root, path), path)
+        content = await self._content(workspace, target)
         if content is None:
             return None
         version = content_version(content)

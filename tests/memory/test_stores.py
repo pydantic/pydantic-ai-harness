@@ -390,6 +390,16 @@ async def test_file_store_rejects_symlink_escape(tmp_path: Path) -> None:
     assert not (outside / 'escape.md').exists()
 
 
+async def test_file_store_refuses_to_read_through_a_symlink_escape(tmp_path: Path) -> None:
+    root = tmp_path / 'root'
+    (root / 'scope').mkdir(parents=True)
+    (tmp_path / 'secret.txt').write_text('secret')
+    os.symlink(tmp_path / 'secret.txt', root / 'scope' / 'MEMORY.md')
+
+    with pytest.raises(ValueError, match='outside the store directory'):
+        await FileStore('.', workspace=LocalWorkspaceBackend(root)).read('scope/MEMORY.md', max_chars=100)
+
+
 async def test_file_store_needs_a_workspace(tmp_path: Path) -> None:
     with pytest.raises(UserError, match='`FileStore` has no workspace'):
         await FileStore('memory').read('main.md', max_chars=10)
