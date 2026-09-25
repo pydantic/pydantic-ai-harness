@@ -115,9 +115,33 @@ async def delete_sandbox(ref: WorkspaceRef) -> None:
     await backend.aclose()
 ```
 
-`get_client()` returns the `daytona.AsyncSandbox`, and `aclose()` closes the Daytona client the backend opened. If a run fails before it returns, you never get the ref: find the sandbox in the Daytona dashboard and delete it there.
+`get_client()` returns the `daytona.AsyncSandbox`, and `aclose()` closes the Daytona client the backend opened.
 
 By default, Daytona stops a sandbox after 15 idle minutes (a later run starts it again); set `auto_stop_interval=` to a smaller number of minutes to stop it sooner. A stopped sandbox keeps its disk, is archived after 7 days, and is never deleted. See [Daytona's SDK docs](https://www.daytona.io/docs/en/python-sdk/async/async-daytona/).
+
+A failed run returns no result, so there is no ref to store. To terminate its sandbox, clean up in an `on_run_error` hook; `after_run` doesn't run when a run fails:
+
+```python
+from typing import Any
+
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import Hooks
+from pydantic_ai.run import AgentRunResult
+from pydantic_ai_harness.coder import Coder
+from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
+
+hooks = Hooks()
+
+
+@hooks.on.run_error
+async def terminate_failed_run(ctx: RunContext[None], *, error: BaseException) -> AgentRunResult[Any]:
+    if ctx.workspace.ref is not None:
+        await delete_sandbox(ctx.workspace.ref)
+    raise error
+
+
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(), Coder(), hooks])
+```
 
 ## Configuration
 
@@ -137,15 +161,16 @@ Under [Temporal](https://pydantic.dev/docs/ai/capabilities/durable_execution/tem
 ```python {names="defined"}
 from daytona import AsyncDaytona
 from pydantic_ai import Agent
-from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
 
 
 async def run_worker() -> None:
     async with AsyncDaytona() as client:
-        agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(client=client), Coder()])
+        agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(client=client)])
         ...  # wrap `agent` for Temporal and start the worker
 ```
+
+`Coder`, `Shell`, and `FileSystem` work under DBOS, but not yet under Temporal or Prefect.
 
 See [Workspaces: Durable execution](https://pydantic.dev/docs/ai/core-concepts/workspace/#durable-execution) for how workspaces work under durable engines.
 
