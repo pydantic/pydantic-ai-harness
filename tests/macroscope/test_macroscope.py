@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import time
 from collections.abc import Sequence
@@ -207,11 +208,12 @@ class TestRunReview:
         assert _recorded_args(command) == ['codereview', '--raw']
 
     async def test_exec_failure_reports_cli_output(self, tmp_path: Path) -> None:
-        # The binary is on PATH but cannot run (bad interpreter): `sh`'s reason reaches the model.
+        # The binary exists but cannot run (bad interpreter): `sh`'s reason, which names the binary, reaches
+        # the model. The wording differs by shell (`bad interpreter` on macOS, `not found` from dash).
         script = tmp_path / 'macroscope'
         script.write_text('#!/nonexistent/interpreter\n')
         script.chmod(0o755)
-        with pytest.raises(ModelRetry, match='did not start(?s:.*)bad interpreter'):
+        with pytest.raises(ModelRetry, match=f'did not start(?s:.*)CLI output:\\n.*{re.escape(str(script))}'):
             await _toolset(str(script)).run_macroscope_review(_ctx(tmp_path))
 
     async def test_workspace_failure_fails_the_call(self, tmp_path: Path) -> None:
