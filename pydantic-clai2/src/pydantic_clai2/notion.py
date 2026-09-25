@@ -21,7 +21,7 @@ from .api_keys import KeyReference, load_keys, prompt_api_key, resolve_key, save
 from .commands import Command
 from .credential_store import delete_credentials, load_codex_credentials
 from .mcp import OAUTH_TIMEOUT, TokenStore, browser_sign_in, http_client
-from .plugins import DepsT, PluginHost
+from .plugins import DepsT, PluginHost, SessionStart
 
 NOTION_MCP_URL = 'https://mcp.notion.com/mcp'
 KEY_NAME = 'NOTION_API_KEY'
@@ -63,8 +63,15 @@ def selected_key() -> KeyReference | None:
 def activate(host: PluginHost[DepsT]) -> None:
     """Choose the connection per run, so `/notion key` and `/notion logout` apply without a reload."""
     settings = host.settings(NotionSettings)
-    if settings.auth == 'key' and selected_key() is None:
-        host.console.print('Notion: no key selected, so runs fail until you choose one with /notion key.', markup=False)
+    if settings.auth == 'key':
+
+        @host.on('session_start')
+        async def warn_without_key(_: SessionStart) -> None:  # pyright: ignore[reportUnusedFunction]
+            # A handler rather than `activate` itself, so the keyring read does not block the shell's loop.
+            if await asyncio.to_thread(selected_key) is None:
+                host.console.print(
+                    'Notion: no key selected, so runs fail until you choose one with /notion key.', markup=False
+                )
 
     async def connect(_: RunContext[DepsT]) -> Notion[DepsT]:
         reference = None if settings.auth == 'oauth' else await asyncio.to_thread(selected_key)

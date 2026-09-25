@@ -159,12 +159,17 @@ async def test_cancelled_or_empty_entry_changes_nothing(tmp_path: Path, monkeypa
     await shell.plugins.close('exit')
 
 
-async def test_key_mode_never_opens_a_browser(tmp_path: Path) -> None:
+async def test_key_mode_never_opens_a_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     shell = Shell(tmp_path)
     await shell.plugins.command(['add', 'notion', 'pydantic_clai2.notion', '{"auth": "key"}'])
-    assert 'no key selected' in shell.output.getvalue()
+    assert shell.output.getvalue().count('no key selected') == 1
     with pytest.raises(UserError, match='No Notion key is selected'):
         await shell.built()
+    answer(monkeypatch, 'ntn-token')
+    await shell.run('/notion key')
+    await shell.plugins.reload('notion')
+    assert shell.output.getvalue().count('no key selected') == 1, 'a chosen key silences the warning'
+    assert (await shell.built()).auth == 'ntn-token'
     await shell.plugins.close('exit')
 
 
