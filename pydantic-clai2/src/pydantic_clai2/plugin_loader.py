@@ -13,6 +13,7 @@ from typing import Generic
 
 from anyio import CancelScope, fail_after
 from anyio.lowlevel import checkpoint
+from pydantic import JsonValue
 from pydantic_ai import AgentStreamEvent
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from rich.console import Console
@@ -38,6 +39,13 @@ from .spinners import Spinner
 from .status import Status, StatusSegment
 
 _FOLDER_PACKAGE = 'pydantic_clai2_plugins'
+
+_RETIRED_BUILTINS: dict[str, PluginSettings] = {
+    'google_workspace': PluginSettings(
+        id='google_workspace', factory='pydantic_ai_harness.google_workspace:GoogleWorkspace', enabled=False
+    ),
+}
+"""Former built-in declarations. A stored copy of one loads the built-in now declared under its id."""
 
 
 class PluginError(Exception):
@@ -131,7 +139,7 @@ class PluginLoader(Generic[DepsT]):
     def entries(self) -> list[PluginEntry[DepsT]]:
         """Saved declarations plus drop-in files, keeping the loaded state of each."""
         folder = self._discover()
-        declared = {declaration.id: declaration for declaration in self._store.plugins()}
+        declared = {declaration.id: self._upgrade(declaration) for declaration in self._store.plugins()}
         for name in folder.keys() - declared.keys():
             declared[name] = PluginSettings(id=name, factory=name, path=str(folder[name]))
         for shipped in (self._project, self._builtin):
@@ -154,6 +162,17 @@ class PluginLoader(Generic[DepsT]):
                 refreshed[name] = previous
         self._entries = refreshed
         return list(refreshed.values())
+
+    def _upgrade(self, saved: PluginSettings) -> PluginSettings:
+        """Point a stored copy of a built-in that CLAI has since replaced at the replacement.
+
+        Enabling a built-in saves its whole declaration, so without this an upgrade would keep
+        loading the old factory. Declarations with their own settings are left as the user wrote them.
+        """
+        current = self._builtin.get(saved.id)
+        if current is None or not _same_plugin(saved, _RETIRED_BUILTINS.get(saved.id)):
+            return saved
+        return current.model_copy(update={'enabled': saved.enabled})
 
     def _registration_order(self) -> list[PluginEntry[DepsT]]:
         """Shipped plugins first, in declaration order, then everything else by name.
@@ -231,6 +250,7 @@ class PluginLoader(Generic[DepsT]):
             full_screen=self._full_screen,
             conversation=self._conversation,
             status=self._status,
+            persist=lambda settings: self._save_settings(name, settings),
         )
         try:
             module = self._import(entry, fresh=fresh)
@@ -281,6 +301,16 @@ class PluginLoader(Generic[DepsT]):
             self._console.print(str(PluginError(name, exc)), style=theme.color(theme.ERROR), markup=False)
         finally:
             self._drop(entry)
+
+    def _save_settings(self, name: str, settings: dict[str, JsonValue]) -> None:
+        """Store a loaded plugin's edited settings on its current declaration, keeping everything else.
+
+        Updates the cached entry in place rather than calling `entries()`: a rebuild during `load`
+        would copy the host onto a new entry that a failed load's cleanup never sees.
+        """
+        entry = self._entries[name]
+        entry.declaration = entry.declaration.model_copy(update={'settings': settings})
+        self._store.save_plugin(entry.declaration)
 
     def _drop(self, entry: PluginEntry[DepsT]) -> None:
         if entry.host is not None:
