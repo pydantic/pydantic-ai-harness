@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field
@@ -35,6 +36,8 @@ from pydantic_ai_harness.tool_output_limits._payload import (
     truncate_text,
 )
 from pydantic_ai_harness.tool_output_limits._store import LocalFileStore, OverflowStore
+
+logger = logging.getLogger(__name__)
 
 READ_TOOL_NAME = 'read_tool_result'
 """Name of the registered read-back tool. Its own returns are exempt from reduction."""
@@ -406,7 +409,14 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         key = _handle_key(ctx, call, unit.suffix)
         try:
             handle = await self._store.write(key, unit.data)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                'Spilling output of tool %r failed (%s); falling back to %s',
+                call.tool_name,
+                type(exc).__name__,
+                _fallback_label(action.then),
+                exc_info=exc,
+            )
             return await self._fallback(ctx, call, action.then, unit)
 
         preview = _build_spill_preview(handle, unit, action.preview_chars, over_tokens=self.over_tokens)
@@ -433,7 +443,14 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
             # A misconfiguration -- e.g. a realtime run with no summarizer `model=` (#585) -- is
             # the user's to fix, not something to mask by silently truncating instead.
             raise
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                'Summarizing output of tool %r failed (%s); falling back to %s',
+                call.tool_name,
+                type(exc).__name__,
+                _fallback_label(action.then),
+                exc_info=exc,
+            )
             return await self._fallback(ctx, call, action.then, unit)
         return summary, None
 
@@ -525,6 +542,11 @@ def _select_action(bands: Sequence[Band], size: int) -> Action | None:
         if size >= band.over:
             return band.action
     return None
+
+
+def _fallback_label(then: Action | None) -> str:
+    """Name the fallback action for a log line; `None` keeps the output unchanged."""
+    return 'the unreduced output' if then is None else type(then).__name__
 
 
 def _handle_key(ctx: RunContext[AgentDepsT], call: ToolCallPart, suffix: str = '') -> str:
