@@ -46,6 +46,9 @@ creation = CapabilityCreation(directory=Path('.authored'))
 agent = Agent('anthropic:claude-sonnet-5', capabilities=[LocalWorkspace('.'), creation])
 ```
 
+`directory` is a path on the machine running the agent, relative to the process's current
+directory, not a workspace path.
+
 `CapabilityCreation` also contributes static, cache-stable system-prompt guidance
 explaining these tools. Leave `guidance=None` for the default text, or pass your own
 string; set `guidance=''` to omit it entirely.

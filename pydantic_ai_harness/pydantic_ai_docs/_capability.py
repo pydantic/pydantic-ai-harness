@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pydantic_ai._utils import replace_no_init  # pyright: ignore[reportPrivateUsage]
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AgentToolset
@@ -49,11 +50,12 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
     from pathlib import Path
 
     from pydantic_ai import Agent
+    from pydantic_ai.capabilities import LocalWorkspace
     from pydantic_ai_harness.pydantic_ai_docs import PydanticAIDocs
 
     agent = Agent(
         'anthropic:claude-sonnet-4-6',
-        capabilities=[PydanticAIDocs(local_docs_path=Path('/workspace/pydantic-ai/docs'))],
+        capabilities=[LocalWorkspace('.'), PydanticAIDocs(local_docs_path=Path('/workspace/pydantic-ai/docs'))],
     )
     ```
     """
@@ -86,7 +88,9 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> PydanticAIDocs[AgentDepsT]:
         """Return a fresh per-run cache so workspace-local content cannot cross runs."""
-        return replace(self)
+        run = replace_no_init(self)
+        run._cache = {}
+        return run
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Fail the run at its start when a local checkout is configured but no workspace holds it."""

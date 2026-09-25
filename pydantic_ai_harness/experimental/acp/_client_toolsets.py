@@ -1,10 +1,9 @@
 """Filesystem and shell tools that route through the ACP client instead of local disk/processes.
 
 The local [`FileSystem`][pydantic_ai_harness.FileSystem] and [`Shell`][pydantic_ai_harness.Shell]
-capabilities operate on the agent process's own disk and subprocesses. In an editor, that misses
-the source of truth: unsaved buffers, the file layout the editor (not the launching shell)
-considers the workspace, and -- for a remote or containerized editor -- the machine the code
-actually lives on. ACP lets the agent ask the *client* to do the I/O: `fs/read_text_file` /
+capabilities act in the run's workspace. In an editor, that misses the source of truth: unsaved
+buffers, the file layout the editor (not the launching shell) considers the workspace, and -- for
+a remote or containerized editor -- the machine the code actually lives on. ACP lets the agent ask the *client* to do the I/O: `fs/read_text_file` /
 `fs/write_text_file` for files, and the terminal lifecycle (`terminal/create`, `terminal/output`,
 `terminal/wait_for_exit`, `terminal/release`) for commands.
 

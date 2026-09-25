@@ -29,7 +29,7 @@ A "hook" is not a standalone object in pydantic-ai -- it is a method on a capabi
 
 ## Usage
 
-Construct `CapabilityCreation` with a `directory` for the authored files, then add it to the agent's `capabilities`:
+Construct `CapabilityCreation` with a `directory` for the authored files, then add it to the agent's `capabilities`. `directory` is a path on the machine running the agent, relative to the process's current directory, not a workspace path.
 
 ```python
 from pathlib import Path

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from pydantic_ai._utils import replace_no_init  # pyright: ignore[reportPrivateUsage]
 from pydantic_ai.capabilities import AbstractCapability, on_event
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
@@ -148,11 +149,15 @@ class RepoContext(AbstractCapability[AgentDepsT]):
             warnings.warn(_TRAVERSAL_DEPRECATION, HarnessDeprecationWarning, stacklevel=2)
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> RepoContext[AgentDepsT]:
-        """Return a fresh per-run instance with isolated traversal/cache state."""
-        # Construction already warned about any deprecated arguments; the copy must not repeat it.
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', HarnessDeprecationWarning)
-            return replace(self)
+        """Return a fresh per-run instance with isolated traversal/cache state.
+
+        The copy skips `__post_init__`, so deprecated arguments warned about at construction are not warned again.
+        """
+        run = replace_no_init(self)
+        run._context_files = None
+        run._seen_dirs = set()
+        run._resolved_workspace_dir = None
+        return run
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Fail without a workspace, and load walk-up instruction files so `get_instructions` is sync."""

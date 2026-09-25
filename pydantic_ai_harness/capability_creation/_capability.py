@@ -66,7 +66,10 @@ class CapabilityCreation(AbstractCapability[AgentDepsT]):
     """
 
     directory: Path
-    """Directory holding the authored `<name>.py` files and the `manifest.json` index."""
+    """Directory holding the authored `<name>.py` files and the `manifest.json` index.
+
+    A path on the machine running the agent, relative to the process's current directory, not a workspace path.
+    """
 
     guidance: str | None = None
     """Static system-prompt guidance on authoring. Cache-stable. Leave `None` for the
