@@ -2,6 +2,7 @@
 
 import inspect
 import io
+from dataclasses import replace
 from pathlib import Path
 
 import anyio
@@ -18,7 +19,7 @@ from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.notion import Notion
 from rich.console import Console
 from termflow.tui import MenuItem  # pyright: ignore[reportMissingTypeStubs]
-from termflow.tui.menu import MenuResult  # pyright: ignore[reportMissingTypeStubs]
+from termflow.tui.menu import Menu, MenuResult  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.textinput import TextInputResult  # pyright: ignore[reportMissingTypeStubs]
 
 from pydantic_clai2 import DEFAULT_PLUGINS, api_keys, notion
@@ -184,6 +185,25 @@ async def test_entering_a_new_value_asks_before_replacing_a_shared_key(
     message = await shell.loader.configure('notion')
     assert (message != 'Notion settings unchanged.') == (value == 'ntn-new')
     assert api_keys.load_keys()['NOTION_API_KEY'].get_secret_value() == value
+
+
+async def test_a_key_another_session_replaces_during_confirmation_is_not_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api_keys.save_key(name='NOTION_API_KEY', value='ntn-old')
+    shell = Shell(tmp_path)
+    await shell.loader.enable('notion')
+    shown = script(monkeypatch, lists=[pick('key')], texts=[typed('ntn-mine')], keys=('down', 'enter'))
+
+    def other_session_writes_then_confirm(menu: Menu) -> MenuResult:
+        api_keys.save_key(name='NOTION_API_KEY', value='ntn-theirs')
+        return pick(True)
+
+    monkeypatch.setattr(notion, 'RUNNERS', replace(shown.runners, run_choice=other_session_writes_then_confirm))
+    with pytest.raises(ValueError, match='changed in another CLAI session'):
+        await shell.loader.configure('notion')
+    assert api_keys.load_keys()['NOTION_API_KEY'].get_secret_value() == 'ntn-theirs'
+    assert load_codex_credentials(account='notion') is None
 
 
 @pytest.mark.parametrize('entry', [CANCEL, typed('   ')])

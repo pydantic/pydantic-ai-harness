@@ -49,9 +49,11 @@ async def choose_key(*, name: str, label: str, runners: Runners) -> KeyReference
     value = choice.strip()
     if not value:
         return None
-    if name in await asyncio.to_thread(load_keys) and not await run_worker(lambda: _confirm_replace(name, runners)):
+    replacing = (await asyncio.to_thread(load_keys)).get(name)
+    if replacing is not None and not await run_worker(lambda: _confirm_replace(name, runners)):
         return None
-    await asyncio.to_thread(save_key, name=name, value=value)
+    # `expected` makes the save refuse if another session wrote `name` since the user decided.
+    await asyncio.to_thread(save_key, name=name, value=value, expected=replacing)
     return KeyReference(name=name)
 
 
