@@ -218,3 +218,17 @@ async def test_cancelling_configure_stops_a_silent_login(
                 await anyio.sleep(0.02)
             tasks.cancel_scope.cancel()
     assert shell.login() == 'key'
+
+
+async def test_a_stalled_check_after_sign_in_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh
+) -> None:
+    monkeypatch.setattr('pydantic_clai2.gh_cli.TOKEN_TIMEOUT', 0.5)
+    fake_gh.next_login('stall-token')
+    shell = Shell(tmp_path, {'login': 'key'})
+    await shell.loader.enable('github')
+    script(monkeypatch, [pick('gh'), pick(FINISHED)])
+    assert await shell.loader.configure('github') == (
+        'Signed in to GitHub as octocat.\ngh auth token did not answer within 0.5 seconds.'
+    )
+    assert shell.login() == 'key'

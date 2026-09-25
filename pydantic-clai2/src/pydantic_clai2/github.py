@@ -309,23 +309,22 @@ async def _configure(source: GitHubSource[DepsT]) -> str:
 def _sign_in_with_gh(source: GitHubSource[DepsT]) -> list[str]:
     """Use `gh`'s login for the configured host, signing in through the browser when it has none."""
     hostname = gh_host(source.settings.url)
-    try:
-        signed_in = gh_token(hostname) is not None
-    except UserError as exc:
-        return [str(exc)]
     messages: list[str] = []
-    if not signed_in:
-        login = start_login(hostname, stopping=worker_stopping)
-        if login is None:
-            return []
-        if isinstance(login, str):
-            return [login]
-        if not _wait_for_browser(login):
-            login.cancel()
-            return []
-        messages.append(login.finish())
+    try:
         if gh_token(hostname) is None:
-            return messages
+            login = start_login(hostname, stopping=worker_stopping)
+            if login is None:
+                return []
+            if isinstance(login, str):
+                return [login]
+            if not _wait_for_browser(login):
+                login.cancel()
+                return []
+            messages.append(login.finish())
+            if gh_token(hostname) is None:
+                return messages
+    except UserError as exc:
+        return [*messages, str(exc)]
     source.save(source.settings.model_copy(update={'login': 'gh'}))
     return [*messages, f'GitHub uses your GitHub CLI login for {hostname}.']
 

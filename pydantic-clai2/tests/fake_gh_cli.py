@@ -35,4 +35,6 @@ elif mode == 'fail':
 elif mode == 'no-token':
     sys.exit(0)
 (state / host).write_text('gho_browser')
+if mode == 'stall-token':
+    (state / 'token-hang').write_text('')
 print('Authentication complete.\nLogged in as octocat', file=sys.stderr)

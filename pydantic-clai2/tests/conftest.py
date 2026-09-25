@@ -27,7 +27,7 @@ class FakeGh:
         (self.state / host).write_text(token)
 
     def next_login(self, mode: str) -> None:
-        """`ok`, `fail`, `hang` (after the code), `silent` (before it), `early`, or `no-token`."""
+        """`ok`, `fail`, `hang` (after the code), `silent` (before it), `early`, `no-token`, or `stall-token` (then `auth token` hangs)."""
         (self.state / 'login').write_text(mode)
 
     def hang_on_token(self) -> None:
