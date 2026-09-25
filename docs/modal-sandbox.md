@@ -75,7 +75,10 @@ available.
 By default, each agent run creates an owned sandbox and requests its termination
 when the run exits, so expect a cold-start cost per run. Teardown waits for
 confirmation for a bounded period; if the control plane does not respond,
-`sandbox_timeout` remains the server-side cleanup backstop. The sandbox is
+`sandbox_timeout` remains the server-side cleanup backstop. A terminate or detach
+call that fails or times out does not raise, but is logged at warning level on the
+`pydantic_ai_harness.modal_sandbox` logger, since the sandbox may keep running
+until `sandbox_timeout`. The sandbox is
 provisioned when the run enters the capability toolset, even if no sandbox tool
 is called. Deferred tool loading controls which tool definitions reach the
 model; it does not defer toolset lifecycle.

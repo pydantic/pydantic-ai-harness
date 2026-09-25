@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import posixpath
 import time
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
 # Defaults shared by `ModalSandboxSession` and `ModalSandbox` (which imports them), so the
 # two public constructors cannot drift: a setting is "left at its default" iff it equals
 # the constant here.
+logger = logging.getLogger(__name__)
+
 DEFAULT_IMAGE = 'python:3.12-slim'
 DEFAULT_APP_NAME = 'pydantic-ai-harness'
 DEFAULT_SANDBOX_TIMEOUT = 300
@@ -297,6 +300,7 @@ class ModalSandboxSession:
         if sandbox is None:
             return
         owned = self._sandbox_id is None
+        sandbox_id = sandbox.object_id
         # Shield cleanup so cancellation does not interrupt the termination request. Stop a
         # sandbox we created; an attached one keeps running. Attempt detach in `finally` --
         # Modal's recommended cleanup -- even if terminating the owned sandbox fails.
@@ -307,26 +311,35 @@ class ModalSandboxSession:
                 if owned:
                     # Bound each RPC independently so a stalled terminate still lets detach run;
                     # a single shared deadline would cancel the detach the moment terminate hung.
-                    with anyio.move_on_after(_TEARDOWN_TIMEOUT):
+                    with anyio.move_on_after(_TEARDOWN_TIMEOUT) as terminate_scope:
                         try:
                             await sandbox.terminate.aio(wait=True)
-                        except Exception:
-                            # Termination is best-effort. A sandbox that no longer exists is
-                            # success, not an error: an owned run that outlived its
-                            # `sandbox_timeout` self-terminates. Any other failure (control
-                            # plane, transport) must not replace the exception unwinding
-                            # through the `async with` body (an exception from `__aexit__`
-                            # would mask it), and the server-side `sandbox_timeout` reaps the
-                            # sandbox regardless.
+                        except _unavailable_sandbox_exc_types():
+                            # A sandbox that no longer exists is success, not an error: an owned
+                            # run that outlived its `sandbox_timeout` self-terminates.
                             pass
+                        except Exception as exc:
+                            # Termination is best-effort. Any other failure (control plane,
+                            # transport) must not replace the exception unwinding through the
+                            # `async with` body (an exception from `__aexit__` would mask it),
+                            # and the server-side `sandbox_timeout` reaps the sandbox regardless.
+                            # The sandbox may still be running and billed until then, so tell the
+                            # operator.
+                            logger.warning('Failed to terminate Modal sandbox %r', sandbox_id, exc_info=exc)
+                    if terminate_scope.cancelled_caught:
+                        logger.warning(
+                            'Timed out after %ss terminating Modal sandbox %r', _TEARDOWN_TIMEOUT, sandbox_id
+                        )
             finally:
-                with anyio.move_on_after(_TEARDOWN_TIMEOUT):
+                with anyio.move_on_after(_TEARDOWN_TIMEOUT) as detach_scope:
                     try:
                         await sandbox.detach.aio()  # pyright: ignore[reportUnknownMemberType]
-                    except Exception:
+                    except Exception as exc:
                         # Best-effort like terminate: a failed local detach must not replace
                         # the exception unwinding through the body.
-                        pass
+                        logger.warning('Failed to detach from Modal sandbox %r', sandbox_id, exc_info=exc)
+                if detach_scope.cancelled_caught:
+                    logger.warning('Timed out after %ss detaching from Modal sandbox %r', _TEARDOWN_TIMEOUT, sandbox_id)
 
     def _require_sandbox(self) -> modal.Sandbox:
         sandbox = self._sandbox

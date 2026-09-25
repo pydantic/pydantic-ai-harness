@@ -111,7 +111,10 @@ Failures split into two kinds:
 By default the capability is **owned**: each run creates a fresh sandbox and
 requests its termination when the run ends. Teardown waits for confirmation for
 a bounded period; if Modal's control plane does not respond, `sandbox_timeout`
-remains the server-side cleanup backstop. Each owned run spins up its own sandbox,
+remains the server-side cleanup backstop. A terminate or detach call that fails or
+times out does not raise, but is logged at warning level on the
+`pydantic_ai_harness.modal_sandbox` logger, since the sandbox may keep running
+until `sandbox_timeout`. Each owned run spins up its own sandbox,
 so expect a cold-start cost per run. There are two ways to reuse one.
 
 The sandbox is provisioned when a run enters the capability toolset, even if the
