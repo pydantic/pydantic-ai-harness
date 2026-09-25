@@ -104,7 +104,7 @@ image = modal.Image.debian_slim(python_version='3.12').apt_install('git')
 agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(image=image), Coder()])
 
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
-ref = result.workspace.ref  # store it, e.g. in your database
+ref = result.workspace.ref  # store this, e.g. in your database
 
 later = agent.run_sync('Which capability would you add next, and where would it live?', workspace=ref)
 ```
