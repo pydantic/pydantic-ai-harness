@@ -271,11 +271,10 @@ class SlackSource(Generic[DepsT]):
         if row.key == 'token':
             delete_credentials(account=_ACCOUNT)
             return 'Slack no longer uses a key from /keys; its tools are off until you choose one.'
-        if row.key in ('client_id', 'account'):
-            if session := self.session():
-                session.sign_out()
-            if row.key == 'account':
-                return 'Signed out of Slack; its tools are off until you sign in again.'
+        if row.key in ('client_id', 'account') and (session := self.session()):
+            session.sign_out()
+        if row.key == 'account':  # Not a setting: signing out is all there is to reset.
+            return 'Signed out of Slack; its tools are off until you sign in again.'
         data = self.settings.model_dump()
         del data[row.key]
         self._host.save_settings(SlackSettings.model_validate(data))
@@ -299,7 +298,11 @@ class SlackSource(Generic[DepsT]):
             return 'invalid; choose again'
         if connection is None:
             return 'choose a key'
-        return '' if connection.token.name in load_keys() else 'missing from /keys'
+        try:
+            keys = load_keys()
+        except UserError:  # The menu must still open, so the user can pick another sign-in.
+            return '/keys is unreadable'
+        return '' if connection.token.name in keys else 'missing from /keys'
 
 
 async def configure_menu(source: SlackSource[DepsT]) -> str:

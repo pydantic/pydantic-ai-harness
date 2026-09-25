@@ -206,6 +206,9 @@ async def test_rows_show_the_token_state_and_validate_options() -> None:
     assert source.rows()[1].note == 'missing from /keys'
     assert source.current(source.rows()[1]) == 'GONE'
 
+    save_codex_credentials(account='api-keys', value='not a key bundle')
+    assert source.rows()[1].note == '/keys is unreadable'  # The menu still opens, to choose another sign-in.
+
     save_codex_credentials(account='slack', value='{"token": "xoxp-inline"}')
     assert source.rows()[1].note == 'invalid; choose again'
     assert source.current(source.rows()[1]) == '(invalid)'

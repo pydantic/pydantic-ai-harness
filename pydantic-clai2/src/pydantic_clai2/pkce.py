@@ -19,7 +19,7 @@ import time
 import webbrowser
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 from anyio import fail_after
@@ -128,7 +128,12 @@ class PKCEFlow(OAuthFlow[Tokens]):
         }
         if scope:
             params['scope'] = scope
-        return f'{self.client.authorize_url}?{urlencode(self._merge_extra_params(params, extra_params))}'
+        base = urlsplit(self.client.authorize_url)
+        query = [
+            *parse_qsl(base.query, keep_blank_values=True),
+            *self._merge_extra_params(params, extra_params).items(),
+        ]
+        return urlunsplit(base._replace(query=urlencode(query)))
 
     async def exchange_code(self, code: str) -> Tokens:
         """Trade the callback's code for tokens, proving possession with the PKCE verifier instead of a secret."""
@@ -215,6 +220,8 @@ class PKCESignIn:
 
         `show` receives the URL to open by hand when no browser starts. Cancelling leaves any earlier sign-in.
         """
+        if flow is not None and flow.client != self.client:
+            raise ValueError(f'That sign-in attempt is for another {self.service} app.')
         flow = flow or self.start()
         url = flow.authorization_url()
         try:

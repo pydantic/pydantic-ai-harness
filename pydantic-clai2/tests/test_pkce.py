@@ -6,7 +6,7 @@ import time
 import webbrowser
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit
 
 import httpx
 import pytest
@@ -145,6 +145,20 @@ def test_authorization_url_carries_pkce_and_the_clients_scopes() -> None:
     assert 'scope=other' in flow.authorization_url(scope='other')
     with pytest.raises(UserError, match='cannot override state'):
         flow.authorization_url(extra_params={'state': 'forged'})
+
+
+def test_authorization_url_keeps_a_query_the_authorize_url_already_has() -> None:
+    app = client().model_copy(update={'authorize_url': 'https://auth.example/authorize?team=T1&empty='})
+    url = PKCEFlow(app, service='Example').authorization_url()
+    assert url.count('?') == 1
+    params = parse_qs(urlsplit(url).query, keep_blank_values=True)
+    assert params['team'] == ['T1'] and params['empty'] == [''] and params['client_id'] == ['app-1']
+
+
+async def test_a_flow_started_for_another_app_is_refused() -> None:
+    other = PKCEFlow(client(client_id='app-2'), service='Example')
+    with pytest.raises(ValueError, match='another Example app'):
+        await session(TokenEndpoint()).sign_in(other)
 
 
 async def test_sign_in_proves_the_verifier_without_a_secret_and_stores_the_tokens() -> None:

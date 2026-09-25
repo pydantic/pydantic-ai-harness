@@ -227,6 +227,16 @@ async def test_rows_show_what_the_browser_sign_in_needs_next() -> None:
     await app.plugins.close('exit')
 
 
+async def test_signing_out_with_no_app_set_up_just_says_so() -> None:
+    app = await shell()
+    app.host().save_settings(slack_plugin.SlackSettings(auth='browser'))
+    source = app.source()
+    _, _, account, *_ = source.rows()
+    assert source.reset(account) == 'Signed out of Slack; its tools are off until you sign in again.'
+    assert source.settings == slack_plugin.SlackSettings(auth='browser')
+    await app.plugins.close('exit')
+
+
 async def test_signing_in_needs_the_app_first(monkeypatch: pytest.MonkeyPatch) -> None:
     app = await shell()
     app.host().save_settings(slack_plugin.SlackSettings(auth='browser'))
