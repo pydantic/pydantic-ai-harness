@@ -47,7 +47,7 @@ _SUBTASK_GUIDANCE = (
 
 @dataclass
 class Planning(AbstractCapability[AgentDepsT]):
-    """Structured task planning that never invalidates the prompt cache.
+    """Structured task planning that keeps the cached prefix stable.
 
     The model owns the plan through a small toolset (`write_plan`, `read_plan`,
     `add_task`, `update_task_status`, `update_task_statuses`, `remove_task`, and

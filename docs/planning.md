@@ -5,7 +5,7 @@ description: "Give a Pydantic AI agent a todo list it plans and updates itself, 
 
 # Planning
 
-`Planning` gives the model a structured, self-updating task list through a small toolset -- and surfaces the current plan back to the model every turn without ever invalidating the prompt cache. It can stay in memory for a single run or persist to SQLite/Postgres, break steps into subtasks with dependencies, and emit events from granular changes.
+`Planning` gives the model a structured, self-updating task list through a small toolset -- and surfaces the current plan back to the model every turn without touching the cached prefix. It can stay in memory for a single run or persist to SQLite/Postgres, break steps into subtasks with dependencies, and emit events from granular changes.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/planning/)
 
@@ -33,9 +33,11 @@ Long agentic runs drift: the model loses track of what it set out to do and what
 The model owns the plan through the `planning` toolset. The current plan is surfaced back as an ephemeral reminder appended to the tail of each request, with the single cache breakpoint anchored on the last durable user content:
 
 - The reminder is added after the durable history is persisted, so it reaches the model but is never written to `message_history`. No reminders accumulate across turns.
-- The `CachePoint` sits on the last durable user content, so the prefix it saves is a prefix of the next request and cache hits survive turn over turn. The reminder carries no breakpoint, so re-sending its mutable content never invalidates the cache.
+- The `CachePoint` sits on the last durable user content, so the prefix it saves is a prefix of the next request and cache hits survive turn over turn. The reminder carries no breakpoint, so re-sending its mutable content never invalidates that prefix.
 
 As with all capability cache breakpoints, provider mapping applies: OpenAI models only receive the `CachePoint` when the model profile enables explicit cache control, and with no durable user content to anchor on the reminder is sent without a breakpoint.
+
+The guarantee covers the prefix up to that `CachePoint`, not a cache entry written past it. Anthropic automatic caching places its breakpoint on the last block of the request, which is the reminder, and OpenAI server-side prefix caching matches as far as the bytes agree. Once a plan exists, the reminder that ended one request is gone from the next, so those entries never match again and everything after the anchor is written to cache anew on each request. In a long tool loop that starts from a single user prompt, that is most of the conversation.
 
 Note that the anchor lands on the last `UserPromptPart` present in the request. A capability listed before `Planning` that appends user content each request (for example `SystemReminders`) displaces the anchor onto that part, so the prefix stays cache-stable only while that content is stable across turns.
 
