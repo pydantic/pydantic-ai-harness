@@ -511,21 +511,34 @@ show a "waiting for you" state) registers `@host.on(EventClass)` or
 
 `google_workspace` (`pydantic_clai2.google_workspace`) is a built-in that starts
 disabled. It gives the agent the tools of Google's hosted Workspace MCP servers
-through harness
-[`GoogleWorkspace`](../docs/google-workspace.md). It needs
-a Google OAuth access token whose scopes cover the products you select. Save it
-in `/keys` as `GOOGLE_ACCESS_TOKEN`, or set the `GOOGLE_ACCESS_TOKEN` environment
-variable; the saved key is checked first. Then run:
+through harness [`GoogleWorkspace`](../docs/google-workspace.md). It needs a
+Google OAuth access token whose scopes cover the products you select.
+
+The token lives in the [saved API keys](#saved-api-keys) store, never in plugin
+settings. By default the plugin uses the key named `GOOGLE_ACCESS_TOKEN`. Enable
+the plugin, then choose or enter the token; skip the second command if
+`GOOGLE_ACCESS_TOKEN` is already in `/keys`:
 
 ```text
 /plugins enable google_workspace
+/google_workspace
 ```
 
-Without a token, enabling it fails with a message naming both places, and no
-tools are added. Each turn reads the token again: Google access tokens expire
-after about an hour, and replacing the saved key applies from the next turn
-without reloading. If the token is removed while the plugin is loaded, the turn
-fails with the same message.
+`/google_workspace` lists your saved key names so you can pick one, or asks for a
+new token without echoing it and saves it in `/keys` as `GOOGLE_ACCESS_TOKEN`,
+replacing any value already stored under that name. Only the chosen key's name is
+remembered, in the credential store. Several plugins and connections can share one
+named key, such as GitHub integrations all using `GITHUB_TOKEN`. While
+the plugin refers to a key, `/keys` refuses to rename it; run `/google_workspace`
+to pick another first.
+
+The plugin loads without a token so that `/google_workspace` is available, and
+prints which key it is missing. Each turn looks the key up again, because Google
+access tokens expire after about an hour: replacing the value in `/keys` applies
+from the next turn without reloading. If the key is missing or was deleted, the
+turn fails with a message naming it instead of running without the tools. The
+`GOOGLE_ACCESS_TOKEN` environment variable is not read; key names are labels, not
+environment variables.
 
 | Key | Default | Does |
 |---|---|---|
@@ -539,7 +552,7 @@ CLAI runs tools without asking first, so `read_only` defaults to `true`. Set it 
 /plugins add google_workspace pydantic_clai2.google_workspace '{"services": ["gmail", "docs"], "read_only": false}'
 ```
 
-The token does not go in these settings; they are stored in plain SQLite.
+These settings are stored in plain SQLite, so they reject a token.
 
 Earlier versions listed `google_workspace` as a raw harness entry,
 `pydantic_ai_harness.google_workspace:GoogleWorkspace`. If you turned that entry on
@@ -1052,7 +1065,8 @@ the secret on the command line.
 
 When saved keys exist, vLLM's token prompt and OpenRouter's **Enter API key** flow
 show a searchable list of names. Choose one, enter a different key privately, or
-choose **No API key** for vLLM. Esc closes the picker without connecting. Browser
+choose **No API key** for vLLM. `/google_workspace` offers the same list for the
+`google_workspace` plugin. Esc closes the picker without connecting. Browser
 login flows are unchanged. Select keys only for endpoints you trust.
 
 Named keys use the existing credential backend, separate from provider logins and

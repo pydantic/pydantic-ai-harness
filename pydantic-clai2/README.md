@@ -11,8 +11,9 @@ Context management is the built-in `compaction` plugin,
 [described below](#compacting-the-conversation).
 Other harness capabilities are not listed in `/plugins`; add one on purpose with
 `/plugins add`, see [other harness capabilities](PLUGINS.md#other-harness-capabilities).
-The disabled built-in `google_workspace` connects Gmail, Calendar, and Drive once
-`GOOGLE_ACCESS_TOKEN` is saved in `/keys` or set in the environment; see
+The disabled built-in `google_workspace` connects Gmail, Calendar, and Drive with a
+token kept in `/keys` (`GOOGLE_ACCESS_TOKEN` by default, or any key chosen with
+`/google_workspace`); see
 [its settings](PLUGINS.md#google_workspace-gmail-calendar-and-drive-tools).
 `/mcp` manages MCP servers the way Code Puppy's `/mcp` does. Bare `/mcp` shows a
 status dashboard. `/mcp install` opens a form where you name the server, pick
