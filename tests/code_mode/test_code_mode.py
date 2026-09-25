@@ -33,7 +33,7 @@ from pydantic_ai import (
     Tool,
     ToolDefinition,
 )
-from pydantic_ai.capabilities import AbstractCapability, Capability, Instrumentation, ToolSearch
+from pydantic_ai.capabilities import Capability, Instrumentation, ToolSearch
 from pydantic_ai.exceptions import ApprovalRequired as _ApprovalRequired
 from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import (
@@ -1129,19 +1129,23 @@ class TestCodeMode:
         assert '(50 items total)' in message  # long list cut to its first few
         assert '(10000 items total)' in message  # mapping items are cut before rendering
 
-    async def test_temporal_disables_elapsed_time_limits(self) -> None:
+    async def test_temporal_disables_elapsed_time_limits_but_keeps_memory_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Temporal replays `run_code`, so its elapsed timer cannot decide workflow control flow."""
 
-        class TemporalDurability(AbstractCapability[None]):
-            in_durable_context = True
+        def in_temporal_workflow() -> bool:
+            return True
 
-        TemporalDurability.__module__ = 'pydantic_ai.durable_exec.temporal'
-        options: tuple[CodeModeResourceLimits | None, ...] = (None, {'max_duration_secs': 0.001})
+        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.in_temporal_workflow', in_temporal_workflow)
+        options: tuple[CodeModeResourceLimits | None, ...] = (
+            None,
+            {'max_duration_secs': 0.001, 'max_memory': 8 * 1024 * 1024},
+        )
         for limits in options:
             wrapper = CodeMode[object](resource_limits=limits).get_wrapper_toolset(_build_function_toolset(add))
             assert isinstance(wrapper, CodeModeToolset)
             ctx = await build_ctx(None, wrapper)
-            ctx.capabilities['temporal'] = TemporalDurability()
             tools = await wrapper.get_tools(ctx)
 
             result = await wrapper.call_tool(
@@ -1152,42 +1156,13 @@ class TestCodeMode:
             )
 
             assert result.return_value == 4_999_950_000
-
-    async def test_temporal_subclass_disables_duration_but_keeps_memory_limit(self) -> None:
-        """A Temporal subclass outside its package remains replay-safe without removing the heap cap."""
-
-        class TemporalDurability(AbstractCapability[None]):
-            in_durable_context = True
-
-        TemporalDurability.__module__ = 'pydantic_ai.durable_exec.temporal'
-
-        class CustomTemporalDurability(TemporalDurability):
-            pass
-
-        CustomTemporalDurability.__module__ = '__main__'
-        wrapper = CodeMode[object](
-            resource_limits={'max_duration_secs': 0.001, 'max_memory': 8 * 1024 * 1024}
-        ).get_wrapper_toolset(_build_function_toolset(add))
-        assert isinstance(wrapper, CodeModeToolset)
-        ctx = await build_ctx(None, wrapper)
-        ctx.capabilities['temporal'] = CustomTemporalDurability()
-        tools = await wrapper.get_tools(ctx)
-
-        result = await wrapper.call_tool(
-            'run_code',
-            {'code': 'total = 0\nfor item in range(100_000):\n    total += item\ntotal'},
-            ctx,
-            tools['run_code'],
-        )
-
-        assert result.return_value == 4_999_950_000
-        with pytest.raises(ModelRetry, match='memory limit exceeded'):
-            await wrapper.call_tool(
-                'run_code',
-                {'code': 'values = [0] * 50_000_000\nlen(values)'},
-                ctx,
-                tools['run_code'],
-            )
+            with pytest.raises(ModelRetry, match='memory limit exceeded'):
+                await wrapper.call_tool(
+                    'run_code',
+                    {'code': 'values = [0] * 50_000_000\nlen(values)'},
+                    ctx,
+                    tools['run_code'],
+                )
 
     async def test_ordinary_runtime_error_does_not_mention_restart(self) -> None:
         """A plain exception keeps the message it always had; the hint is not bolted onto everything."""
@@ -1546,7 +1521,7 @@ class TestCodeMode:
         def failing_monty() -> Never:
             raise RuntimeError('spawn failed')
 
-        def in_temporal_workflow(ctx: object) -> bool:
+        def in_temporal_workflow() -> bool:
             return True
 
         monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.in_temporal_workflow', in_temporal_workflow)

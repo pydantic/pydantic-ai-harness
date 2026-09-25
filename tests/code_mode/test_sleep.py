@@ -102,3 +102,42 @@ async def test_sleep_past_the_allowance_raises_without_waiting(second_sleep: str
 
 async def test_no_allowance_means_no_cap() -> None:
     assert await _run('import time\ntime.sleep(86400)\n"awake"') == ('awake', ['start 86400', 'end 86400'])
+
+
+@pytest.mark.parametrize(
+    ('code', 'sleeps'),
+    [
+        pytest.param('import time\ntime.sleep(3600)', 1, id='time.sleep'),
+        pytest.param(
+            'import asyncio\nawait asyncio.gather(asyncio.sleep(3600), asyncio.sleep(3600))', 2, id='asyncio.sleep'
+        ),
+    ],
+)
+async def test_cancelling_the_run_interrupts_a_sleep(code: str, sleeps: int) -> None:
+    started = 0
+    all_started = asyncio.Event()
+    interrupted: list[float] = []
+
+    async def sleep(secs: float) -> None:
+        nonlocal started
+        started += 1
+        if started == sleeps:
+            all_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            interrupted.append(secs)
+            raise
+
+    async def dispatch(name: str, kwargs: dict[str, Any]) -> Any:
+        raise AssertionError('no tools in these snippets')  # pragma: no cover
+
+    async with AsyncMonty() as pool:
+        async with pool.checkout(os_policy={'sleep': 'call_host'}) as session:
+            executor = MontyExecutor(dispatch=dispatch, valid_names=set[str](), sleep=sleep)
+            run = asyncio.ensure_future(executor.run(partial(session.feed_start, code)))
+            await asyncio.wait_for(all_started.wait(), timeout=30)  # hang guard, not a timing assertion
+            run.cancel()
+            await asyncio.wait([run])
+    assert run.cancelled()
+    assert interrupted == [3600] * sleeps

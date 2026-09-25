@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import keyword
 import math
@@ -119,9 +118,8 @@ def _is_os_handler(os_access: CodeModeOS) -> TypeIs[AbstractOS | OsHandler]:
         signature = inspect.signature(os_access)
     except (TypeError, ValueError):  # pragma: no cover - builtins and some C callables have no signature
         return True
-    return not (
-        _binds(signature, 'os.getenv', (), {})
-        and not _binds(signature, name='os.getenv', args=(), kwargs={}, is_async=False)
+    return _binds(signature, name='os.getenv', args=(), kwargs={}, is_async=False) or not _binds(
+        signature, 'os.getenv', (), {}
     )
 
 
@@ -305,9 +303,7 @@ class CodeModeResourceLimits(TypedDict, total=False):
     """
 
 
-def _resolve_resource_limits(
-    limits: CodeModeResourceLimits | Literal['unlimited'] | None, *, in_temporal_workflow: bool = False
-) -> ResourceLimits:
+def _resolve_resource_limits(limits: CodeModeResourceLimits | Literal['unlimited'] | None) -> ResourceLimits:
     """Merge caller overrides onto the `run_code` backstop."""
     if limits == 'unlimited':
         return {}
@@ -323,10 +319,6 @@ def _resolve_resource_limits(
     max_suspensions = 1000 if limits is None else limits.get('max_suspensions', 1000)
     if max_suspensions < 1:
         raise UserError('`max_suspensions` must be at least 1')
-    if in_temporal_workflow:
-        # `run_code` executes in workflow code and Temporal replays it. An elapsed timer may
-        # make the original run and replay take different branches, which Temporal cannot record.
-        max_duration_secs = None
     return {
         'max_feed_duration_secs': max_duration_secs,
         'max_memory': max_memory,
@@ -1128,8 +1120,11 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 return ''
             return f'\n\n{_describe_started_calls(execution.nested_calls, execution.nested_returns)}'
 
-        in_workflow = in_temporal_workflow(ctx)
-        limits = _resolve_resource_limits(self.resource_limits, in_temporal_workflow=in_workflow)
+        in_workflow = in_temporal_workflow()
+        configured = _resolve_resource_limits(self.resource_limits)
+        # `run_code` executes in workflow code and Temporal replays it. An elapsed timer may make the
+        # original run and replay take different branches, which Temporal cannot record.
+        limits = configured | {'max_feed_duration_secs': None} if in_workflow else configured
         try:
             session = await run_state.get_session(
                 type_check=type_check,
@@ -1146,7 +1141,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                     portal=run_state.portal,
                     # The configured limit, kept inside a Temporal workflow too: Monty's elapsed-time
                     # check is dropped there for replay, but sleeps are charged what they request.
-                    max_sleep_secs=_resolve_resource_limits(self.resource_limits).get('max_feed_duration_secs'),
+                    max_sleep_secs=configured.get('max_feed_duration_secs'),
                 ).run(
                     partial(
                         session.feed_start,
@@ -1161,10 +1156,6 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             except MontyRuntimeError:
                 # The session is idle again and keeps assignments made before the failing line.
                 run_state.has_executed_feed = True
-                raise
-            except asyncio.CancelledError:
-                # The feed never finished, so the REPL is mid-statement. Start fresh next time.
-                await run_state.reset()
                 raise
             run_state.has_executed_feed = True
         except MontySyntaxError as e:

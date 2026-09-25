@@ -554,6 +554,9 @@ changed arguments when the same activity remains at the same history position, s
 is not a substitute for this boundary. Temporal activity timeouts apply to nested tools, not pure
 computation inside `run_code`. The workflow waits while the sandbox computes, and Temporal fails a
 workflow task that does not yield within 2 seconds, so move heavier computation into a tool.
+An `os_access` handler runs off the workflow's event loop, so it cannot call `temporalio.workflow`
+APIs such as `workflow.now()`; read any such value in the workflow before the run and have the
+handler return it.
 
 ## Observability
 

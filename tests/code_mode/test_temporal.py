@@ -25,6 +25,7 @@ import contextvars
 import json
 import subprocess
 import sys
+import warnings
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
@@ -35,6 +36,7 @@ try:
     from pydantic_ai.durable_exec.temporal import (
         AgentPlugin,
         PydanticAIPlugin,
+        TemporalAgent,  # pyright: ignore[reportDeprecated]
         TemporalDurability,
     )
     from temporalio import workflow
@@ -215,6 +217,43 @@ remote_code_mode_agent = Agent(
 )
 
 
+def _plain_model(messages: list[ModelRequest | ModelResponse], info: AgentInfo) -> ModelResponse:
+    returns = [
+        part
+        for msg in messages
+        if isinstance(msg, ModelRequest)
+        for part in msg.parts
+        if isinstance(part, ToolReturnPart) and part.tool_name == 'run_code'
+    ]
+    if returns:
+        return ModelResponse(parts=[TextPart(content=f'done: {returns[-1].content}')])
+    return ModelResponse(
+        parts=[ToolCallPart(tool_name='run_code', args={'code': 'await add(a=3, b=4)'}, tool_call_id='plain_tc_1')]
+    )
+
+
+# The deprecated `TemporalAgent` wrapper adds no durability capability for CodeMode to find.
+with warnings.catch_warnings():
+    warnings.simplefilter('ignore')
+    temporal_agent = TemporalAgent(  # pyright: ignore[reportDeprecated]
+        Agent(
+            FunctionModel(_plain_model),
+            name='code_mode_temporal_agent_wrapper',
+            toolsets=[FunctionToolset(tools=[add], id='math')],
+            capabilities=[CodeMode()],
+        ),
+        activity_config=BASE_ACTIVITY_CONFIG,
+    )
+
+
+@workflow.defn
+class PlainCodeModeWorkflow:
+    @workflow.run
+    async def run(self, prompt: str) -> str:
+        result = await temporal_agent.run(prompt)
+        return str(result.output)
+
+
 @workflow.defn
 class CodeModeWorkflow:
     @workflow.run
@@ -393,3 +432,23 @@ async def test_code_mode_runs_over_websocket_in_temporal_workflow(client: Client
         workflow_runner=_workflow_runner(),
     ).replay_workflow(history)
     assert replay_result.replay_failure is None
+
+
+async def test_code_mode_runs_under_temporal_agent(client: Client) -> None:
+    """A workflow is detected from Temporal itself, so Monty is not called on the workflow loop."""
+    async with Worker(
+        client,
+        task_queue=TASK_QUEUE,
+        workflows=[PlainCodeModeWorkflow],
+        plugins=[AgentPlugin(temporal_agent)],
+        workflow_runner=_workflow_runner(),
+    ):
+        result = await client.execute_workflow(
+            PlainCodeModeWorkflow.run,
+            args=['Calculate 3 + 4'],
+            id='test_code_mode_temporal_plain',
+            task_queue=TASK_QUEUE,
+            # A hang guard: without the portal the workflow task hangs instead of failing.
+            execution_timeout=timedelta(seconds=60),
+        )
+    assert result == 'done: 7'

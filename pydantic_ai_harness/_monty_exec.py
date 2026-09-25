@@ -17,15 +17,15 @@ workflow each call into them goes through a blocking portal (see `call_monty`).
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Awaitable, Callable, Container, Coroutine
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, TypeVar
 
 import anyio
 from anyio.from_thread import BlockingPortal, start_blocking_portal
 from opentelemetry import context as otel_context
-from pydantic_ai import RunContext
 from typing_extensions import TypeVarTuple, Unpack
 
 try:
@@ -60,21 +60,16 @@ _T = TypeVar('_T')
 _Args = TypeVarTuple('_Args')
 
 
-@runtime_checkable
-class _TemporalDurability(Protocol):
-    """The part of Temporal's public durability capability the Monty loop needs."""
+def in_temporal_workflow() -> bool:
+    """Whether this code runs in a Temporal workflow, however the agent was made durable.
 
-    in_durable_context: bool
-
-
-def in_temporal_workflow(ctx: RunContext[object]) -> bool:
-    """Whether this tool call runs in a Temporal workflow, without importing its optional extra."""
-    return any(
-        any(base.__module__.startswith('pydantic_ai.durable_exec.temporal') for base in type(capability).__mro__)
-        and isinstance(capability, _TemporalDurability)
-        and capability.in_durable_context
-        for capability in ctx.capabilities.values()
-    )
+    Asks Temporal itself rather than looking for a durability capability: `TemporalAgent` and
+    workflow code that runs an agent directly add none, and missing a workflow here means calling
+    Monty on Temporal's event loop, which hangs. Reads `sys.modules` so the optional extra is never
+    imported.
+    """
+    workflow = sys.modules.get('temporalio.workflow')
+    return workflow is not None and workflow.in_workflow()
 
 
 # Running Monty inside a Temporal workflow
@@ -391,9 +386,7 @@ class MontyExecutor:
         return await call_monty(self.portal, snapshot.resume, ExternalException(exception=exc))
 
     def _dispatch(self, snapshot: AsyncFunctionSnapshot, *, parallel: bool) -> PendingCall:
-        # Compatibility with Monty before https://github.com/pydantic/monty/pull/885.
-        trace_context: Callable[[], otel_context.Context] = getattr(snapshot, 'trace_context', otel_context.get_current)
-        context = trace_context()
+        context = snapshot.trace_context()
         token = otel_context.attach(context)
         try:
             call = self.dispatch(snapshot.function_name, snapshot.kwargs)

@@ -735,7 +735,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             completed_dispatches.append(_CompletedDispatch(agent_name=agent_name, task=task, result=output))
             return output
 
-        in_temporal = in_temporal_workflow(ctx)
+        in_temporal = in_temporal_workflow()
         limits = _resolve_resource_limits(self.resource_limits)
         capture = PrintCapture()
         type_check_stubs = self._build_type_check_stubs()
