@@ -180,6 +180,7 @@ This release makes the workspace the single place that decides where an agent wo
 - **Skills** are read from the workspace at run start and loaded as deferred capabilities. [`Skills(workspace=LocalWorkspaceBackend('/app'))`](https://pydantic.dev/docs/ai/harness/skills/) reads them from somewhere else.
 - **[`Researcher`](https://pydantic.dev/docs/ai/harness/researcher/)** spills oversized tool results to the workspace instead of `$TMPDIR`, so it needs one too.
 - **Sub-agent definitions** are read from the workspace at run start, and `~/.agents/agents/` is no longer read. [`SubAgents(workspace=LocalWorkspaceBackend('/app'))`](https://pydantic.dev/docs/ai/harness/subagents/) reads them from somewhere else.
+- **[Memory's `FileStore`](https://pydantic.dev/docs/ai/harness/memory/)** keeps its files in the workspace, and receipts in `.memory-operations.json` replace its SQLite journal. `FileStore('.', workspace=LocalWorkspaceBackend('/path'))` keeps them on this machine.
 - **Capability Creation** runs only when the workspace is a writable `LocalWorkspace`.
 
 ## Benchmarking
