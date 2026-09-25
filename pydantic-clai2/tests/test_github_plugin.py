@@ -1,4 +1,4 @@
-"""The built-in `github` plugin: a settings menu for `GitHub`'s options, with the token kept in `/keys`."""
+"""The built-in `github` plugin: a settings menu for `GitHub`'s options; tokens come from `gh` or `/keys`."""
 
 import io
 from pathlib import Path
@@ -20,6 +20,7 @@ from pydantic_clai2 import DEFAULT_PLUGINS, api_keys
 from pydantic_clai2.api_keys import KeyReference, SavedKey
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.field_menu import CUSTOM, FieldRow
+from pydantic_clai2.gh_cli import GhToken
 from pydantic_clai2.github import ENTERPRISE, SETUP, GitHubSource, enterprise_url
 from pydantic_clai2.plugin_loader import PluginError, PluginLoader
 from pydantic_clai2.plugin_menu import PluginMenu, open_plugins_menu
@@ -75,8 +76,11 @@ def key_choice(monkeypatch: pytest.MonkeyPatch, choice: str | KeyReference | Non
     return labels
 
 
-def github(name: str = 'GITHUB_TOKEN', *, url: str = GITHUB_MCP_URL, read_only: bool = True) -> list[GitHub[None]]:
-    return [GitHub[None](auth=SavedKey(name=name, setup=SETUP), url=url, read_only=read_only)]
+GH = GhToken(hostname='github.com', setup=SETUP)
+
+
+def github(auth: SavedKey | GhToken = GH, *, read_only: bool = True) -> list[GitHub[None]]:
+    return [GitHub[None](auth=auth, url=GITHUB_MCP_URL, read_only=read_only)]
 
 
 def test_declared_disabled_with_no_settings() -> None:
@@ -103,8 +107,8 @@ async def test_enable_opens_the_menu_and_every_option_saves_immediately(
     labels = key_choice(monkeypatch, ' ghp_new ')
     shown = script(
         monkeypatch,
-        lists=[pick('token'), pick('url'), pick('read_only'), pick('toolsets'), pick('include_instructions')],
-        choices=[pick(ENTERPRISE), pick('false'), pick(CUSTOM), pick('false')],
+        lists=[pick('login'), pick('url'), pick('read_only'), pick('toolsets'), pick('include_instructions')],
+        choices=[pick('key'), pick(ENTERPRISE), pick('false'), pick(CUSTOM), pick('false')],
         texts=[typed('octocorp.ghe.com'), typed('repos, issues')],
     )
     shell = Shell(tmp_path)
@@ -118,11 +122,12 @@ async def test_enable_opens_the_menu_and_every_option_saves_immediately(
             'Saved Server instructions.',
         ]
     )
-    assert 'GitHub has no token: GITHUB_TOKEN is not in /keys.' in shell.output.getvalue()
+    assert 'GitHub has no token: the GitHub CLI is not signed in to github.com.' in shell.output.getvalue()
     assert labels == ['GitHub token (saved in /keys as GITHUB_TOKEN)']
     assert shown.opened.count('list') == 6
     assert api_keys.load_keys()['GITHUB_TOKEN'].get_secret_value() == 'ghp_new'
     assert shell.saved() == {
+        'login': 'key',
         'token': {'name': 'GITHUB_TOKEN'},
         'url': 'https://copilot-api.octocorp.ghe.com/mcp',
         'read_only': False,
@@ -149,11 +154,12 @@ async def test_reopening_repicks_a_saved_key_and_host_without_reinstalling(
     script(monkeypatch, lists=[])
     await shell.loader.command(['enable', 'github'])
     key_choice(monkeypatch, KeyReference(name='WORK_GITHUB'))
-    script(monkeypatch, lists=[pick('token'), pick('url')], choices=[pick(GITHUB_MCP_URL)])
+    script(monkeypatch, lists=[pick('login'), pick('url')], choices=[pick('key'), pick(GITHUB_MCP_URL)])
     assert await shell.loader.command(['configure', 'github']) == (
         'GitHub uses the saved key WORK_GITHUB. Manage it in /keys.\nSaved GitHub host.'
     )
     assert shell.saved() == {
+        'login': 'key',
         'token': {'name': 'WORK_GITHUB'},
         'url': GITHUB_MCP_URL,
         'read_only': False,
@@ -161,7 +167,7 @@ async def test_reopening_repicks_a_saved_key_and_host_without_reinstalling(
         'include_instructions': True,
     }
     assert b'work-secret' not in shell.path.read_bytes()
-    assert shell.loader.capabilities() == github('WORK_GITHUB', read_only=False)
+    assert shell.loader.capabilities() == github(SavedKey(name='WORK_GITHUB', setup=SETUP), read_only=False)
 
 
 async def test_new_token_is_typed_masked_when_no_keys_are_saved(
@@ -170,7 +176,7 @@ async def test_new_token_is_typed_masked_when_no_keys_are_saved(
     shell = Shell(tmp_path)
     script(monkeypatch, lists=[])
     await shell.loader.enable('github')
-    script(monkeypatch, lists=[pick('token')], texts=[typed('ghp_typed')])
+    script(monkeypatch, lists=[pick('login')], choices=[pick('key')], texts=[typed('ghp_typed')])
     await shell.loader.configure('github')
     assert api_keys.load_keys()['GITHUB_TOKEN'].get_secret_value() == 'ghp_typed'
 
@@ -181,7 +187,7 @@ async def test_cancelled_or_blank_token_changes_nothing(
 ) -> None:
     shell = Shell(tmp_path)
     await shell.loader.enable('github')
-    script(monkeypatch, lists=[pick('token')], texts=[answer])
+    script(monkeypatch, lists=[pick('login')], choices=[pick('key')], texts=[answer])
     assert await shell.loader.configure('github') == 'GitHub settings unchanged.'
     assert api_keys.load_keys() == {}
     assert shell.store.plugins()[0].settings == {}
@@ -192,7 +198,11 @@ async def test_replacing_a_shared_key_needs_confirmation(tmp_path: Path, monkeyp
     shell = Shell(tmp_path)
     await shell.loader.enable('github')
     key_choice(monkeypatch, 'other')
-    script(monkeypatch, lists=[pick('token'), pick('token')], choices=[pick(False), pick(True)])
+    script(
+        monkeypatch,
+        lists=[pick('login'), pick('login')],
+        choices=[pick('key'), pick(False), pick('key'), pick(True)],
+    )
     assert await shell.loader.configure('github') == 'GitHub uses the saved key GITHUB_TOKEN. Manage it in /keys.'
     assert api_keys.load_keys()['GITHUB_TOKEN'].get_secret_value() == 'other'
 
@@ -208,7 +218,7 @@ async def test_a_key_created_while_picking_still_needs_confirmation(
         return 'typed-here'
 
     monkeypatch.setattr('pydantic_clai2.github.prompt_api_key', prompt_api_key)
-    script(monkeypatch, lists=[pick('token')], choices=[CLOSE])
+    script(monkeypatch, lists=[pick('login')], choices=[pick('key'), CLOSE])
     assert await shell.loader.configure('github') == 'GitHub settings unchanged.'
     assert api_keys.load_keys()['GITHUB_TOKEN'].get_secret_value() == 'from-another-process'
 
@@ -248,10 +258,13 @@ def test_enterprise_url_accepts_a_ghe_host_or_a_full_url(typed_url: str, url: st
 
 
 def test_menu_validates_and_resets_like_saving_would() -> None:
-    host = PluginHost[None](name='github', console=Console(file=io.StringIO()), settings={'read_only': False})
+    host = PluginHost[None](
+        name='github', console=Console(file=io.StringIO()), settings={'read_only': False, 'login': 'key'}
+    )
     source = GitHubSource(host)
     rows = {row.key: row for row in source.rows()}
-    assert rows['token'].note == 'missing from /keys'
+    assert rows['login'].note == 'no token'
+    assert source.current(rows['login']) == 'GITHUB_TOKEN in /keys'
     enterprise = FieldRow(key='enterprise_url', label='Enterprise URL', description='', default=GITHUB_MCP_URL)
     assert source.problem(enterprise, 'http://octocorp.example.com') == 'Value error, Use an https:// URL.'
     assert source.problem(rows['toolsets'], 'Repos') == (
@@ -265,7 +278,9 @@ def test_menu_validates_and_resets_like_saving_would() -> None:
     assert source.current(rows['toolsets']) == 'default'
     assert source.current(rows['url']) == GITHUB_MCP_URL
     api_keys.save_key(name='GITHUB_TOKEN', value='saved')
-    assert {row.key: row for row in source.rows()}['token'].note == ''
+    assert {row.key: row for row in source.rows()}['login'].note == ''
+    assert source.reset(rows['login']) == 'Reset Sign-in.'
+    assert source.current(rows['login']) == 'gh'
 
 
 @pytest.mark.parametrize(
@@ -276,6 +291,7 @@ def test_menu_validates_and_resets_like_saving_would() -> None:
         {'toolsets': []},
         {'url': 'http://api.githubcopilot.com/mcp/'},
         {'auth': 'secret'},
+        {'login': 'oauth'},
     ],
 )
 async def test_settings_cannot_hold_a_secret_or_invalid_options(tmp_path: Path, settings: dict[str, JsonValue]) -> None:
@@ -356,7 +372,7 @@ async def test_cancelling_configure_cancels_an_open_token_picker(
         return None  # pragma: no cover -- unreachable; keeps the signature honest
 
     monkeypatch.setattr('pydantic_clai2.github.prompt_api_key', prompt_api_key)
-    script(monkeypatch, lists=[pick('token')])
+    script(monkeypatch, lists=[pick('login')], choices=[pick('key')])
     with anyio.fail_after(10):
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(shell.loader.configure, 'github')

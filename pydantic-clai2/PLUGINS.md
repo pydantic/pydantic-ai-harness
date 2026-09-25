@@ -522,7 +522,7 @@ new settings.
 
 | Row | Default | Does |
 |---|---|---|
-| Token | `GITHUB_TOKEN` | the `/keys` entry to connect with: pick a saved key from a searchable list, or type a new one into a masked field |
+| Sign-in | GitHub CLI (browser) | where the token comes from: the GitHub CLI's browser sign-in, or a token saved in `/keys` (pick one from a searchable list, or type a new one into a masked field) |
 | GitHub host | github.com | github.com, or GitHub Enterprise Cloud with data residency; the latter asks for `octocorp.ghe.com` or the full MCP URL and connects to `https://copilot-api.octocorp.ghe.com/mcp` |
 | Tools | read-only | read-only, or read and write |
 | Tool groups | server defaults | `all`, a preset, or your own comma-separated groups such as `repos,issues,actions` |
@@ -531,25 +531,49 @@ new settings.
 GitHub Enterprise Server has no hosted MCP server, so it is not offered. The
 token's own permissions still limit what any of these settings can reach.
 
-The token lives in the named API key store that `/keys` manages. It is never
-stored in plugin settings, because those are plaintext SQLite. A new token typed
-in the menu is saved in `/keys` under the key's name. If a key of that name
-already exists, the menu asks before replacing it, because other plugins and
-connections may share it. The plugin's settings hold only the key's name, such as
-`{"token": {"name": "GITHUB_TOKEN"}}`, and a declaration that tries to hold a
-token is rejected. `GITHUB_TOKEN` is a label in `/keys`, not an environment
-variable: the plugin does not read the environment. Any plugin that names the
-same key shares it.
+#### Signing in through the browser
 
-The key is looked up on every run, so replacing it in `/keys` applies from the
-next turn. If the named key is missing when the plugin loads, the plugin still
-loads, prints a warning, and keeps its settings menu available. Until you save a
-key, each run fails with an error naming the key, so the agent never runs without
-the account you chose. Deleting or renaming the key in `/keys` has the same
-effect, because `/keys` does not stop you renaming a key that a plugin uses. The
-plugin does not use GitHub OAuth or your `/login github-copilot` login, and
-Copilot does not read the `GITHUB_TOKEN` key. The plugin emits no telemetry of
-its own; tool calls appear in core's spans.
+GitHub's hosted MCP server does not support dynamic client registration, so an
+MCP client can only use OAuth with an OAuth App registered to that client. CLAI
+doesn't register one. Instead it uses the GitHub CLI (`gh`), which has its own.
+Choosing **GitHub CLI (browser)** under Sign-in runs
+`gh auth login --hostname HOST --web --clipboard`. The menu shows the one-time
+code (`gh` also copies it to your clipboard) and opens
+`https://github.com/login/device` in your browser. Once you approve the code,
+the screen closes by itself. Enter opens the page again, and Esc stops `gh` and
+leaves the setting unchanged. If `gh` already has a login for the host, choosing
+it just switches the plugin over. `HOST` is `github.com`, or the ghe.com host for
+GitHub Enterprise Cloud.
+
+`gh` keeps the token in your OS keyring. On every run the plugin calls
+`gh auth token --hostname HOST`, so `gh auth login`, `gh auth switch`, or
+`gh auth logout` in a shell take effect from the next turn. `GH_TOKEN`,
+`GITHUB_TOKEN`, and their enterprise variants are removed from the environment
+`gh` sees. Without that, `gh` would hand back the variable's token instead of
+your login, and it refuses to sign in while one is set. If `gh` is not installed,
+the menu says so; install it from <https://cli.github.com> or use `/keys`.
+
+#### Using a token saved in `/keys`
+
+Choosing **Token saved in /keys** stores the token in the named API key store
+that `/keys` manages, not in plugin settings, which are plaintext SQLite. A new
+token typed in the menu is saved in `/keys` under the key's name. If a key of
+that name already exists, the menu asks before replacing it, because other
+plugins and connections may share it. `GITHUB_TOKEN` is a label in `/keys`, not
+an environment variable. Any plugin that names the same key shares it.
+
+Either way, the plugin's settings hold only which source to use and a key's name,
+such as `{"login": "key", "token": {"name": "GITHUB_TOKEN"}}`. A declaration that
+tries to hold a token is rejected.
+
+The token is looked up on every run. If none is available when the plugin loads
+(no `gh` login for the host, or the named key is missing), the plugin still
+loads, prints a warning, and keeps its settings menu available. Until you sign
+in or save a key, each run fails with an error saying how to fix it, so the agent
+never runs as the wrong account. `/keys` does not stop you renaming or deleting a
+key that a plugin uses. Neither sign-in uses your `/login github-copilot` login,
+and Copilot does not read the `GITHUB_TOKEN` key. The plugin emits no telemetry
+of its own; tool calls appear in core's spans.
 
 ## Managing plugins
 

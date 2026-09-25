@@ -1,34 +1,44 @@
 """The built-in `github` plugin: GitHub's hosted MCP tools, through harness `GitHub`.
 
-The token lives in `/keys`. The plugin's settings hold only its name plus the non-secret `GitHub`
-options, all edited in the settings menu that `/plugins configure github` opens.
+The token comes from the GitHub CLI's browser sign-in, or from `/keys`. The plugin's settings hold only
+which one (and a key's name) plus the non-secret `GitHub` options, all edited in the settings menu that
+`/plugins configure github` opens.
 """
 
 import asyncio
 import concurrent.futures
 import re
+import webbrowser
+from collections.abc import Callable
 from dataclasses import replace
-from typing import Generic
+from typing import Generic, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator
+from pydantic_ai.exceptions import UserError
 from pydantic_ai_harness.github import GITHUB_MCP_URL, GitHub
 from termflow.tui import MenuBuilder, MenuItem, TextInputBuilder  # pyright: ignore[reportMissingTypeStubs]
+from termflow.tui.menu import Menu, MenuResult  # pyright: ignore[reportMissingTypeStubs]
 
 from . import theme
 from ._rendering import markdown_style
 from .api_keys import KeyExistsError, KeyReference, SavedKey, load_keys, prompt_api_key, save_key
 from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run_flow
+from .gh_cli import GhLogin, GhToken, gh_host, gh_token, start_login
 from .menu_worker import menu_key, run_worker, worker_stopping
 from .plugins import DepsT, PluginHost, SessionStart
 
 KEY_NAME = 'GITHUB_TOKEN'
 """The conventional `/keys` label, shared by every plugin that uses a GitHub token. Not read from the environment."""
-SETUP = 'Run /plugins configure github to choose or enter a token.'
+SETUP = 'Run /plugins configure github to sign in or choose a token.'
 ENTERPRISE = 'enterprise'
 """The host choice that asks for a GitHub Enterprise Cloud URL."""
 RUNNERS: Runners = TERMINAL
 """How the settings menu's widgets are shown; tests swap in scripted ones."""
+OPEN_BROWSER: Callable[[str], bool] = webbrowser.open
+"""Opens GitHub's device page during `gh` sign-in; tests swap it out."""
+FINISHED = 'gh-finished'
+"""The key the sign-in screen receives once `gh auth login` exits."""
 _GROUP = re.compile(r'[a-z][a-z0-9_]*')
 
 
@@ -36,6 +46,9 @@ class GitHubSettings(BaseModel):
     """The JSON a `github` declaration may carry: `GitHub`'s non-secret options and the name of its token."""
 
     model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
+    login: Literal['gh', 'key'] = Field(
+        default='gh', description="Use the GitHub CLI's browser sign-in, or the saved key named by `token`."
+    )
     token: KeyReference = Field(
         default_factory=lambda: KeyReference(name=KEY_NAME), description='The saved API key in /keys to connect with.'
     )
@@ -63,11 +76,16 @@ class GitHubSettings(BaseModel):
 
 
 def activate(host: PluginHost[DepsT]) -> None:
-    """Add `GitHub` with a token resolved from `/keys` on every run, and offer the settings menu."""
+    """Add `GitHub` with a token resolved from `gh` or `/keys` on every run, and offer the settings menu."""
     settings = host.settings(GitHubSettings)
+    auth = (
+        GhToken(hostname=gh_host(settings.url), setup=SETUP)
+        if settings.login == 'gh'
+        else SavedKey(name=settings.token.name, setup=SETUP)
+    )
     host.add(
         GitHub[DepsT](
-            auth=SavedKey(name=settings.token.name, setup=SETUP),
+            auth=auth,
             url=settings.url,
             read_only=settings.read_only,
             toolsets=settings.toolsets,
@@ -81,14 +99,25 @@ def activate(host: PluginHost[DepsT]) -> None:
 
     @host.on('session_start')
     async def warn_without_token(event: SessionStart) -> None:
-        # Loading anyway keeps the settings menu available; each run fails closed until a token is saved.
-        # A worker thread, because the `/keys` lock can wait for another CLAI process.
-        if settings.token.name not in await asyncio.to_thread(load_keys):
+        # Loading anyway keeps the settings menu available; each run fails closed until there is a token.
+        # A worker thread, because `gh` and the `/keys` lock can take a while.
+        problem = await asyncio.to_thread(_token_problem, settings)
+        if problem is not None:
             host.console.print(
-                f'GitHub has no token: {settings.token.name} is not in /keys. {SETUP}',
-                style=theme.color(theme.WARNING),
-                markup=False,
+                f'GitHub has no token: {problem} {SETUP}', style=theme.color(theme.WARNING), markup=False
             )
+
+
+def _token_problem(settings: GitHubSettings) -> str | None:
+    """Why no token is available now, or `None` when there is one."""
+    if settings.login == 'key':
+        return None if settings.token.name in load_keys() else f'{settings.token.name} is not in /keys.'
+    hostname = gh_host(settings.url)
+    try:
+        token = gh_token(hostname)
+    except UserError as exc:
+        return str(exc)
+    return None if token else f'the GitHub CLI is not signed in to {hostname}.'
 
 
 def enterprise_url(text: str) -> str:
@@ -103,14 +132,17 @@ def enterprise_url(text: str) -> str:
     return parts.geturl()
 
 
-_TOKEN = FieldRow(
-    key='token',
-    label='Token',
+_LOGIN = FieldRow(
+    key='login',
+    label='Sign-in',
     description=(
-        'The saved API key in /keys that GitHub connects with. Enter picks a saved key or saves a new one '
-        'there; plugin settings keep only its name. Any plugin naming the same key shares it.'
+        'Sign in through the GitHub CLI in your browser (gh keeps the token in your OS keyring), or use a '
+        'token saved in /keys. Plugin settings never hold the token itself.'
     ),
-    default=KEY_NAME,
+    default='gh',
+    choices=('gh', 'key'),
+    choice_labels={'gh': 'GitHub CLI (browser)', 'key': 'Token saved in /keys'},
+    allow_custom=False,
 )
 _HOST = FieldRow(
     key='url',
@@ -128,7 +160,7 @@ _ENTERPRISE_URL = FieldRow(
     default=GITHUB_MCP_URL,
 )
 _ROWS = (
-    _TOKEN,
+    _LOGIN,
     _HOST,
     FieldRow(
         key='read_only',
@@ -160,7 +192,7 @@ _ROWS = (
         allow_custom=False,
     ),
 )
-_FIELDS = {'token': 'token', 'url': 'url', 'enterprise_url': 'url'}
+_FIELDS = {'url': 'url', 'enterprise_url': 'url'}
 
 
 class GitHubSource(Generic[DepsT]):
@@ -178,15 +210,15 @@ class GitHubSource(Generic[DepsT]):
         return self._host.settings(GitHubSettings)
 
     def rows(self) -> list[FieldRow]:
-        """Every option, with the token marked when its key is gone from `/keys`."""
-        missing = self.settings.token.name not in load_keys()
-        return [replace(_TOKEN, note='missing from /keys') if missing else _TOKEN, *_ROWS[1:]]
+        """Every option, with sign-in marked when no token is available."""
+        problem = _token_problem(self.settings)
+        return [replace(_LOGIN, note='no token') if problem else _LOGIN, *_ROWS[1:]]
 
     def current(self, row: FieldRow) -> str:
         """The value as the user would type it."""
         settings = self.settings
-        if row.key == 'token':
-            return settings.token.name
+        if row.key == 'login' and settings.login == 'key':
+            return f'{settings.token.name} in /keys'
         if row.key == 'toolsets':
             return ','.join(settings.toolsets) if settings.toolsets else 'default'
         value: object = getattr(settings, _FIELDS.get(row.key, row.key))
@@ -247,13 +279,88 @@ async def _configure(source: GitHubSource[DepsT]) -> str:
         reference = _saved(name, picking.result())
         if reference is None:
             return []
-        source.save(source.settings.model_copy(update={'token': reference}))
+        source.save(source.settings.model_copy(update={'login': 'key', 'token': reference}))
         return [f'GitHub uses the saved key {reference.name}. Manage it in /keys.']
 
-    menu = FieldMenu(source)
-    submenus = {'token': pick_token, 'url': lambda: _pick_host(menu, source)}
-    messages = await run_worker(lambda: run_flow(menu, RUNNERS, submenus=submenus))
+    def pick_login(menu: FieldMenu) -> list[str]:
+        pick = RUNNERS.run_choice(menu.build_choices(_LOGIN))
+        if pick.cancelled or pick.item is None:
+            return []
+        return pick_token() if pick.item.value == 'key' else _sign_in_with_gh(source)
+
+    def flow() -> list[str]:
+        menu = FieldMenu(source)
+
+        def refreshed(submenu: Callable[[], list[str]]) -> Callable[[], list[str]]:
+            def run() -> list[str]:
+                messages = submenu()
+                menu.rows = list(source.rows())
+                return messages
+
+            return run
+
+        submenus = {'login': refreshed(lambda: pick_login(menu)), 'url': refreshed(lambda: _pick_host(menu, source))}
+        return run_flow(menu, RUNNERS, submenus=submenus)
+
+    messages = await run_worker(flow)
     return '\n'.join(messages) or 'GitHub settings unchanged.'
+
+
+def _sign_in_with_gh(source: GitHubSource[DepsT]) -> list[str]:
+    """Use `gh`'s login for the configured host, signing in through the browser when it has none."""
+    hostname = gh_host(source.settings.url)
+    try:
+        signed_in = gh_token(hostname) is not None
+    except UserError as exc:
+        return [str(exc)]
+    messages: list[str] = []
+    if not signed_in:
+        login = start_login(hostname)
+        if isinstance(login, str):
+            return [login]
+        if not _wait_for_browser(login):
+            login.cancel()
+            return []
+        messages.append(login.finish())
+        if gh_token(hostname) is None:
+            return messages
+    source.save(source.settings.model_copy(update={'login': 'gh'}))
+    return [*messages, f'GitHub uses your GitHub CLI login for {hostname}.']
+
+
+def _wait_for_browser(login: GhLogin) -> bool:
+    """Show the one-time code until `gh` finishes; Enter opens the page again, Esc gives up."""
+    _open(login.url)
+    menu = _browser_menu(login)
+    while True:
+        pick = RUNNERS.run_choice(menu)
+        if pick.cancelled or pick.item is None:
+            return False
+        if pick.item.value == FINISHED:
+            return True
+        _open(login.url)
+
+
+def _open(url: str) -> None:
+    try:
+        OPEN_BROWSER(url)
+    except webbrowser.Error:
+        pass  # The URL is on screen.
+
+
+def _browser_menu(login: GhLogin) -> Menu:
+    def finished_key() -> str:  # pragma: no cover -- read by the terminal menu
+        return FINISHED if login.process.poll() is not None else menu_key()
+
+    return (
+        MenuBuilder(f'Enter {login.code} at {login.url}')
+        .style(markdown_style())
+        .items([MenuItem(f'Open {login.url} again', value='open')])
+        .on_key(FINISHED, lambda menu, item: MenuResult(item=MenuItem('finished', value=FINISHED)))
+        .footer_hint('Approve the code in your browser; gh copied it to your clipboard - Esc cancel')
+        .key_source(finished_key)
+        .build()
+    )
 
 
 def _pick_host(menu: FieldMenu, source: GitHubSource[DepsT]) -> list[str]:
