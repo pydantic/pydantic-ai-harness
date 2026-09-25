@@ -315,7 +315,9 @@ def _sign_in_with_gh(source: GitHubSource[DepsT]) -> list[str]:
         return [str(exc)]
     messages: list[str] = []
     if not signed_in:
-        login = start_login(hostname)
+        login = start_login(hostname, stopping=worker_stopping)
+        if login is None:
+            return []
         if isinstance(login, str):
             return [login]
         if not _wait_for_browser(login):

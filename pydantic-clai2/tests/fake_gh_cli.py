@@ -11,6 +11,8 @@ host = args[args.index('--hostname') + 1]
 with (state / 'calls').open('a') as calls:
     calls.write(' '.join(args) + '\n')
 if args[:2] == ['auth', 'token']:
+    if (state / 'token-hang').exists():
+        time.sleep(60)
     token = state / host
     if os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN'):
         print('token-from-the-environment')
@@ -20,6 +22,8 @@ if args[:2] == ['auth', 'token']:
         sys.exit(f'no oauth token found for {host}')
     sys.exit(0)
 mode = (state / 'login').read_text() if (state / 'login').exists() else 'ok'
+if mode == 'silent':
+    time.sleep(60)
 if mode == 'early':
     sys.exit('error: authentication failed before a code was issued')
 print('\n! One-time code (ABCD-1234) copied to clipboard', file=sys.stderr)

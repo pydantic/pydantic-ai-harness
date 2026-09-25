@@ -6,11 +6,14 @@ one-time code, the user approves it in the browser, and `gh` keeps the token in 
 """
 
 import os
+import queue
 import re
 import shutil
 import subprocess
+import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import IO
 from urllib.parse import urlsplit
 
 from pydantic_ai.exceptions import UserError
@@ -20,6 +23,10 @@ _TOKEN_VARIABLES = ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_E
 _CODE = re.compile(r'\b([A-Z0-9]{4}-[A-Z0-9]{4})\b')
 _URL = re.compile(r'https://\S+')
 _ACCOUNT = re.compile(r'Logged in as (\S+)')
+TOKEN_TIMEOUT = 10.0
+"""Seconds `gh auth token` may take, for example while the OS keyring is locked."""
+CODE_TIMEOUT = 30.0
+"""Seconds `gh auth login` may take to show its one-time code."""
 
 
 def gh_command() -> list[str] | None:
@@ -50,14 +57,18 @@ def _environment() -> dict[str, str]:
 
 def gh_token(hostname: str) -> str | None:
     """The token `gh` holds for `hostname`, or `None` when it has no login there; `UserError` without `gh`."""
-    result = subprocess.run(
-        [*_gh(), 'auth', 'token', '--hostname', hostname],
-        capture_output=True,
-        text=True,
-        env=_environment(),
-        stdin=subprocess.DEVNULL,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [*_gh(), 'auth', 'token', '--hostname', hostname],
+            capture_output=True,
+            text=True,
+            env=_environment(),
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=TOKEN_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise UserError(f'gh auth token did not answer within {TOKEN_TIMEOUT:g} seconds.') from None
     token = result.stdout.strip()
     return token if result.returncode == 0 and token else None
 
@@ -84,15 +95,16 @@ class GhLogin:
     process: subprocess.Popen[str]
     code: str
     url: str
+    output: queue.Queue[str | None]
 
     def finish(self) -> str:
         """Wait for `gh` and describe the result."""
-        output = _drain(self.process)
-        if self.process.wait() != 0:
-            lines = [line for line in output.splitlines() if line.strip()]
-            return f'gh auth login failed: {lines[-1] if lines else "no output"}'
-        account = _ACCOUNT.search(output)
-        return f'Signed in to GitHub as {account.group(1)}.' if account else 'Signed in to GitHub.'
+        self.process.wait()
+        lines = _rest(self.output)
+        if self.process.returncode != 0:
+            return _failure(lines)
+        account = next((found.group(1) for line in lines if (found := _ACCOUNT.search(line))), None)
+        return f'Signed in to GitHub as {account}.' if account else 'Signed in to GitHub.'
 
     def cancel(self) -> None:
         """Stop waiting for the browser."""
@@ -100,8 +112,11 @@ class GhLogin:
         self.process.wait()
 
 
-def start_login(hostname: str) -> GhLogin | str:
-    """Start the browser sign-in, or explain why `gh` could not; `UserError` without `gh`."""
+def start_login(hostname: str, *, stopping: Callable[[], bool] = lambda: False) -> GhLogin | str | None:
+    """Start the browser sign-in: the running login, why `gh` failed, or `None` once `stopping()` is true.
+
+    Raises `UserError` without `gh`.
+    """
     process = subprocess.Popen(
         [*_gh(), 'auth', 'login', '--hostname', hostname, '--web', '--clipboard'],
         stdin=subprocess.DEVNULL,
@@ -110,24 +125,44 @@ def start_login(hostname: str) -> GhLogin | str:
         text=True,
         env=_environment(),
     )
-    stream = _stream(process)
-    code = ''
+    output: queue.Queue[str | None] = queue.Queue()
+    # A thread reads the pipe, so a `gh` that never prints cannot block cancellation or the deadline.
+    threading.Thread(target=_read, args=(process, output), daemon=True).start()
+    deadline = time.monotonic() + CODE_TIMEOUT
     seen: list[str] = []
-    for line in stream:
+    code = ''
+    while not stopping() and time.monotonic() < deadline:
+        try:
+            line = output.get(timeout=0.05)
+        except queue.Empty:
+            continue
+        if line is None:
+            process.wait()
+            return _failure(seen)
         seen.append(line)
         if found := _CODE.search(line):
             code = found.group(1)
         if code and (url := _URL.search(line)):
-            return GhLogin(process=process, code=code, url=url.group(0))
+            return GhLogin(process=process, code=code, url=url.group(0), output=output)
+    process.terminate()
     process.wait()
-    lines = [line.strip() for line in seen if line.strip()]
-    return f'gh auth login failed: {lines[-1] if lines else "no output"}'
+    return None if stopping() else f'gh auth login showed no code within {CODE_TIMEOUT:g} seconds.'
 
 
-def _stream(process: subprocess.Popen[str]) -> IO[str]:
+def _read(process: subprocess.Popen[str], output: queue.Queue[str | None]) -> None:
     assert process.stdout is not None  # Popen was given stdout=PIPE.
-    return process.stdout
+    for line in process.stdout:
+        output.put(line)
+    output.put(None)
 
 
-def _drain(process: subprocess.Popen[str]) -> str:
-    return _stream(process).read()
+def _rest(output: queue.Queue[str | None]) -> list[str]:
+    lines: list[str] = []
+    while (line := output.get()) is not None:
+        lines.append(line)
+    return lines
+
+
+def _failure(lines: list[str]) -> str:
+    shown = [line.strip() for line in lines if line.strip()]
+    return f'gh auth login failed: {shown[-1] if shown else "no output"}'

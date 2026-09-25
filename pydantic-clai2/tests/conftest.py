@@ -27,8 +27,11 @@ class FakeGh:
         (self.state / host).write_text(token)
 
     def next_login(self, mode: str) -> None:
-        """`ok`, `fail`, `hang`, `early`, or `no-token`."""
+        """`ok`, `fail`, `hang` (after the code), `silent` (before it), `early`, or `no-token`."""
         (self.state / 'login').write_text(mode)
+
+    def hang_on_token(self) -> None:
+        (self.state / 'token-hang').write_text('')
 
     def calls(self) -> list[str]:
         path = self.state / 'calls'

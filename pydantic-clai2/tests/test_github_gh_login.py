@@ -4,6 +4,7 @@ import io
 import webbrowser
 from pathlib import Path
 
+import anyio
 import pytest
 from conftest import FakeGh
 from menu_script import Script, pick
@@ -17,7 +18,7 @@ from termflow.tui.menu import MenuResult  # pyright: ignore[reportMissingTypeStu
 
 from pydantic_clai2 import DEFAULT_PLUGINS
 from pydantic_clai2.commands import Commands
-from pydantic_clai2.gh_cli import INSTALL, GhToken, gh_command, gh_host
+from pydantic_clai2.gh_cli import INSTALL, GhToken, gh_command, gh_host, gh_token, start_login
 from pydantic_clai2.github import FINISHED, SETUP
 from pydantic_clai2.plugin_loader import PluginLoader
 from pydantic_clai2.plugins import SessionStart
@@ -177,3 +178,43 @@ def test_gh_command_finds_gh_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyP
     executable.write_text('#!/bin/sh\n')
     executable.chmod(0o755)
     assert gh_command() == [str(executable)]
+
+
+def test_a_stalled_gh_auth_token_fails_instead_of_hanging(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> None:
+    monkeypatch.setattr('pydantic_clai2.gh_cli.TOKEN_TIMEOUT', 0.3)
+    fake_gh.hang_on_token()
+    with pytest.raises(UserError, match='gh auth token did not answer within 0.3 seconds'):
+        gh_token('github.com')
+
+
+async def test_a_login_that_shows_no_code_gives_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh
+) -> None:
+    monkeypatch.setattr('pydantic_clai2.gh_cli.CODE_TIMEOUT', 0.3)
+    fake_gh.next_login('silent')
+    shell = Shell(tmp_path, {'login': 'key'})
+    await shell.loader.enable('github')
+    script(monkeypatch, [pick('gh')])
+    assert await shell.loader.configure('github') == 'gh auth login showed no code within 0.3 seconds.'
+    assert shell.login() == 'key'
+
+
+def test_start_login_stops_when_asked(fake_gh: FakeGh) -> None:
+    fake_gh.next_login('silent')
+    assert start_login('github.com', stopping=lambda: True) is None
+
+
+async def test_cancelling_configure_stops_a_silent_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh
+) -> None:
+    fake_gh.next_login('silent')
+    shell = Shell(tmp_path, {'login': 'key'})
+    await shell.loader.enable('github')
+    script(monkeypatch, [pick('gh')])
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(shell.loader.configure, 'github')
+            while not any(call.startswith('auth login') for call in fake_gh.calls()):
+                await anyio.sleep(0.02)
+            tasks.cancel_scope.cancel()
+    assert shell.login() == 'key'
