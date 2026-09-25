@@ -90,6 +90,16 @@ async def resume(ref: WorkspaceRef) -> str:
 
 An explicit reference takes precedence over message history. Pass `workspace='new'` to `agent.run()` to start a fresh Sprite even when the history names one. `runtime` only applies to a new Sprite; `working_dir` and `env` apply to every command, in a reattached Sprite too.
 
+## Lifetime and cost
+
+A Sprite persists after the agent run ends, with its files and installed packages. It pauses when idle and resumes on the next command: compute is billed while it is active, storage until it is deleted. Pydantic AI never deletes a Sprite; deleting it through the SDK when you are done is the application's job, as shown below.
+
+- Pass a finite `timeout` to bound a command. On a timeout or a cancelled call, the command is sent SIGKILL through the Sprites API, and `WorkspaceTimeoutError` carries the output produced so far. Background processes the command started, such as a `server &` or a `Shell` background job, may outlive it.
+- A deleted Sprite and rejected credentials raise `WorkspaceUnavailableError`, which ends the run. Network and connection errors propagate unchanged, so a durable execution engine can retry them.
+- The `WorkspaceRef` carries no credentials, so every worker that reattaches needs its own `SPRITE_TOKEN` or `client=`. See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for how a run selects and restores its workspace.
+
+The capability emits no telemetry spans of its own; core's agent and tool spans cover the calls made through tools.
+
 ## Manage the Sprite yourself
 
 For Sprites SDK operations, hold a `SpritesSandboxBackend` and call `await backend.get_client()` for the typed `sprites.AsyncSprite`. The first call creates or attaches to the Sprite; later calls return the same object. `SpritesSandboxBackend(workspace=native)` wraps a Sprite handle you already have; pass either that or `ref=`, not both.
@@ -117,15 +127,19 @@ A backend creates its own `AsyncSpritesClient` from `SPRITE_TOKEN` on first use.
 
 To delete the Sprite an agent run created, take the backend from `result.workspace.backend`; check that its `ref` is not `None` first, since `get_client()` would otherwise create a Sprite.
 
-## Lifetime and cost
+## Temporal and other durable engines
 
-A Sprite persists after the agent run ends, with its files and installed packages. It pauses when idle and resumes on the next command: compute is billed while it is active, storage until it is deleted. Pydantic AI never deletes a Sprite; deleting it through the SDK when you are done is the application's job.
+Under a durable engine such as Temporal, each activity builds its own backend, and without `client=` each one opens an `AsyncSpritesClient` that is never closed. Create one client when the worker starts and pass it as `client=`, so every activity shares it. The capability never closes a client you pass, and it must be used on the event loop it was created on, which is the worker's.
 
-- Pass a finite `timeout` to bound a command. On a timeout or a cancelled call, the command is sent SIGKILL through the Sprites API, and `WorkspaceTimeoutError` carries the output produced so far. Background processes the command started, such as a `server &` or a `Shell` background job, may outlive it.
-- A deleted Sprite and rejected credentials raise `WorkspaceUnavailableError`, which ends the run. Network and connection errors propagate unchanged, so a durable execution engine can retry them.
-- The `WorkspaceRef` carries no credentials, so every worker that reattaches needs its own `SPRITE_TOKEN` or `client=`. See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for how a run selects and restores its workspace.
+```python
+from sprites import AsyncSpritesClient
+from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
 
-The capability emits no telemetry spans of its own; core's agent and tool spans cover the calls made through tools.
+async def run_worker(token: str) -> None:
+    async with AsyncSpritesClient(token=token) as client:
+        sandbox = SpritesSandbox(client=client)
+        ...  # add `sandbox` to the agent's capabilities, then start the worker
+```
 
 ## API reference
 
