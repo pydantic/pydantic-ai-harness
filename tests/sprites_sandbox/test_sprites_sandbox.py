@@ -184,6 +184,7 @@ class TestSpritesSandbox:
             ('acquire', NotFoundError('gone'), WorkspaceUnavailableError),
             ('acquire', SpriteError('Failed get sprite (status 400)'), WorkspaceError),
             ('acquire', SpriteError('Failed get sprite (status 429): rate limited'), None),
+            ('acquire', SpriteError('Failed get sprite (status 503): unavailable'), None),
             ('acquire', NetworkError('reset'), None),
             ('connect', _handshake(401), WorkspaceUnavailableError),
             ('connect', _handshake(404), WorkspaceUnavailableError),
@@ -218,6 +219,32 @@ class TestSpritesSandbox:
             assert cause.status_code == error.response.status_code
         else:
             assert cause is error
+
+    @pytest.mark.parametrize(
+        'error,expected',
+        [
+            (SpriteError('Failed create sprite (status 400): unknown runtime'), WorkspaceUnavailableError),
+            (NotFoundError('Resource not found for create sprite'), WorkspaceUnavailableError),
+            (AuthenticationError('bad token'), WorkspaceUnavailableError),
+            (SpriteError('Failed create sprite (status 429): rate limited'), None),
+            (SpriteError('Failed create sprite (status 502): bad gateway'), None),
+            (NetworkError('reset'), None),
+        ],
+    )
+    async def test_refused_creation_is_unavailable(
+        self, transport: SpriteTransport, error: Exception, expected: type[WorkspaceError] | None
+    ) -> None:
+        transport.create_error = error
+        with pytest.raises(Exception) as caught:
+            await SpritesSandboxBackend(runtime='nope').run(['true'])
+
+        if expected is None:
+            assert caught.value is error
+        else:
+            assert type(caught.value) is expected
+            assert caught.value.__cause__ is error
+            if not isinstance(error, AuthenticationError):
+                assert str(caught.value) == f'Could not start Sprites sandbox: {error}'
 
     async def test_missing_token(self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('SPRITE_TOKEN')
@@ -428,7 +455,7 @@ class TestSpritesSandbox:
             await SpritesSandboxBackend().run(command, env=env)
         assert transport.execs == []
 
-    async def test_canonical_working_directory_preserves_spaces(self, transport: SpriteTransport) -> None:
+    async def test_resolved_working_directory_preserves_spaces(self, transport: SpriteTransport) -> None:
         target = transport.root / ' directory '
         target.mkdir()
         link = transport.root / 'link'

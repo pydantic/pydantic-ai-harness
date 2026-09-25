@@ -45,6 +45,7 @@ import logging
 import math
 import os
 import posixpath
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from typing import TypeVar
@@ -150,28 +151,30 @@ async def _close_command(command: WSCommand) -> None:
             command.ws.transport.abort()
 
 
-def _map_error(error: Exception, name: str) -> WorkspaceError | None:
+def _map_error(error: Exception, sprite_name: str | None) -> WorkspaceError | None:
     """Translate a Sprites failure, or return `None` for one that propagates as is.
 
-    Rejected credentials and a missing Sprite end the run; any other request the API refused is
-    a failed operation. Transport failures (`NetworkError`, a socket that closed before the exit
-    status), rate limits, server errors on the exec handshake, and anything unknown propagate
-    unchanged, for durable engines to retry.
+    `sprite_name` is `None` while the Sprite is being created. Rejected credentials, a refused
+    creation, and a missing Sprite end the run; any other request the API refused is a failed
+    operation. Transport failures (`NetworkError`, a socket that closed before the exit status),
+    rate limits, server errors, and anything unknown propagate unchanged, for durable engines to retry.
     """
     # The exec handshake reports its HTTP status as an `APIError`.
     status = error.status_code if isinstance(error, APIError) else None
     if isinstance(error, AuthenticationError) or status == 401:
         return WorkspaceUnavailableError(_AUTH_MESSAGE)
+    if not isinstance(error, SpriteError) or isinstance(error, (NetworkError, SpriteTimeoutError)):
+        return None
+    # sprites-py reports every other HTTP failure, a rate limit or a server error included, as a plain
+    # `SpriteError` whose message names the status.
+    if re.search(r'\(status (429|5\d\d)\)', str(error)) or (status is not None and (status == 429 or status >= 500)):
+        return None
+    if sprite_name is None:
+        # An unknown runtime or a bad request fails the same way on every retry.
+        return WorkspaceUnavailableError(f'Could not start Sprites sandbox: {error}')
     if isinstance(error, NotFoundError) or status == 404:
-        return WorkspaceUnavailableError(f'Sprite {name!r} no longer exists.')
-    # sprites-py reports a rate limit as a plain `SpriteError` naming the HTTP status.
-    if isinstance(error, (NetworkError, SpriteTimeoutError)) or '(status 429)' in str(error):
-        return None
-    if status is not None and (status == 429 or status >= 500):
-        return None
-    if isinstance(error, SpriteError):
-        return WorkspaceError(f'Sprites refused the request: {error}')
-    return None
+        return WorkspaceUnavailableError(f'Sprite {sprite_name!r} no longer exists.')
+    return WorkspaceError(f'Sprites refused the request: {error}')
 
 
 class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
@@ -182,8 +185,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
     and closes it in `aclose()`.
     The backend does not delete the Sprite; that is the application's job, through the native
     handle. Commands run under `/bin/sh -c` with `shell=True`, in the Sprite's own environment
-    plus `env`. Every command gets its own exec WebSocket, which is closed before the result is
-    returned.
+    plus `env`.
     """
 
     def __init__(
@@ -202,11 +204,12 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
             raise ValueError('pass either `workspace` or `ref`, not both')
         self._workspace = workspace
         self._ref = ref if workspace is None else WorkspaceRef(provider='sprites', id=workspace.name)
-        self._name = f'pydantic-ai-{uuid.uuid4().hex}'
+        self._new_sprite_name = f'pydantic-ai-{uuid.uuid4().hex}'
         self._runtime = runtime
         self._working_dir = absolute_path('working_dir', working_dir)
         self._env = dict(env or {})
-        self._canonical_working_dir: str | None = None
+        # `working_dir` as the Sprite resolves it (`pwd -P`): the protocol reports a canonical absolute path.
+        self._resolved_working_dir: str | None = None
         self._client = client
         self._owns_client = client is None
         self._lock = anyio.Lock()
@@ -247,7 +250,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
                     if ref is not None:
                         workspace = await client.get_sprite(ref.id)
                     else:
-                        workspace = await client.create_sprite(self._name, runtime=self._runtime)
+                        workspace = await client.create_sprite(self._new_sprite_name, runtime=self._runtime)
                     # Recorded as soon as the SDK returns, so a cancelled caller still leaves it named.
                     self._workspace = workspace
                     self._ref = WorkspaceRef(provider='sprites', id=workspace.name)
@@ -266,7 +269,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
                 # was created is never left unnamed; attaching creates nothing and stays cancellable.
                 return await (acquire() if ref is not None else _run_to_completion(acquire))
             except SpriteError as error:
-                if (mapped := _map_error(error, self._name if ref is None else ref.id)) is None:
+                if (mapped := _map_error(error, None if ref is None else ref.id)) is None:
                     raise
                 raise mapped from error
 
@@ -299,13 +302,13 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
         await _run_to_completion(close)
 
     async def working_dir(self) -> str:
-        if self._canonical_working_dir is None:
+        if self._resolved_working_dir is None:
             result = await self.run(['pwd', '-P'], timeout=30)
             directory = result.stdout.removesuffix('\n')
             if result.exit_code != 0 or not posixpath.isabs(directory):
                 raise WorkspaceError('Could not determine the Sprite working directory.')
-            self._canonical_working_dir = directory
-        return self._canonical_working_dir
+            self._resolved_working_dir = directory
+        return self._resolved_working_dir
 
     async def run(
         self,
