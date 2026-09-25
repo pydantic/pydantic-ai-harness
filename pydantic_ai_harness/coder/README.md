@@ -178,6 +178,7 @@ This release makes the workspace the single place that decides where an agent wo
 - **`FileSystem(root_dir=)`** defaults to the working directory and resolves relative values from it. It must contain the working directory, symlinks that lead outside it are refused, and `root_dir='/'` turns the checks off.
 - **Harness files moved into the working directory.** Tool-output spills and Shell background-job files are under `.pydantic-ai-harness/` (git-ignored) instead of `$TMPDIR`. `ToolOutputLimits(store=LocalFileStore())` keeps spills on this machine.
 - **Skills** are read from the workspace at run start and loaded as deferred capabilities. [`Skills(workspace=LocalWorkspaceBackend('/app'))`](https://pydantic.dev/docs/ai/harness/skills/) reads them from somewhere else.
+- **Sub-agent definitions** are read from the workspace at run start, and `~/.agents/agents/` is no longer read. [`SubAgents(workspace=LocalWorkspaceBackend('/app'))`](https://pydantic.dev/docs/ai/harness/subagents/) reads them from somewhere else.
 - **Capability Creation** runs only when the workspace is a writable `LocalWorkspace`.
 
 ## Benchmarking

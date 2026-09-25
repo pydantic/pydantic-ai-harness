@@ -196,17 +196,19 @@ from pydantic_ai_harness import SubAgents
 
 orchestrator = Agent(
     'anthropic:claude-opus-4-7',
-    capabilities=[SubAgents(inherit_tools=True)],  # auto-loads .agents/agents/ and ~/.agents/agents/
+    capabilities=[SubAgents(inherit_tools=True)],  # auto-loads .agents/agents/ from the run's workspace
 )
 ```
 
-`agent_folders` controls where definitions come from. It defaults to `'agents'`, the conventional layout:
+Definitions are read at the start of every run from the run's [workspace](https://pydantic.dev/docs/ai/workspace/), so a sandbox's agent files are found and nothing is read from your home directory. To read them from somewhere else, such as definitions that ship with your application, pass `workspace=LocalWorkspaceBackend('/app')`.
 
-- A folder-name `str` (the default `'agents'`): for the project root then the home root, load from `<root>/.agents/<name>/`, falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
-  - The project root is the run workspace's working directory. Its folder is read through `ctx.workspace` at the start of every run, so a remote sandbox's agent files are found, and runs without an attached workspace skip it.
-  - The home root is the host's `~`, read once when `SubAgents` is constructed.
-- A sequence of paths loads from exactly those host folders, in order, once at construction.
+`agent_folders` controls which folders are read. It defaults to `'agents'`, the conventional layout:
+
+- A folder-name `str` (the default `'agents'`): load from `.agents/<name>/` under the workspace's working directory, falling back to `.claude/<name>/` when `.agents/` is absent. A run without a workspace skips it.
+- A sequence of workspace paths, absolute or relative to the working directory, loads from exactly those folders, in order.
 - `None` disables disk loading, exposing only the explicitly-passed `agents`.
+
+Until this release, the home folder `~/.agents/agents/` was read too, and a path sequence was read from this machine. A run without a workspace still reads a path sequence from this machine, with a deprecation warning; pass `workspace=LocalWorkspaceBackend('.')` to keep that.
 
 ### Definition format
 
@@ -260,7 +262,7 @@ SubAgents(agent_folders='agents', tool_resolver=resolve)
 
 ### Precedence
 
-When the same name appears in more than one source, the higher-precedence one wins and the others are skipped with a warning: explicitly-passed `agents` first, then the project folder, then the home folder (and, for an explicit path sequence, earlier paths before later ones). A home definition identical to the project's (when the workspace root is the home directory) loads once, without a warning. A duplicate name within the explicitly-passed `agents` list is still an error.
+When the same name appears in more than one source, the higher-precedence one wins and the others are skipped with a warning: explicitly-passed `agents` first, then earlier folders before later ones. A duplicate name within the explicitly-passed `agents` list is still an error.
 
 ## Configuration
 
@@ -268,7 +270,7 @@ When the same name appears in more than one source, the higher-precedence one wi
 SubAgents(
     agents=(),             # Sequence[SubAgent[AgentDepsT]] -- each pairs an agent with its run controls
     models={},             # Mapping[str, Model | str | ModelOption] -- per-delegation model menu (off when empty)
-    agent_folders='agents',# folder-name str (convention) | Sequence[Path] | None (disable)
+    agent_folders='agents',# folder-name str (convention) | Sequence[str | Path] workspace paths | None (disable)
     agent_overrides={},    # Mapping[str, AgentOverride] -- per-disk-agent model/effort override
     tool_resolver=None,    # Callable[[str], Sequence[AgentToolset[object]] | None] -- disk-agent tool mapping
     forward_usage=True,    # share the parent's usage with sub-agent runs
@@ -278,6 +280,7 @@ SubAgents(
     tool_name='delegate_task',
     tool_retries=2,        # extra delegate-tool attempts after a sub-agent error before aborting (None inherits the agent default)
     contain_errors=False,  # default for SubAgent.contain_errors: contain an unexpected crash as a bounded retry
+    workspace=None,        # WorkspaceBackend to read agent_folders from instead of the run's workspace
 )
 ```
 
