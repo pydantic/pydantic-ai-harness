@@ -510,39 +510,53 @@ show a "waiting for you" state) registers `@host.on(EventClass)` or
 
 ### `day_ai`: Day AI CRM tools
 
-`day_ai` (`pydantic_clai2.day_ai`) starts disabled. `/plugins enable day_ai`
-gives the model harness
+`day_ai` (`pydantic_clai2.day_ai`) starts disabled. It gives the model harness
 [`DayAI`](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/day_ai/),
 the tools of Day AI's hosted MCP server: search and update CRM records, read
 meeting context, and draft emails. It needs a paid Day AI Agent tier.
 
-It connects in one of two ways, and neither puts a secret in plugin settings,
-which are stored in plaintext:
+`/plugins enable day_ai` loads it and opens its settings menu. Reopen the menu
+at any time with `/plugins configure day_ai`, or `C` on `day_ai` in `/plugins`.
+Type to filter the rows, press Enter to change one, `R` to reset it to its
+default, and Esc to close. Each change is saved as soon as you make it, and the
+plugin loads again with the new settings when the menu closes. The menu has
+one row for each option harness `DayAI` takes:
 
-- **A token in `/keys`.** Save it under `DAY_AI_ACCESS_TOKEN`, the name harness
-  `DayAI` documents, and the plugin uses it. The name is a `/keys` label only;
-  CLAI does not read the environment variable. The token is looked up on every
-  run, so replacing it in `/keys` reaches the next run, and deleting it makes
-  runs fail with a message until you save it again. Plugins that name the same
-  key share it, the way `github` and Copilot can share `GITHUB_TOKEN`.
-- **Browser sign-in.** With no key, enabling the plugin opens the browser to sign
-  in, the way `/mcp` signs in to an OAuth server, and keeps the tokens in the OS
-  keyring (credential `mcp-day_ai`), so later sessions reuse and refresh them. A
-  failed sign-in fails the load, so nothing is added. A headless run with no
-  token and no stored sign-in fails to load rather than opening a browser.
+| Row | Setting | Choices |
+| --- | --- | --- |
+| Sign-in | `auth` | **automatic** (default): `DAY_AI_ACCESS_TOKEN` from `/keys` if it is saved, else a browser sign-in you completed earlier; **choose or enter a key in /keys**; **browser sign-in** |
+| Server instructions | `include_instructions` | **forwarded** (default) or **left out**: whether the Day AI server's own instructions reach the agent |
 
-`/day_ai` shows which one is in use. `/day_ai connect` lets you pick a saved key
-from `/keys`, type a new one (masked, saved as `DAY_AI_ACCESS_TOKEN` after
-asking before replacing an existing value), or leave it empty for browser
-sign-in. It saves your choice as the plugin's `auth` setting, the same option
-harness `DayAI` takes: a key's name such as `{"auth": {"name": "WORK_DAY_AI"}}`,
-or `{"auth": "oauth"}` to keep using the browser even when
-`DAY_AI_ACCESS_TOKEN` is saved. `/plugins reload day_ai` applies it. An `auth`
-that names a missing key does not fall back to the browser.
+Day AI runs one hosted endpoint (`https://day.ai/api/mcp`), and harness `DayAI`
+has no base URL, workspace, or read-only option, so the menu offers none.
+Which workspace you reach follows from the token or the account you sign in
+with. The server does not mark any tool read-only, so the model gets every
+tool your tier and role allow, including ones that change CRM records.
 
-The server does not mark tools read-only, so, as with harness `DayAI`, there is
-no `read_only` option: the model gets every tool your tier and role allow,
-including ones that change CRM records.
+Tokens are kept out of plugin settings, which are stored in plaintext:
+
+- **A token in `/keys`.** Choosing "choose or enter a key in /keys" lists your
+  saved keys, searchable by name, so you can pick one, or enter a new token in
+  a masked field. A new token is saved in `/keys` as `DAY_AI_ACCESS_TOKEN`, the
+  name harness `DayAI` documents, after asking before it replaces a saved one.
+  Settings keep only the name, as `{"auth": {"name": "DAY_AI_ACCESS_TOKEN"}}`.
+  The name is a `/keys` label only; CLAI does not read the environment
+  variable. The token is looked up on every run, so replacing it in `/keys`
+  reaches the next run, and deleting it makes runs fail with a message until
+  you save it again. Rename, replace, or delete keys in `/keys`. Plugins that
+  name the same key share one value.
+- **Browser sign-in.** This keeps the tokens in the OS keyring (credential
+  `mcp-day_ai`), the way `/mcp` signs in to an OAuth server, so later sessions
+  reuse and refresh them. Choosing it saves `{"auth": "oauth"}`, which keeps
+  using the browser even when `DAY_AI_ACCESS_TOKEN` is saved. If you are not
+  signed in yet, the browser opens when the menu closes. A failed sign-in fails
+  the load, so nothing is added. A headless run that is not signed in fails to
+  load rather than opening a browser.
+
+Until you choose one, with no `DAY_AI_ACCESS_TOKEN` and no earlier sign-in,
+the plugin loads without Day AI tools and prints how to connect. A key named
+in `auth` that is missing from `/keys` never falls back to the browser, and the
+menu marks it "missing from /keys".
 
 If you enabled `day_ai` from the earlier harness catalog, your saved
 `pydantic_ai_harness.day_ai:DayAI` declaration still takes precedence and reads
@@ -563,13 +577,15 @@ for `/agent` and `/mcp`:
                                                      | adds    2 commands, 1 hook, 0 tools
                                                      | error   none
 
- Up/Down move - Space enable/disable - R reload - D remove - Enter/Q close
+ Up/Down move - Space enable/disable - C configure - R reload - D remove - Enter/Q close
 ```
 
 The left side lists every plugin with `[x]` for on and `[ ]` for off. The right
 side shows details for the highlighted one: where it came from, whether it
 loaded, what it registered, and the last error if loading failed. Every key
 acts immediately; there is no save step, so Enter, Q, Esc, and Ctrl-C all just close.
+`C` closes the list and opens the highlighted plugin's settings menu, if it has
+one; enabling such a plugin with Space shows a reminder to press it.
 Closing returns to the prompt without printing the plugin list. Use `/plugins list`
 to print it.
 Adding a plugin needs a name and a module, so that stays a typed command.
@@ -584,6 +600,7 @@ CLAI does the same thing:
 | `/plugins remove NAME` | forget an installed declaration; persistently disable a drop-in (delete its file yourself to remove it); reset a built-in or project-declared plugin to its declaration |
 | `/plugins enable NAME` / `disable NAME` | load or unload, remembered across restarts |
 | `/plugins reload NAME` | re-import the file and load it again (for editing a plugin while CLAI runs) |
+| `/plugins configure NAME` | open a loaded plugin's settings menu, if it registered one with `host.configure`; `enable` and `add` open it too |
 | `/reload` | reload CLAI's own Python modules for development and rebuild the shell without restarting the process |
 
 `/reload` takes no arguments. It uses `importlib.reload`, preserves the conversation,
@@ -932,6 +949,59 @@ Bad or missing values fail at startup with a message naming your plugin.
 CLAI ignores unknown names in its own saved settings and preserves their values for
 other versions or branches. This does not relax validation of plugin declarations
 or `host.settings(Model)`.
+
+### Keep secrets in `/keys`: `KeyReference`, `SavedKey`, `host.save_settings`
+
+Plugin settings are stored in plaintext SQLite, so a token, API key, or client
+secret must never be one of them. Keep the secret in the named API key store that
+`/keys` manages, and put only its name in your settings. Use the conventional
+uppercase variable name as the label, such as `GITHUB_TOKEN` or `SLACK_BOT_TOKEN`,
+so plugins that need the same credential share one key; replacing it in `/keys`
+reaches all of them. The label does not export or read an environment variable.
+
+```python
+from pydantic import BaseModel, ConfigDict, Field
+
+from pydantic_clai2.api_keys import KeyReference, SavedKey
+
+
+class MySettings(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    token: KeyReference = Field(default_factory=lambda: KeyReference(name='MY_SERVICE_TOKEN'))
+
+
+def activate(host):
+    settings = host.settings(MySettings)
+    host.add(MyService(auth=SavedKey(name=settings.token.name, setup='Add MY_SERVICE_TOKEN in /keys.')))
+```
+
+`SavedKey` is a capability `auth` function. It looks the key up on every run and
+raises with `setup` when the key is missing, so a deleted key fails closed rather
+than falling back to something else. To let the user choose a key, call `prompt_api_key(prompt=..., label=...)`: it
+returns a `KeyReference` to a saved key, a masked new value for you to
+`save_key(name=..., value=...)`, or `None` when cancelled. Then call
+`host.save_settings(settings)` with the new reference. It saves your plugin's
+declaration as `plugins add` would, and `host.settings(Model)` returns the new
+values from then on.
+
+### Offer a settings menu: `@host.configure`
+
+```python
+from pydantic_clai2.field_menu import FieldMenu, run_flow
+from pydantic_clai2.menu_worker import run_worker
+
+
+@host.configure
+async def configure() -> str:
+    return '\n'.join(await run_worker(lambda: run_flow(FieldMenu(MySource(host)))))
+```
+
+`/plugins configure NAME`, `C` in `/plugins`, and `/plugins enable` or `add`
+(when they load the plugin) open it. Build it on `FieldMenu` and a `FieldSource`
+so it looks and behaves like `/set`. Save each edit with `host.save_settings` as
+it is made, keep secrets in `/keys` as above, and return the lines to show. If the
+saved settings changed, the loader loads the plugin again after the menu closes,
+so `activate` builds from them. The built-in `github` plugin is a complete example.
 
 ### Reach the conversation and the status row: `host.conversation`, `host.status`
 

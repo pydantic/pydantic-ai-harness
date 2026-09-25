@@ -40,7 +40,7 @@ def resolve_key(*, token: SecretStr | KeyReference) -> str:
     return keys[token.name].get_secret_value()
 
 
-@dataclass(kw_only=True)
+@dataclass(frozen=True, kw_only=True)
 class SavedKey:
     """A capability's `auth` function: the named key's current value, looked up on every run.
 
