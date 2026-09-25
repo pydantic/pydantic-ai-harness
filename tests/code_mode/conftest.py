@@ -27,7 +27,7 @@ async def websocket_relay_server(port: int = 0) -> AsyncGenerator[str, None]:
     )
     assert process.stdout is not None
     try:
-        url_line = await asyncio.wait_for(process.stdout.readline(), timeout=5)
+        url_line = await asyncio.wait_for(process.stdout.readline(), timeout=30)
         assert url_line, 'WebSocket relay exited before printing its URL'
         yield url_line.decode().strip()
     finally:

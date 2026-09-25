@@ -476,7 +476,8 @@ server is on a private network: the connection carries your tool results and fil
 Only code execution moves to the worker. Your tools, `mount` directories, `os_access`, and `print`
 output are still handled by the agent's process, and REPL state persists across `run_code` calls
 as it does locally. Eager execution, speculation, resource limits, and Temporal work the same way.
-Each snippet may take `max_duration_secs` plus 10 seconds before the connection gives up on it.
+The connection gives up when the worker has not answered within `max_duration_secs` plus 10 seconds,
+counted from each point the snippet starts or resumes after a tool call.
 With no duration limit (`resource_limits='unlimited'`, or inside a Temporal workflow), a server
 that stops responding is waited on indefinitely.
 
@@ -522,7 +523,8 @@ workflow schedules and cause a `NondeterminismError`. Put external reads, writes
 other side effects in wrapped tools so Temporal records them as activities. Replay may not flag
 changed arguments when the same activity remains at the same history position, so replay validation
 is not a substitute for this boundary. Temporal activity timeouts apply to nested tools, not pure
-computation inside `run_code`; move time-bounded computation behind an activity.
+computation inside `run_code`. The workflow waits while the sandbox computes, and Temporal fails a
+workflow task that does not yield within 2 seconds, so move heavier computation into a tool.
 
 ## Observability
 

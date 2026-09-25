@@ -183,7 +183,8 @@ class TestEagerCodeMode:
                 yield {1: DeltaToolCall(json_args=chunk)}
                 await asyncio.sleep(0)
             # The first statement is complete by now: `search` must run before the stream ends.
-            await asyncio.wait_for(search_started.wait(), timeout=5)
+            # A hang guard, not a timing assertion: without eager execution `search` would never start.
+            await asyncio.wait_for(search_started.wait(), timeout=30)
             yield {1: DeltaToolCall(json_args=chunks[-1])}
 
         agent: Agent[None, str] = Agent(
