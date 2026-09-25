@@ -310,14 +310,14 @@ class SpriteWorkspaceBackend(WorkspaceBackend, SupportsCommands):
         options = json.dumps({'args': args, 'cwd': directory, 'env': {**self._env, **(env or {})}})
         control = f'/tmp/pydantic-ai-{uuid.uuid4().hex}'
 
-        # The deadline is measured from this call, so it covers acquiring the Sprite too.
+        # Acquiring the Sprite has its own bound; the deadline is the command's alone.
+        sprite = await self.get_client()
+        connection = ControlConnection(sprite)
         deadline = anyio.CancelScope(deadline=math.inf if timeout is None else anyio.current_time() + timeout)
-        sprite = connection = operation = None
+        operation = None
         code = -1
         try:
             with deadline:
-                sprite = await self.get_client()
-                connection = ControlConnection(sprite)
                 await connection.connect()
                 operation = await connection.start_op(
                     'exec', cmd=['python3', '-I', '-c', RUN, control, options], stdin=False
@@ -332,8 +332,6 @@ class SpriteWorkspaceBackend(WorkspaceBackend, SupportsCommands):
                     stderr=_decode(stderr),
                     timeout=timeout,
                 )
-            # Only the deadline leaves the block before the connection exists.
-            assert connection is not None
             if code == -1:
                 # The SDK keeps the transport failure that closed the connection; that is what propagates.
                 if connection.close_error is not None:
@@ -342,11 +340,8 @@ class SpriteWorkspaceBackend(WorkspaceBackend, SupportsCommands):
                     f'Sprite command transport closed before reporting an exit status. {_decode(stderr).strip()}'.strip()
                 )
         except BaseException as error:
-            if sprite is None:
-                raise
             await self._cancel_remote(sprite, control)
-            if connection is not None:  # pragma: no branch - created right after the Sprite
-                await _close_connection(connection)
+            await _close_connection(connection)
             if isinstance(error, Exception) and (mapped := _map_error(error, sprite.name)) is not None:
                 raise mapped from error
             raise

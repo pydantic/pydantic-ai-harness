@@ -240,16 +240,16 @@ class TestSpriteWorkspace:
         assert ('connection' if attach else 'creation') in str(caught.value)
         assert transport.commands == []
 
-    async def test_run_deadline_covers_acquisition(self, transport: SpriteTransport) -> None:
+    async def test_run_deadline_starts_once_the_sprite_is_acquired(self, transport: SpriteTransport) -> None:
         transport.names.add('remote')
         transport.release_get = asyncio.Event()
         backend = SpriteWorkspaceBackend(ref=WorkspaceRef(provider='sprites', id='remote'))
+        # Attaching outlasts the timeout; the command itself fits in it comfortably.
+        task = asyncio.create_task(backend.run(['echo', 'ok'], timeout=1))
+        await asyncio.sleep(1.1)
+        transport.release_get.set()
 
-        with pytest.raises(WorkspaceTimeoutError) as caught:
-            await backend.run(['true'], timeout=0.05)
-
-        assert (caught.value.stdout, caught.value.stderr) == ('', '')
-        assert transport.commands == []
+        assert (await task).stdout == 'ok\n'
 
     async def test_failed_acquisition_keeps_the_client_for_a_retry(self, transport: SpriteTransport) -> None:
         transport.get_error = SpriteError('lookup failed')
