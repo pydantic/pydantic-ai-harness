@@ -22,7 +22,7 @@ from typing import Protocol, runtime_checkable
 
 from pydantic_ai.workspaces import Workspace, WorkspaceBackend
 
-from pydantic_ai_harness._workspace import metadata_dir, secondary_workspace
+from pydantic_ai_harness._workspace import METADATA_DIR, metadata_dir, secondary_workspace
 
 
 @runtime_checkable
@@ -98,7 +98,7 @@ class WorkspaceStore:
         """
         workspace = self._workspace or workspace
         path = posixpath.join(await metadata_dir(workspace, 'tool-output'), *_segments(key))
-        await workspace.write_bytes(path, data)
+        await workspace.write_bytes(await _confine(workspace, path, key), data)
         return path
 
     async def read(self, workspace: Workspace, handle: str) -> bytes:
@@ -108,7 +108,21 @@ class WorkspaceStore:
         path = posixpath.normpath(posixpath.join(directory, handle))
         if not path.startswith(directory.rstrip('/') + '/'):
             raise PermissionError(f'Handle {handle!r} is outside the store directory.')
-        return await workspace.read_bytes(path)
+        return await workspace.read_bytes(await _confine(workspace, path, handle))
+
+
+async def _confine(workspace: Workspace, path: str, name: str) -> str:
+    """Return `path` with symlinks resolved, refusing one that leaves the store directory.
+
+    The store directory is resolved from the working directory, so a symlink in place of the
+    directory itself (or of `.pydantic-ai-harness`) is refused too, not only one inside it.
+    """
+    real_working_dir = await workspace.realpath(await workspace.working_dir())
+    real_directory = posixpath.join(real_working_dir, METADATA_DIR, 'tool-output')
+    real_path = await workspace.realpath(path)
+    if not real_path.startswith(real_directory + '/'):
+        raise PermissionError(f'Handle {name!r} is outside the store directory.')
+    return real_path
 
 
 @dataclass
