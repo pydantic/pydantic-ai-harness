@@ -513,7 +513,10 @@ show a "waiting for you" state) registers `@host.on(EventClass)` or
 `slack` (`pydantic_clai2.slack`) connects harness
 [`Slack`](../pydantic_ai_harness/slack/README.md) to Slack's hosted MCP server.
 It ships disabled. The tools act as the user whose token CLAI connects with, so
-anything the agent posts appears under your name.
+anything the agent posts appears under your name. If you enabled or disabled the
+earlier raw `pydantic_ai_harness.slack:Slack` catalog row, CLAI switches that saved
+row to this plugin at startup and keeps your choice. A declaration with your own
+settings is left as it is.
 
 CLAI reads a Slack user token (`xoxp-`; Slack rejects bot tokens) from the
 `SLACK_USER_TOKEN` environment variable, or, when that is unset, from a key saved

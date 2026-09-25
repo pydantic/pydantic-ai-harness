@@ -30,7 +30,7 @@ from ._branding import print_banner
 from ._completion_adapter import COMPLETION_STYLE, PromptCompleter
 from ._rendering import StreamRenderer
 from ._session import Session
-from .capability_catalog import HARNESS_PLUGINS
+from .capability_catalog import HARNESS_PLUGINS, adopt_promoted
 from .command_context import CommandContext, CommandProvider
 from .commands import (
     Command,
@@ -400,12 +400,14 @@ def create_shell(
     )
     screen = Screen()
     status = Status()
+    builtin = tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in builtin_plugins)
+    adopt_promoted(store, builtin)
     loader: PluginLoader[DepsT] = PluginLoader(
         store=store,
         console=console,
         commands=commands,
         session_start=lambda: SessionStart(agent=agent, settings=context.settings),
-        builtin=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in builtin_plugins),
+        builtin=builtin,
         full_screen=screen.full,
         project=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in project.plugins),
         conversation=session,

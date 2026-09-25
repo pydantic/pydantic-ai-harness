@@ -1,16 +1,19 @@
 """The built-in `slack` plugin: declared off, token from the environment or `/keys`, and a clear failure without one."""
 
 import io
+import threading
 
 import pytest
+from pydantic import SecretStr
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai_harness.slack import Slack
 from rich.console import Console
 
 from pydantic_clai2 import DEFAULT_PLUGINS
-from pydantic_clai2.api_keys import save_key
-from pydantic_clai2.capability_catalog import HARNESS_PLUGINS
+from pydantic_clai2 import slack as slack_plugin
+from pydantic_clai2.api_keys import load_keys, save_key
+from pydantic_clai2.capability_catalog import HARNESS_PLUGINS, adopt_promoted
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.plugin_loader import PluginError, PluginLoader
@@ -96,3 +99,46 @@ async def test_rejects_unknown_settings(monkeypatch: pytest.MonkeyPatch) -> None
         await plugins.command(['add', 'slack', 'pydantic_clai2.slack', '{"token": "xoxp-inline"}'])
     assert plugins.capabilities() == []
     await plugins.close('exit')
+
+
+async def test_saved_key_is_read_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    save_key(name='SLACK_USER_TOKEN', value='xoxp-saved')
+    loop_thread = threading.get_ident()
+    readers: list[int] = []
+
+    def recording_load_keys() -> dict[str, SecretStr]:
+        readers.append(threading.get_ident())
+        return load_keys()
+
+    monkeypatch.setattr(slack_plugin, 'load_keys', recording_load_keys)
+    plugins = loader(SettingsStore(), BUILTIN.model_copy(update={'enabled': True}))
+    await plugins.load_all()
+    assert plugins.capabilities() == connection('xoxp-saved')
+    assert readers and loop_thread not in readers
+    await plugins.close('exit')
+
+
+RAW = PluginSettings(id='slack', factory='pydantic_ai_harness.slack:Slack')
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_saved_catalog_row_adopts_the_builtin(enabled: bool) -> None:
+    store = SettingsStore()
+    store.save_plugin(RAW.model_copy(update={'enabled': enabled}))
+    store.save_plugin(PluginSettings(id='notion', factory='pydantic_ai_harness.notion:Notion'))
+    adopt_promoted(store, DEFAULT_PLUGINS)
+    assert store.plugins() == [
+        PluginSettings(id='notion', factory='pydantic_ai_harness.notion:Notion'),
+        BUILTIN.model_copy(update={'enabled': enabled}),
+    ]
+
+
+def test_own_declarations_are_kept() -> None:
+    store = SettingsStore()
+    custom = RAW.model_copy(update={'settings': {'read_only': False}})
+    store.save_plugin(custom)
+    adopt_promoted(store, DEFAULT_PLUGINS)
+    assert store.plugins() == [custom]
+    store.save_plugin(RAW)
+    adopt_promoted(store, [plugin for plugin in DEFAULT_PLUGINS if plugin.id != 'slack'])
+    assert store.plugins() == [RAW]

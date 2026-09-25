@@ -1,6 +1,9 @@
 """Opt-in harness capabilities, declared without importing their optional dependencies."""
 
+from collections.abc import Sequence
+
 from .config import PluginSettings
+from .settings_store import SettingsStore
 
 # Coder, AskUser, RepoContext and Slack already have shell-integrated built-in entries.
 _FACTORIES = (
@@ -66,3 +69,21 @@ HARNESS_PLUGINS: tuple[PluginSettings, ...] = tuple(
     PluginSettings(id=name, factory=f'pydantic_ai_harness.{factory}', enabled=False) for name, factory in _FACTORIES
 )
 """Disabled built-ins. The loader imports a capability only when the user enables it."""
+
+_PROMOTED = {'slack': 'pydantic_ai_harness.slack:Slack'}
+"""Former catalog rows that are now shell-integrated built-ins: the factory each id had in the catalog."""
+
+
+def adopt_promoted(store: SettingsStore, builtin: Sequence[PluginSettings]) -> None:
+    """Point a saved copy of a promoted catalog row at its built-in, keeping whether the user enabled it.
+
+    Toggling a catalog row saved the whole declaration, and a saved declaration outranks the built-in, so
+    without this the old raw capability would keep loading. A declaration with the user's own settings is theirs.
+    """
+    shipped = {plugin.id: plugin for plugin in builtin}
+    for saved in store.plugins():
+        factory = _PROMOTED.get(saved.id)
+        if factory is None or saved.id not in shipped:
+            continue
+        if saved == PluginSettings(id=saved.id, factory=factory, enabled=saved.enabled):
+            store.save_plugin(shipped[saved.id].model_copy(update={'enabled': saved.enabled}))
