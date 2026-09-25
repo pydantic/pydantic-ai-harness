@@ -127,10 +127,14 @@ class _ExecCommand(WSCommand):
     """The SDK's exec WebSocket command, asking the Sprite to end the command soon after a disconnect."""
 
     def _build_websocket_url(self) -> str:
+        # The SDK always asks for stdin, and with it the live Sprite sent stderr on the stdout stream;
+        # commands here never read stdin, so it is turned off and the stream kept plain (no TTY).
         # A non-TTY command keeps running for 10 seconds after its socket closes unless told otherwise,
         # and `0` means no limit. One second makes closing the socket on a timeout or cancellation
-        # stop the command. The SDK's URL always has a query string, as it ends with `stdin=true`.
-        return f'{super()._build_websocket_url()}&max_run_after_disconnect=1s'
+        # stop the command.
+        url = super()._build_websocket_url()
+        assert url.endswith('&stdin=true'), url
+        return f'{url.removesuffix("&stdin=true")}&stdin=false&tty=false&max_run_after_disconnect=1s'
 
 
 async def _close_command(command: WSCommand) -> None:

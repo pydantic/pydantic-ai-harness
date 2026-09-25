@@ -387,6 +387,7 @@ class TestSpritesSandbox:
         assert socket.query['dir'] == [str(transport.root)]
         # Without it a non-TTY command outlives a closed socket by 10 seconds.
         assert socket.query['max_run_after_disconnect'] == ['1s']
+        assert (socket.query['stdin'], socket.query['tty']) == (['false'], ['false'])
         assert socket.sent == [b'\x04']
 
     async def test_argv_shell_environment_and_nonzero_exit(self, transport: SpriteTransport) -> None:

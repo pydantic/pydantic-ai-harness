@@ -73,9 +73,20 @@ class TestLiveSpritesSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover 
                 pass
         await backend.aclose()
 
+    # The suite drops the backend it attaches; each one opened its own SDK client, which is closed
+    # here rather than left to the garbage collector with a socket still open.
     @pytest.fixture
-    def attach_backend(self) -> Callable[[WorkspaceRef], WorkspaceBackend]:
-        return _attach
+    async def attach_backend(self) -> AsyncIterator[Callable[[WorkspaceRef], WorkspaceBackend]]:
+        attached: list[SpritesSandboxBackend] = []
+
+        def attach(ref: WorkspaceRef) -> WorkspaceBackend:
+            backend = SpritesSandboxBackend(ref=ref)
+            attached.append(backend)
+            return backend
+
+        yield attach
+        for backend in attached:
+            await backend.aclose()
 
     @pytest.fixture
     def destroy_environment(self) -> Callable[[WorkspaceBackend], Awaitable[None]]:
