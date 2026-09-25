@@ -157,6 +157,9 @@ class CodeMode(AbstractCapability[AgentDepsT]):
 
     Only execution moves: tool dispatch, mounts, `os_access`, and print capture stay host-side
     over the connection.
+
+    Use `wss://` unless the server is on a network you trust: the connection carries the tool calls
+    your agent executes, so anyone who can intercept it can choose what your tools run.
     """
 
     dynamic_catalog: bool = False
