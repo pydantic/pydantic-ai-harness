@@ -5,6 +5,7 @@ options, all edited in the settings menu that `/plugins configure github` opens.
 """
 
 import asyncio
+import concurrent.futures
 import re
 from dataclasses import replace
 from typing import Generic
@@ -18,8 +19,8 @@ from . import theme
 from ._rendering import markdown_style
 from .api_keys import KeyReference, SavedKey, load_keys, prompt_api_key, save_key
 from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run_flow
-from .menu_worker import menu_key, run_worker
-from .plugins import DepsT, PluginHost
+from .menu_worker import menu_key, run_worker, worker_stopping
+from .plugins import DepsT, PluginHost, SessionStart
 
 KEY_NAME = 'GITHUB_TOKEN'
 """The conventional `/keys` label, shared by every plugin that uses a GitHub token. Not read from the environment."""
@@ -78,13 +79,16 @@ def activate(host: PluginHost[DepsT]) -> None:
     async def configure() -> str:
         return await _configure(GitHubSource(host))
 
-    if settings.token.name not in load_keys():
+    @host.on('session_start')
+    async def warn_without_token(event: SessionStart) -> None:
         # Loading anyway keeps the settings menu available; each run fails closed until a token is saved.
-        host.console.print(
-            f'GitHub has no token: {settings.token.name} is not in /keys. {SETUP}',
-            style=theme.color(theme.WARNING),
-            markup=False,
-        )
+        # A worker thread, because the `/keys` lock can wait for another CLAI process.
+        if settings.token.name not in await asyncio.to_thread(load_keys):
+            host.console.print(
+                f'GitHub has no token: {settings.token.name} is not in /keys. {SETUP}',
+                style=theme.color(theme.WARNING),
+                markup=False,
+            )
 
 
 def enterprise_url(text: str) -> str:
@@ -229,8 +233,17 @@ async def _configure(source: GitHubSource[DepsT]) -> str:
     loop = asyncio.get_running_loop()
 
     def pick_token() -> list[str]:
-        # The key picker is async, so the menu's thread hands it back to the event loop.
-        reference = asyncio.run_coroutine_threadsafe(_choose_key(source.settings.token.name), loop).result()
+        # The key picker is async, so the menu's thread hands it back to the event loop. Its widgets
+        # watch their own stop signal, so cancelling this worker must cancel the picker explicitly.
+        picking = asyncio.run_coroutine_threadsafe(_choose_key(source.settings.token.name), loop)
+        while True:
+            try:
+                reference = picking.result(timeout=0.05)
+                break
+            except concurrent.futures.TimeoutError:
+                if worker_stopping():
+                    picking.cancel()
+                    return []
         if reference is None:
             return []
         source.save(source.settings.model_copy(update={'token': reference}))

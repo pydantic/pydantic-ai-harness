@@ -3,6 +3,7 @@
 import io
 from pathlib import Path
 
+import anyio
 import pytest
 from menu_script import Script, pick, typed
 from pydantic import JsonValue
@@ -296,14 +297,49 @@ async def test_plugins_menu_configure_key_opens_the_settings_menu(
     assert shell.loader.capabilities() == github(read_only=False)
 
 
-async def test_plugins_menu_reports_a_configure_error(tmp_path: Path) -> None:
+async def test_plugins_menu_stays_open_when_there_is_nothing_to_configure(tmp_path: Path) -> None:
     shell = Shell(tmp_path)
+    shell.store.save_plugin(
+        BUILTIN.model_copy(update={'id': 'plain', 'factory': 'pydantic_clai2.repo_context', 'enabled': True})
+    )
+    await shell.loader.load_all()
 
     def run(menu: PluginMenu[None]) -> MenuResult | None:
+        github_row, plain_row = sorted(menu.items(), key=lambda item: str(item.value))
         assert menu.configure(Redraw(), MenuItem('none', value=None)) is None
-        return menu.configure(Redraw(), menu.items()[0])
+        assert menu.configure(Redraw(), github_row) is None
+        assert menu.notice == 'Enable github before configuring it.'
+        assert menu.configure(Redraw(), plain_row) is None
+        assert menu.notice == 'plain has no settings menu.'
+        return None
 
-    assert 'enable it before configuring' in await open_plugins_menu(shell.loader, run=run)
+    assert await open_plugins_menu(shell.loader, run=run) == ''
+
+
+async def test_cancelling_configure_cancels_an_open_token_picker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shell = Shell(tmp_path)
+    await shell.loader.enable('github')
+    opened = anyio.Event()
+    finished: list[str] = []
+
+    async def prompt_api_key(*, prompt: object, label: str, optional: bool = False) -> str | KeyReference | None:
+        opened.set()
+        try:
+            await anyio.sleep_forever()
+        finally:
+            finished.append(label)
+        return None  # pragma: no cover -- unreachable; keeps the signature honest
+
+    monkeypatch.setattr('pydantic_clai2.github.prompt_api_key', prompt_api_key)
+    script(monkeypatch, lists=[pick('token')])
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(shell.loader.configure, 'github')
+            await opened.wait()
+            tasks.cancel_scope.cancel()
+    assert finished == ['GitHub token (saved in /keys as GITHUB_TOKEN)']
 
 
 class Redraw:
