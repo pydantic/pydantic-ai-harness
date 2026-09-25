@@ -75,7 +75,7 @@ class TestShellFileLimits:
                         result = await toolset.check_command(_ctx(tmp_path), command_id)
                         if '[exit code:' in result:
                             break
-                        await anyio.sleep(0.01)
+                        await anyio.sleep(0.01)  # pragma: lax no cover
             else:
                 result = await toolset.run_command(_ctx(tmp_path), writer(size))
             assert (tmp_path / 'output').stat().st_size == min(size, 1024)
