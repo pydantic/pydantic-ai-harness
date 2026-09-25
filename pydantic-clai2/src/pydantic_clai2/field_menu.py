@@ -257,7 +257,7 @@ async def run_flow_async(
     menu: FieldMenu,
     runners: Runners = TERMINAL,
     *,
-    submenus: Mapping[str, Callable[[], Awaitable[list[str]]]],
+    submenus: Mapping[str, Callable[[], Awaitable[list[str]]]] | None = None,
 ) -> list[str]:
     """`run_flow` driven from the event loop, for submenus that are themselves async, such as `prompt_api_key`.
 
@@ -273,7 +273,7 @@ async def run_flow_async(
         row, cursor = step
         if row is None:
             continue
-        if row.key in submenus:
+        if submenus and row.key in submenus:
             messages.extend(await submenus[row.key]())
             continue
         message = await run_worker(partial(_edit, menu, row, runners))

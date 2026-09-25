@@ -361,8 +361,11 @@ class PluginLoader(Generic[DepsT]):
         def save(value: dict[str, JsonValue]) -> None:
             self._store.save_plugin(self._entry(name).declaration.model_copy(update={'settings': value}))
 
-        result = hook(PluginConfig(name=name, settings=settings, save=save, runners=self._runners))
-        message = await result if inspect.isawaitable(result) else result
+        try:
+            result = hook(PluginConfig(name=name, settings=settings, save=save, runners=self._runners))
+            message = await result if inspect.isawaitable(result) else result
+        except Exception as exc:
+            raise PluginError(name, exc) from exc
         if not isinstance(message, str):
             raise PluginError(name, TypeError('configure must return the message to show'))
         if enable:

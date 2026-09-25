@@ -25,6 +25,7 @@ TUNED = PLUGIN + (
 )
 SYNC = PLUGIN + "def configure(config):\n    return 'sync'\n"
 BAD = PLUGIN + 'def configure(config):\n    return 1\n'
+RAISES = PLUGIN + "async def configure(config):\n    raise RuntimeError('menu broke')\n"
 
 
 class FakeMenu:
@@ -130,7 +131,10 @@ def settings(loader: PluginLoader[None], name: str) -> object:
 
 
 async def test_configure_hook_through_commands(tmp_path: Path) -> None:
-    loader = make_loader(tmp_path, 'plain', sources={'tuned': TUNED, 'sync': SYNC, 'bad': BAD})
+    loader = make_loader(tmp_path, 'plain', sources={'tuned': TUNED, 'sync': SYNC, 'bad': BAD, 'raises': RAISES})
+    with pytest.raises(PluginError, match="Plugin 'raises': RuntimeError: menu broke"):
+        await loader.command(['enable', 'raises'])
+    assert next(entry for entry in loader.entries() if entry.name == 'raises').host is None
     with pytest.raises(ValueError, match='Plugin plain has no settings menu'):
         await loader.command(['configure', 'plain'])
     assert await loader.command(['enable', 'plain']) == 'Enabled plain.'
