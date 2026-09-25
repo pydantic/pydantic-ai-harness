@@ -17,6 +17,7 @@ workflow each call into them goes through a blocking portal (see `call_monty`).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from collections.abc import Awaitable, Callable, Container, Coroutine
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
@@ -30,6 +31,7 @@ from typing_extensions import TypeVarTuple, Unpack
 
 try:
     from pydantic_monty import (
+        NOT_HANDLED,
         AsyncFunctionSnapshot,
         AsyncFutureSnapshot,
         AsyncMonty,
@@ -43,6 +45,8 @@ try:
         ExternalReturnValue,
         ExternalSettledResult,
         MontyComplete,
+        OsFunction,
+        OsHandler,
         OSPolicy,
         ResourceLimits,
     )
@@ -258,6 +262,8 @@ class MontyExecutor:
     max_sleep_secs: float | None = None
     # Replaced in tests, to observe sleeps without waiting.
     sleep: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep
+    # CodeMode's `os_access`. Only needed here to answer host-state calls inside a Temporal workflow.
+    os_handler: OsHandler | None = None
 
     _slept_secs: float = field(default=0.0, init=False)
     # Parallel calls deferred but not yet resolved, keyed by Monty call id.
@@ -309,6 +315,14 @@ class MontyExecutor:
         if snapshot.is_os_function and snapshot.function_name in ('time.sleep', 'asyncio.sleep'):
             return await self._sleep(snapshot)
         if snapshot.is_os_function:
+            if self.portal is not None and self.os_handler is not None:
+                match snapshot.function_name:
+                    case (
+                        'os.getenv' | 'os.environ' | 'date.today' | 'datetime.now' | 'os.urandom' | 'time.time' as name
+                    ):
+                        return await self._answer_os_call(snapshot, self.os_handler, name)
+                    case _:  # file calls: Monty answers them from the mounts first
+                        pass
             # OS calls (env, clock, filesystem) are answered from the feed's mounts and the
             # `os=` handler captured at `feed_start`, falling back to monty's unhandled default.
             return await call_monty(self.portal, snapshot.resume_auto)
@@ -377,6 +391,27 @@ class MontyExecutor:
         task = asyncio.ensure_future(sleep) if parallel else sleep
         self._pending[snapshot.call_id] = PendingCall(task, otel_context.get_current())
         return await call_monty(self.portal, snapshot.resume, ExternalFuture(future=...))
+
+    async def _answer_os_call(
+        self, snapshot: AsyncFunctionSnapshot, handler: OsHandler, name: OsFunction
+    ) -> AsyncSnapshot:
+        """Call `os_access` on the workflow's own thread, so it can use `temporalio.workflow` APIs.
+
+        Through the portal Monty would call it from another thread. File calls are not routed here:
+        they go to Monty, which answers them from the mounts first.
+        """
+        token = otel_context.attach(snapshot.trace_context())
+        try:
+            value = handler(name=name, args=snapshot.args, kwargs=snapshot.kwargs, is_async=True)
+            if inspect.isawaitable(value):
+                value = await value
+        except Exception as exc:
+            return await self._raise_in_sandbox(snapshot, exc)
+        finally:
+            otel_context.detach(token)
+        if value is NOT_HANDLED:
+            return await call_monty(self.portal, snapshot.resume_not_handled)
+        return await call_monty(self.portal, snapshot.resume, ExternalReturnValue(return_value=value))
 
     async def _raise_in_sandbox(self, snapshot: AsyncFunctionSnapshot, exc: Exception) -> AsyncSnapshot:
         """Resume the suspended call by raising `exc` at its sandbox call site."""

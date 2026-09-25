@@ -176,11 +176,14 @@ code_mode_agent = Agent(
 )
 
 
-# Set by the workflow and read by `os_access`, which Monty calls from a thread behind the portal.
+# Set by the workflow and read by `os_access`, which runs on the workflow's own thread.
 _request_id: contextvars.ContextVar[str] = contextvars.ContextVar('request_id', default='unset')
 
 
-def _request_id_os(*, name: str, args: tuple[object, ...], kwargs: dict[str, object], **_: object) -> object:
+def _workflow_os(*, name: str, args: tuple[object, ...], kwargs: dict[str, object], **_: object) -> object:
+    if name == 'datetime.now':
+        # Raises "Not in workflow event loop" anywhere but the workflow's own thread.
+        return workflow.now()
     return _request_id.get()
 
 
@@ -197,9 +200,9 @@ def _remote_code_mode_model(messages: list[ModelRequest | ModelResponse], info: 
         return ModelResponse(parts=[TextPart(content=f'done: {returns[-1].content}')])
     # The 31 s sleep is one second past the default allowance, so it is refused without waiting.
     code = (
-        'import asyncio, os\ntotal = await add(a=3, b=4)\nawait asyncio.sleep(0.1)\n'
+        'import asyncio, datetime, os\ntotal = await add(a=3, b=4)\nawait asyncio.sleep(0.1)\n'
         'try:\n    await asyncio.sleep(31)\n    capped = "uncapped"\nexcept TimeoutError:\n    capped = "capped"\n'
-        'f\'{total} {os.getenv("REQUEST_ID")} {capped}\''
+        'f\'{total} {os.getenv("REQUEST_ID")} {capped} {datetime.datetime.now().year > 2000}\''
     )
     return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='remote_tc_1')])
 
@@ -209,7 +212,7 @@ remote_code_mode_agent = Agent(
     name='code_mode_temporal_remote_agent',
     toolsets=[FunctionToolset(tools=[add], id='math')],
     capabilities=[
-        CodeMode(monty_sandbox_url=f'ws://127.0.0.1:{MONTY_RELAY_PORT}', os_access=_request_id_os),
+        CodeMode(monty_sandbox_url=f'ws://127.0.0.1:{MONTY_RELAY_PORT}', os_access=_workflow_os),
         TemporalDurability(activity_config=BASE_ACTIVITY_CONFIG),
     ],
 )
@@ -383,7 +386,7 @@ async def test_code_mode_runs_over_websocket_in_temporal_workflow(client: Client
             id=workflow_id,
             task_queue=TASK_QUEUE,
         )
-    assert output == 'done: 7 req-42 capped'
+    assert output == 'done: 7 req-42 capped True'
 
     history = await client.get_workflow_handle(workflow_id).fetch_history()
     assert any(e.HasField('timer_started_event_attributes') for e in history.events)

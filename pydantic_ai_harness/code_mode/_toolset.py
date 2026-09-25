@@ -1133,6 +1133,8 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 in_temporal_workflow=in_workflow,
             )
             try:
+                # Already converted in `__post_init__`; this narrows the field's type.
+                os_handler = as_os_handler(self.os_access)
                 completed = await MontyExecutor(
                     dispatch=dispatch_tool_call,
                     valid_names=callable_defs,
@@ -1142,13 +1144,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                     # The configured limit, kept inside a Temporal workflow too: Monty's elapsed-time
                     # check is dropped there for replay, but sleeps are charged what they request.
                     max_sleep_secs=configured.get('max_feed_duration_secs'),
+                    os_handler=os_handler,
                 ).run(
                     partial(
                         session.feed_start,
                         code,
                         print_callback=capture.callback,
-                        # Already converted in `__post_init__`; this narrows the field's type.
-                        os=as_os_handler(self.os_access),
+                        os=os_handler,
                         mount=self.mount,
                         skip_type_check=not type_check,
                     )

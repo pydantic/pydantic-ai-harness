@@ -4092,3 +4092,67 @@ class TestGlobalModeIsSequential:
 
         assert global_mode_is_sequential(parallel) is False
         assert global_mode_is_sequential(sequential) is True
+
+
+class TestCodeModeOSAccessInTemporal:
+    """Inside a Temporal workflow, host-state calls reach `os_access` on the run's own thread.
+
+    Through the portal Monty would call the handler from its own thread, where `temporalio.workflow`
+    APIs such as `workflow.now()` refuse to run. `in_temporal_workflow` is patched so the portal path
+    runs here without a Temporal server; `test_temporal.py` covers a real workflow.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _in_workflow(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def in_temporal_workflow() -> bool:
+            return True
+
+        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.in_temporal_workflow', in_temporal_workflow)
+
+    async def _run(self, code: str, os_access: Any, mount: MountDir | None = None) -> Any:
+        wrapper = CodeMode[object](os_access=os_access, mount=mount).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        return (await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])).return_value
+
+    async def test_handler_runs_on_the_run_thread(self) -> None:
+        threads: list[threading.Thread] = []
+
+        def handler(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            threads.append(threading.current_thread())
+            return datetime(2026, 9, 26)
+
+        assert await self._run('import datetime\ndatetime.datetime.now().year', handler) == 2026
+        assert threads == [threading.current_thread()]
+
+    async def test_async_handler_is_awaited(self) -> None:
+        async def handler(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            await asyncio.sleep(0)
+            return f'{name}:{args[0]}'
+
+        assert await self._run('import os\nos.getenv("HOME")', handler) == 'os.getenv:HOME'
+
+    async def test_not_handled_gets_monty_default_error(self) -> None:
+        def handler(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            return NOT_HANDLED
+
+        with pytest.raises(ModelRetry, match="'os.getenv' is not supported in this environment"):
+            await self._run('import os\nos.getenv("HOME")', handler)
+
+    async def test_handler_error_is_raised_in_the_sandbox(self) -> None:
+        def handler(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            raise ValueError('no clock here')
+
+        code = 'import time\ntry:\n    time.time()\nexcept ValueError as e:\n    r = str(e)\nr'
+        assert await self._run(code, handler) == 'no clock here'
+
+    async def test_file_calls_still_use_mounts(self, tmp_path: Path) -> None:
+        (tmp_path / 'data.txt').write_text('hello-from-host')
+
+        def handler(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            raise AssertionError('a mounted path is answered by Monty')  # pragma: no cover
+
+        mount = MountDir(virtual_path='/work', host_path=str(tmp_path))
+        code = "from pathlib import Path\nPath('/work/data.txt').read_text()"
+        assert await self._run(code, handler, mount) == 'hello-from-host'
