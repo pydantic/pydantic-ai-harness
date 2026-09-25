@@ -4,12 +4,12 @@ import asyncio
 import json
 import re
 import sqlite3
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import closing, contextmanager
 from typing import Protocol
 
 from prompt_toolkit import PromptSession
-from pydantic import BaseModel, Field, SecretStr, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, JsonValue, SecretStr, TypeAdapter, ValidationError
 from pydantic_ai.exceptions import UserError
 from termflow.tui import MenuBuilder, MenuItem  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.menu import Menu  # pyright: ignore[reportMissingTypeStubs]
@@ -37,10 +37,17 @@ def resolve_key(*, token: SecretStr | KeyReference) -> str:
     return keys[token.name].get_secret_value()
 
 
-def save_key_connection(*, account: str, token: SecretStr | KeyReference, value: str) -> None:
-    """Validate references and save atomically with respect to key renames and deletions."""
+def save_key_connection(
+    *, account: str, token: SecretStr | KeyReference, value: str, references: Sequence[KeyReference] = ()
+) -> None:
+    """Validate references and save atomically with respect to key renames and deletions.
+
+    `references` are further keys the connection names besides `token`.
+    """
     with key_transaction():
-        if isinstance(token, KeyReference) and token.name not in _load_keys():
+        keys = _load_keys()
+        named = [*references, token] if isinstance(token, KeyReference) else references
+        if any(reference.name not in keys for reference in named):
             raise UserError('The selected API key no longer exists. Select a saved key again through /add_model.')
         save_codex_credentials(account=account, value=value)
 
@@ -120,6 +127,19 @@ class _Credential(BaseModel):
     token: SecretStr | KeyReference = Field(default_factory=lambda: SecretStr(''))
 
 
+_FIELDS = TypeAdapter(dict[str, JsonValue])
+
+
+def _references(raw: str) -> set[str]:
+    """Key names a saved connection refers to: every top-level `{"name": ...}` field, `token` included."""
+    _Credential.model_validate_json(raw)
+    return {
+        value['name']
+        for value in _FIELDS.validate_json(raw).values()
+        if isinstance(value, dict) and set(value) == {'name'} and isinstance(value['name'], str)
+    }
+
+
 def key_users(*, name: str) -> list[str]:
     """Find saved provider references without exposing their inline credentials."""
     users: list[str] = []
@@ -127,10 +147,10 @@ def key_users(*, name: str) -> list[str]:
         raw = load_codex_credentials(account=account)
         if raw is not None:
             try:
-                credential = _Credential.model_validate_json(raw)
+                references = _references(raw)
             except ValidationError:
                 raise UserError(f'Reconfigure the invalid {account} connection through {command} first.') from None
-            if isinstance(credential.token, KeyReference) and credential.token.name == name:
+            if name in references:
                 users.append(account)
     return users
 
