@@ -181,3 +181,29 @@ def test_codex_speed_labels_preserve_existing_preferences(tmp_path: Path, tier: 
     source.reset(row)
     assert SettingsStore(path).model_settings(name) == {'openai_reasoning_effort': 'high', 'future_option': 42}
     assert source.current(row) == 'default'
+
+
+def test_saved_coder_declarations_keep_delegation_off(tmp_path: Path) -> None:
+    """A `coder` saved before `sub_agents` existed still loads, since CLAI passes plugins to each run."""
+    store = SettingsStore(tmp_path / 'settings.db')
+    with closing(sqlite3.connect(store.path)) as connection, connection:
+        connection.executemany(
+            'INSERT INTO plugins VALUES (?, ?)',
+            [
+                (
+                    'coder',
+                    '{"id": "coder", "factory": "pydantic_ai_harness.coder:Coder", "enabled": false, '
+                    '"settings": {"unrestricted_filesystem": true, "repo_context": false}}',
+                ),
+                (
+                    'mine',
+                    '{"id": "mine", "factory": "pydantic_ai_harness.coder:Coder", "settings": {"sub_agents": true}}',
+                ),
+                ('other', '{"id": "other", "factory": "my_package.other"}'),
+            ],
+        )
+    assert {plugin.id: plugin.settings for plugin in store.plugins()} == {
+        'coder': {'unrestricted_filesystem': True, 'repo_context': False, 'sub_agents': False},
+        'mine': {'sub_agents': True},
+        'other': {},
+    }

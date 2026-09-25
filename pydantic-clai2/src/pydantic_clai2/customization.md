@@ -84,7 +84,7 @@ host activation function or a bare capability class. For a bare class, the
 optional JSON supplies constructor keyword arguments:
 
 ```text
-/plugins add coder pydantic_ai_harness.coder:Coder '{"unrestricted_filesystem": true, "sub_agents": false}'
+/plugins add coder pydantic_ai_harness.coder:Coder '{"unrestricted_filesystem": true}'
 /plugins list
 /plugins disable search
 /plugins enable search
@@ -98,9 +98,9 @@ second Coder under another name. To change its options, declare coder again
 with the same name and different JSON; that replaces the built-in. Keep
 "repo_context": false in that JSON: the second built-in, repo_context
 (pydantic_clai2.repo_context), already reads AGENTS.md or CLAUDE.md from the
-launch directory, and Coder's bundled RepoContext would load it again. Keep
-"sub_agents": false too: Coder's delegation needs Coder bound to the agent
-itself, and CLAI passes plugins to each run, so Coder refuses to start. To run
+launch directory, and Coder's bundled RepoContext would load it again. CLAI
+turns Coder's delegation off ("sub_agents": false) unless the JSON sets it:
+delegation needs Coder bound to the agent, and CLAI passes plugins to each run. To run
 without coding tools, /plugins disable coder; to stop reading the instruction
 file, /plugins disable repo_context. /plugins remove coder resets the
 built-in to its defaults rather than removing it. A repository's

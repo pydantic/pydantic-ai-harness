@@ -229,7 +229,7 @@ Two ways to install one:
 
    ```sh
    clai2 plugins add notify my_package.notify
-   /plugins add coder pydantic_ai_harness.coder:Coder '{"unrestricted_filesystem": true, "sub_agents": false}'
+   /plugins add coder pydantic_ai_harness.coder:Coder '{"unrestricted_filesystem": true}'
    ```
 
 No restart needed when you do it from inside CLAI. A plugin you add or enable is
@@ -314,16 +314,16 @@ read. To run a built-in with different options, add your own declaration under
 the same name and it takes the built-in's place:
 
 ```text
-/plugins add coder pydantic_ai_harness.coder:Coder '{"unrestricted_filesystem": false, "repo_context": false, "sub_agents": false}'
+/plugins add coder pydantic_ai_harness.coder:Coder '{"unrestricted_filesystem": false, "repo_context": false}'
 /plugins add repo_context pydantic_clai2.repo_context '{"walk_up": true}'
 ```
 
 Keep `"repo_context": false` on a replacement `coder`: `Coder` bundles its own
 `RepoContext`, and with the `repo_context` plugin also on, the instruction file
-would reach the model twice. Keep `"sub_agents": false` as well: `Coder`'s
-delegation runs the agent again, which only brings along what is bound to the
-agent, and CLAI passes its plugins to each run instead, so `Coder` refuses to
-start with delegation on.
+would reach the model twice. CLAI adds `"sub_agents": false` to any `Coder`
+declaration that does not set it: `Coder`'s delegation runs the agent again,
+which only brings along what is bound to the agent, and CLAI passes its plugins
+to each run instead, so `Coder` refuses to start with delegation on.
 
 `repo_context` wraps harness `RepoContext` with the launch directory as the
 workspace and its default filenames. Its settings:

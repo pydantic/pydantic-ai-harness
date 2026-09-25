@@ -317,7 +317,7 @@ SubAgent(
 
 ## Notes
 
-- Sub-agents can themselves have `SubAgents`, forming a tree of at most `max_depth` levels. Share `usage` (the default) and set a `usage_limits` on the top-level run to bound the whole tree.
+- Sub-agents can themselves have `SubAgents`, forming a tree. Each `SubAgents` stops offering delegation once the run is at its own `max_depth`, so a delegate with a higher limit can go deeper than its parent's. Share `usage` (the default) and set a `usage_limits` on the top-level run to bound the whole tree.
 - Delegations the model issues in parallel run as independent sub-agent runs.
 
 ## Further reading
