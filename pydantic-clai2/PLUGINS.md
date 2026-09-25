@@ -314,6 +314,31 @@ wins while enabled; disabling it restores the supplied agent's own tracing
 behavior. Custom launchers must pass `builtin_plugins=DEFAULT_PLUGINS` to opt in
 to stock built-ins. See [telemetry](README.md#telemetry-and-references).
 
+## Linear
+
+The built-in `linear` plugin (`pydantic_clai2.linear`) gives the agent the tools
+of Linear's hosted MCP server through harness
+[`Linear`](../pydantic_ai_harness/linear/README.md). It starts disabled; turn it
+on with `/plugins enable linear`. It connects to Linear's read-only endpoint
+unless you set `"read_only": false`, because tools that create or change issues
+act on a workspace your team shares.
+
+It takes the first credential it finds:
+
+| Settings | Credential |
+|---|---|
+| `{"oauth": true}` | browser sign-in on the first run; tokens go to the keyring the way `/mcp` OAuth tokens do. `/linear logout` signs out |
+| `{"api_key": "NAME"}` | the key saved as `NAME` with `/set api_key` |
+| neither | `LINEAR_ACCESS_TOKEN` (a Linear API key or OAuth access token) |
+
+With no credential, enabling the plugin fails with a message naming these
+options and no Linear tools are added. Tokens are not accepted in plugin
+settings. For example:
+
+```text
+/plugins add linear pydantic_clai2.linear '{"oauth": true, "read_only": false}'
+```
+
 ## Where plugins live
 
 Plugins are trusted Python code. Drop-in files execute automatically at startup;
@@ -385,8 +410,8 @@ order plugin instructions, renderers, and status segments are consulted in.
 
 `/plugins` and `/plugins list` also include every other public harness capability,
 including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
-appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
+`Coder`, `AskUser`, and `RepoContext` use the integrated entries above, and
+`Linear` uses the [`linear`](#linear) plugin, instead of appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
 are not separate capabilities.
 
 Press Space to enable an entry. Its preview shows the import path and any load
