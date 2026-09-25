@@ -166,7 +166,7 @@ def test_unchanged_created_worktree_is_removed_silently(
     assert f'Removed unchanged worktree {created} and branch clai/task.' in capsys.readouterr().out
 
 
-@pytest.mark.parametrize('change', ['untracked', 'modified', 'staged', 'committed', 'switched'])
+@pytest.mark.parametrize('change', ['untracked', 'ignored', 'modified', 'staged', 'committed', 'switched', 'rebasing'])
 def test_changed_created_worktree_still_asks(created: Path, monkeypatch: pytest.MonkeyPatch, change: str) -> None:
     if change == 'untracked':
         (created / 'new.txt').write_text('keep me')
@@ -175,8 +175,19 @@ def test_changed_created_worktree_still_asks(created: Path, monkeypatch: pytest.
     elif change == 'staged':
         (created / 'tracked.txt').write_text('edited')
         git(created, 'add', 'tracked.txt')
+    elif change == 'ignored':
+        (created.parents[1] / '.git/info/exclude').write_text('.env\n')
+        (created / '.env').write_text('SECRET=1')
     elif change == 'committed':
         git(created, 'commit', '--allow-empty', '-m', 'Unpushed work')
+    elif change == 'rebasing':
+        git(created, 'commit', '--allow-empty', '-m', 'Shared')
+        git(created, 'branch', 'keeper')
+        monkeypatch.setenv('GIT_SEQUENCE_EDITOR', 'true')
+        paused = subprocess.run(
+            ['git', 'rebase', '--interactive', '--keep-empty', '--exec', 'false', 'HEAD~1'], capture_output=True
+        )
+        assert paused.returncode != 0
     else:
         git(created, 'switch', '-c', 'other')
     prompts: list[str] = []

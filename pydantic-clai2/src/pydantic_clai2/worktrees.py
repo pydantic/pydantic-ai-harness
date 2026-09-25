@@ -88,12 +88,16 @@ def _disposable_branch(root: Path, created: Path | None) -> tuple[str, str] | No
     if created is None or created.resolve() != root:
         return None
     branch = f'clai/{created.name}'
-    if _git('branch', '--show-current') != branch or _git('status', '--porcelain', '--untracked-files=all'):
+    # A paused rebase or bisect detaches HEAD, so `--show-current` is empty and the user is asked.
+    if _git('branch', '--show-current') != branch:
         return None
-    # Commits reachable from HEAD but from no other branch, tag, or remote would be lost with the branch.
-    head = _git('rev-parse', 'HEAD')
-    unique = _git('rev-list', '-n1', head, '--not', f'--exclude={branch}', '--branches', '--tags', '--remotes')
-    return None if unique else (branch, head)
+    # The checkout starts with no ignored files, so any present now (a `.env`, say) are session work.
+    if _git('status', '--porcelain', '--untracked-files=all', '--ignored=matching'):
+        return None
+    tip = _git('rev-parse', '--verify', f'refs/heads/{branch}')
+    # Commits on the branch but on no other branch, tag, or remote would be lost with it.
+    unique = _git('rev-list', '-n1', tip, '--not', f'--exclude={branch}', '--branches', '--tags', '--remotes')
+    return None if unique else (branch, tip)
 
 
 def _remove(root: Path, common: Path) -> bool:

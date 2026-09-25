@@ -92,11 +92,11 @@ created, without forcing deletion. If cleanup or the ignore edit fails, the erro
 names the retained branch or checkout for recovery.
 
 On normal interactive exit, CLAI removes a worktree that the same run created
-with `--worktree` if it was left unchanged: no staged, modified, or untracked
-files, the `clai/NAME` branch still checked out, and every commit on it still
-reachable from another branch, tag, or remote branch. CLAI deletes that branch as
-well and prints what it removed, without asking. Ignored files do not count as
-changes and are removed with the checkout.
+with `--worktree` if it was left unchanged, and deletes its branch too. Unchanged
+means no staged, modified, untracked, or ignored files (such as a `.env`; the
+checkout starts without any), `clai/NAME` still checked out rather than a paused
+rebase or bisect, and every commit on the branch still reachable from another
+branch, tag, or remote branch. CLAI prints what it removed, without asking.
 
 Any other linked worktree, including one with changes or new commits, prompts
 instead. Enter, Ctrl-C, or EOF keeps it; only `y` or `yes` confirms removal.
