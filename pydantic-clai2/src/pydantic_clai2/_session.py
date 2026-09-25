@@ -36,10 +36,10 @@ def _supports_local_workspace() -> bool:
 
 
 def _supplies_workspace(plugins: Sequence[AgentCapability[DepsT]]) -> bool:
-    """Whether a plugin, such as a sandbox, supplies the run's workspace; a run has only one.
+    """Whether a plugin, such as a sandbox, supplies the run's workspace, so clai adds no `LocalWorkspace`.
 
-    The same test core applies when it rejects a second workspace capability: a leaf that overrides
-    `get_workspace` and is loaded up front. A wrapper forwards to what it wraps, a leaf of its own.
+    A plugin counts when it has a leaf that overrides `get_workspace` and is loaded up front. A
+    wrapper forwards to what it wraps, a leaf of its own.
     """
     leaves: list[AbstractCapability[DepsT]] = []
     for plugin in plugins:

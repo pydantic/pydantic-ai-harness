@@ -6,6 +6,13 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic_ai.tools import RunContext
 
+READ_CHARS = 50_000
+"""Characters per read that a capability keeping files in the workspace asks a file reader to stay within.
+
+`ToolOutputLimits` caps `read_tool_result` at this and asks for it when handing its spills to
+`read_file`; `Coder` sets `max_read_chars` to it so its `read_file` qualifies.
+"""
+
 
 @runtime_checkable
 class _FileReader(Protocol):

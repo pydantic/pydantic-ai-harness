@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import errno
 import json
-import logging
 import os
 import shlex
 import shutil
 import signal
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import AsyncExitStack, suppress
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, NoReturn
 from unittest.mock import patch
@@ -41,6 +40,7 @@ from pydantic_ai.workspaces import (
 from pydantic_ai_harness._workspace import READ_ONLY_FAILURE
 from pydantic_ai_harness.code_mode import CodeMode
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
+from pydantic_ai_harness.shell._jobs import Job
 from pydantic_ai_harness.shell._policy import is_interactive_command
 from pydantic_ai_harness.shell._toolset import ShellToolset
 
@@ -121,6 +121,12 @@ async def _call_shell_tool(toolset: ShellToolset[None], working_dir: Path, name:
 def _parse_command_id(result: str) -> str:
     assert 'ID: ' in result, f'Expected "ID: " in result: {result!r}'
     return result.split('ID: ')[1].strip()
+
+
+async def _job(ts: ShellToolset[None], ctx: RunContext[None], command_id: str) -> Job:
+    job = await ts._job(ctx, command_id)
+    assert job is not None
+    return job
 
 
 class TestIsInteractiveCommand:
@@ -465,7 +471,7 @@ class TestCwdCapture:
 class TestForRunIsolation:
     """B3: `get_toolset` builds one shared instance at agent construction, so
     `for_run` must hand each run a fresh copy -- otherwise concurrent runs share
-    `_cwd`/`_background` and corrupt each other."""
+    `_cwd` and corrupt each other."""
 
     async def test_for_run_returns_fresh_instance(self, persist_toolset: ShellToolset[None], tmp_path: Path) -> None:
         run1 = await persist_toolset.for_run(_ctx(tmp_path))
@@ -913,12 +919,12 @@ class TestBackgroundCommands:
     async def test_start_command_long_echo_is_capped_keeping_id(self, shell_dir: Path) -> None:
         # The command echo is subject to the cap like any other output; the ID
         # line is the tail, so truncation keeps it usable for check/stop calls.
-        ts = _shell_toolset(shell_dir, max_output_chars=80)
+        ts = _shell_toolset(shell_dir, max_output_chars=100)
         result = await _call_shell_tool(ts, shell_dir, 'start_command', command='true ' + 'x' * 200)
-        assert len(result) == 80
+        assert len(result) == 100
         assert 'output truncated' in result
         command_id = _parse_command_id(result)
-        assert len(command_id) == 12
+        assert len(command_id) == 32
         await ts.stop_command(_ctx(shell_dir), command_id)
 
     async def test_check_unknown_id(self, toolset: ShellToolset[None], tmp_path: Path) -> None:
@@ -1170,104 +1176,52 @@ class TestBackgroundCommands:
         with patch('anyio.open_process', side_effect=OSError('spawn failed')):
             with pytest.raises(OSError, match='spawn failed'):
                 await ts.start_command(_ctx(shell_dir), 'echo hi')
-        assert not ts._background
 
-    async def test_aexit_terminates_background_processes(self, shell_dir: Path) -> None:
-        ts = _shell_toolset(shell_dir)
+    async def test_background_command_outlives_the_run(self, shell_dir: Path) -> None:
+        # A conversation is several runs: a later run's toolset checks and stops a job an earlier one started.
+        shared = _shell_toolset(shell_dir)
+        first = await shared.for_run(_ctx(shell_dir))
+        assert isinstance(first, ShellToolset)
         pid_pipe = shell_dir / 'pid'
         os.mkfifo(pid_pipe)
-        result = await ts.start_command(_ctx(shell_dir), f'echo $$ > {pid_pipe}; exec sleep 300')
-        command_id = _parse_command_id(result)
-        job_dir = Path(ts._background[command_id].job.directory)
-        assert (job_dir / 'stdout.log').exists()
-        assert (job_dir / 'stderr.log').exists()
-        # Reading the FIFO blocks until the command has written its PID: no polling, so no timing.
-        with anyio.fail_after(10):
-            pid = int(await anyio.to_thread.run_sync(pid_pipe.read_text))
+        async with first:
+            command_id = _parse_command_id(
+                await first.start_command(_ctx(shell_dir), f'echo $$ > {pid_pipe}; exec sleep 300')
+            )
+            # Reading the FIFO blocks until the command has written its PID: no polling, so no timing.
+            with anyio.fail_after(10):
+                pid = int(await anyio.to_thread.run_sync(pid_pipe.read_text))
 
-        await ts.__aexit__(None, None, None)
-
-        assert not ts._background
-        assert not job_dir.exists()
+        second = await shared.for_run(_ctx(shell_dir))
+        assert isinstance(second, ShellToolset)
+        assert (await second.check_command(_ctx(shell_dir), command_id)).endswith('[status: running]')
+        stopped = await second.stop_command(_ctx(shell_dir), command_id)
+        assert stopped.splitlines()[-2:] == ['[stopped]', '[exit code: 143]']
         await _wait_for_exit(pid)
 
-    # Cleanup reads the status (`read_bytes`), signals the job (`run`), then removes its files
-    # (`remove`); `None` is the control, where the fake refuses nothing.
-    @pytest.mark.parametrize('refused', [None, 'read_bytes', 'run', 'remove'])
-    async def test_aexit_survives_any_workspace_exception(
-        self, shell_dir: Path, caplog: pytest.LogCaptureFixture, refused: str | None
-    ) -> None:
-        # A durable workspace may refuse calls outside an activity with an arbitrary error.
+    @pytest.mark.parametrize('command_id', ['../../etc', 'f' * 32])
+    async def test_id_naming_no_job_is_unknown(self, shell_dir: Path, command_id: str) -> None:
         ts = _shell_toolset(shell_dir)
-        ids = [_parse_command_id(await ts.start_command(_ctx(shell_dir), 'exec sleep 300')) for _ in range(2)]
-        jobs = [ts._background[command_id].job for command_id in ids]
-        for job in jobs:
-            job.workspace = Workspace(_Refusing('/', refused))
-        try:
-            with caplog.at_level(logging.DEBUG, logger='pydantic_ai_harness.shell._toolset'):
-                async with AsyncExitStack() as stack:
-                    await stack.enter_async_context(ts)
-            assert not ts._background
-            logged = [record.message for record in caplog.records]
-            expected = [] if refused is None else [f'Could not clean up background job {job.directory}' for job in jobs]
-            assert logged == expected
-            assert all(Path(job.directory).exists() == (refused is not None) for job in jobs)
-        finally:
-            for job in jobs:
-                job.workspace = _ctx(shell_dir).workspace
-                await job.kill()
-                await job.cleanup()
+        assert 'unknown command ID' in await ts.check_command(_ctx(shell_dir), command_id)
 
-    async def test_aexit_tolerates_a_workspace_error(self, shell_dir: Path) -> None:
-        # Cleanup is best-effort: a job whose directory is already gone does not stop the others.
+    async def test_handle_that_is_a_directory_is_unknown(self, shell_dir: Path) -> None:
         ts = _shell_toolset(shell_dir)
-        first = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'exec sleep 300'))
-        second = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'exec sleep 300'))
-        first_job = ts._background[first].job
-        second_dir = Path(ts._background[second].job.directory)
-        first_job.workspace = Workspace(_FailingKill('/'))
-        try:
-            await ts.__aexit__(None, None, None)
-            assert not ts._background
-            assert not second_dir.exists()
-        finally:
-            first_job.workspace = _ctx(shell_dir).workspace
-            await first_job.kill()
-            await first_job.cleanup()
+        command_id = 'd' * 32
+        (Path(await ts._jobs_base(_ctx(shell_dir))) / command_id / 'handle').mkdir(parents=True)
+        assert 'unknown command ID' in await ts.check_command(_ctx(shell_dir), command_id)
 
-    async def test_aexit_noop_when_no_background(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        await ts.__aexit__(None, None, None)
-        assert not ts._background
-
-    async def test_aexit_cleans_already_finished_process(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = await ts.start_command(_ctx(shell_dir), 'echo done')
-        command_id = _parse_command_id(result)
-        await anyio.sleep(0.5)
-        # Mark as finished via check_command
-        await ts.check_command(_ctx(shell_dir), command_id)
-        bg = ts._background[command_id]
-        assert bg.finished
-
-        await ts.__aexit__(None, None, None)
-        assert not ts._background
+    async def test_unreadable_handle_is_unknown(self, shell_dir: Path) -> None:
+        ts = _shell_toolset(shell_dir)
+        command_id = 'e' * 32
+        job_dir = Path(await ts._jobs_base(_ctx(shell_dir))) / command_id
+        job_dir.mkdir()
+        (job_dir / 'handle').write_text('garbage\n')
+        assert 'unknown command ID' in await ts.stop_command(_ctx(shell_dir), command_id)
+        # A job whose group was not its own to signal records `-`; checking it signals nothing.
+        (job_dir / 'handle').write_text(f'{2**22 + 12345} -\n')
+        job = await _job(ts, _ctx(shell_dir), command_id)
+        assert job.pgid is None
+        assert await ts.check_command(_ctx(shell_dir), command_id) == '(no output yet)\n[status: running]'
 
 
 class TestEdgeCases:
@@ -1443,45 +1397,13 @@ class TestStopEscalation:
         """A job that exited between the status read and the signal is not an error."""
         ts = _shell_toolset(shell_dir)
         command_id = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'true'))
-        bg = ts._background[command_id]
+        job = await _job(ts, _ctx(shell_dir), command_id)
         with anyio.fail_after(10):
-            while (await bg.job.status())[0]:
+            while (await job.status())[0]:
                 await anyio.sleep(0.01)  # pragma: lax no cover
-        bg.job.pgid = None
-        bg.job.pid = 2**22 + 12345  # beyond any live PID, so `kill` finds no process
-        await bg.job.kill()
-
-
-class _Refusing(LocalWorkspaceBackend):
-    """A local backend that raises an error that is not a `WorkspaceError` from one chosen operation."""
-
-    def __init__(self, working_dir: str | Path, refused: str | None) -> None:
-        super().__init__(working_dir)
-        self.refused = refused
-
-    def _check(self, operation: str) -> None:
-        if operation == self.refused:
-            raise RuntimeError('workspace call outside an activity')
-
-    async def run(
-        self,
-        command: WorkspaceCommand,
-        *,
-        shell: bool = False,
-        cwd: str | None = None,
-        env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> CommandResult:
-        self._check('run')
-        return await super().run(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
-
-    async def read_bytes(self, path: str) -> bytes:
-        self._check('read_bytes')
-        return await super().read_bytes(path)
-
-    async def remove(self, path: str) -> None:
-        self._check('remove')
-        await super().remove(path)
+        job.pgid = None
+        job.pid = 2**22 + 12345  # beyond any live PID, so `kill` finds no process
+        await job.kill()
 
 
 _KILL_SCRIPT = 'kill -s "$1" -- "$2"'
@@ -1518,7 +1440,7 @@ class TestSignalling:
         ts = _shell_toolset(shell_dir)
         ctx = _run_context(Workspace(backend))
         command_id = _parse_command_id(await ts.start_command(ctx, 'exec sleep 300'))
-        job = ts._background[command_id].job
+        job = await _job(ts, ctx, command_id)
         stopped = await ts.stop_command(ctx, command_id)
         assert stopped.splitlines()[-2:] == ['[stopped]', '[exit code: 143]']
         signals = [argv for argv in backend.argv if argv[:3] == ['sh', '-c', _KILL_SCRIPT]]
@@ -1534,7 +1456,7 @@ class TestSignalling:
         ts = _shell_toolset(shell_dir)
         ctx = _run_context(Workspace(backend))
         command_id = _parse_command_id(await ts.start_command(ctx, 'exec sleep 300'))
-        job = ts._background[command_id].job
+        job = await _job(ts, ctx, command_id)
         try:
             tools = await ts.get_tools(ctx)
             with pytest.raises(ToolFailed, match='Operation not permitted'):
@@ -1548,8 +1470,9 @@ class TestSignalling:
     async def test_failed_signal_without_stderr_names_the_signal(self, shell_dir: Path) -> None:
         backend = _RecordingKill(shell_dir, kill_result=CommandResult(exit_code=2, stdout='', stderr=''))
         ts = _shell_toolset(shell_dir)
-        command_id = _parse_command_id(await ts.start_command(_run_context(Workspace(backend)), 'exec sleep 300'))
-        job = ts._background[command_id].job
+        ctx = _run_context(Workspace(backend))
+        command_id = _parse_command_id(await ts.start_command(ctx, 'exec sleep 300'))
+        job = await _job(ts, ctx, command_id)
         try:
             with pytest.raises(WorkspaceError, match=f'Unable to send SIGTERM to job {job.pid}'):
                 await job.kill()
@@ -1557,25 +1480,6 @@ class TestSignalling:
             backend.kill_result = None
             await job.kill()
             await job.cleanup()
-
-
-class _FailingKill(LocalWorkspaceBackend):
-    """A local backend whose commands fail as a broken workspace would.
-
-    `__aexit__` reads status and removes files through the filesystem methods, so the only
-    command it runs is the signal to a still-running job.
-    """
-
-    async def run(
-        self,
-        command: WorkspaceCommand,
-        *,
-        shell: bool = False,
-        cwd: str | None = None,
-        env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> CommandResult:
-        raise WorkspaceError('kill failed')
 
 
 async def _wait_for_exit(pid: int) -> None:
@@ -1629,8 +1533,9 @@ class TestLaunch:
         slow_setsid.chmod(0o755)
         backend = _KillGroupOnExit(tmp_path, env={'PATH': f'{bin_dir}:{os.environ["PATH"]}'})
         ts = _shell_toolset(tmp_path)
-        command_id = _parse_command_id(await ts.start_command(_run_context(Workspace(backend)), 'echo finished'))
-        job = ts._background[command_id].job
+        ctx = _run_context(Workspace(backend))
+        command_id = _parse_command_id(await ts.start_command(ctx, 'echo finished'))
+        job = await _job(ts, ctx, command_id)
         with anyio.fail_after(5):
             while (status := await job.status())[0]:
                 await anyio.sleep(0.05)  # pragma: lax no cover
@@ -1643,7 +1548,7 @@ class TestReadBgOutputEdgeCases:
         """A log removed from the workspace reads as empty rather than failing the check."""
         ts = _shell_toolset(shell_dir)
         command_id = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'exec sleep 300'))
-        job = ts._background[command_id].job
+        job = await _job(ts, _ctx(shell_dir), command_id)
         (Path(job.directory) / 'stdout.log').unlink()
         (Path(job.directory) / 'stderr.log').unlink()
         try:
@@ -1656,7 +1561,7 @@ class TestReadBgOutputEdgeCases:
         """A log the workspace cannot read is reported to the model as a failed tool call."""
         ts = _shell_toolset(shell_dir)
         command_id = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'exec sleep 300'))
-        job = ts._background[command_id].job
+        job = await _job(ts, _ctx(shell_dir), command_id)
         stdout_log = Path(job.directory) / 'stdout.log'
         stdout_log.write_text('secret')
         stdout_log.chmod(0)
@@ -1675,7 +1580,7 @@ class TestJobStatusEdgeCases:
     async def test_unparseable_status_counts_as_running(self, shell_dir: Path) -> None:
         ts = _shell_toolset(shell_dir)
         command_id = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'exec sleep 300'))
-        job = ts._background[command_id].job
+        job = await _job(ts, _ctx(shell_dir), command_id)
         try:
             (Path(job.directory) / 'status.json').write_text('not json')
             assert (await ts.check_command(_ctx(shell_dir), command_id)).endswith('[status: running]')
@@ -1690,7 +1595,7 @@ class TestCleanupBgFilesEdgeCases:
         """A job directory already removed from the workspace is not an error."""
         ts = _shell_toolset(shell_dir)
         command_id = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'true'))
-        job = ts._background[command_id].job
+        job = await _job(ts, _ctx(shell_dir), command_id)
         with anyio.fail_after(10):
             # Removing the directory while the wrapper still publishes its status races the wrapper.
             while (await job.status())[0]:
@@ -1698,38 +1603,19 @@ class TestCleanupBgFilesEdgeCases:
         await job.cleanup()
         await job.cleanup()
         assert not Path(job.directory).exists()
-        del ts._background[command_id]
 
 
 class TestStopCommandAlreadyFinished:
     async def test_stop_already_finished_process(self, shell_dir: Path) -> None:
-        """stop_command on an already-finished process skips kill."""
-        ts = ShellToolset(
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        # Start a command that finishes immediately
-        start_result = await ts.start_command(_ctx(shell_dir), 'echo done')
-        command_id = _parse_command_id(start_result)
-
-        # Wait for the process to finish
-        await anyio.sleep(0.5)
-
-        # Manually mark as finished with exit_code = None (simulates edge case
-        # where finished is True but exit_code was never captured)
-        bg = ts._background[command_id]
-        bg.finished = True
-        bg.exit_code = None
-
-        # stop_command should skip the kill branch and handle None exit_code
+        """stop_command on an already-finished process skips the kill and reports its exit code."""
+        ts = _shell_toolset(shell_dir)
+        command_id = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'exit 3'))
+        job = await _job(ts, _ctx(shell_dir), command_id)
+        with anyio.fail_after(10):
+            while (await job.status())[0]:
+                await anyio.sleep(0.01)  # pragma: lax no cover
         result = await ts.stop_command(_ctx(shell_dir), command_id)
-        assert result.endswith('[stopped]')
-        assert '[exit code:' not in result
+        assert result.splitlines()[-2:] == ['[stopped]', '[exit code: 3]']
 
 
 class TestResolveEnv:
@@ -1900,7 +1786,7 @@ class TestDetachedJobRoundTrip:
         command_id = _parse_command_id(
             await ts.start_command(_ctx(tmp_path), 'echo started; echo warn >&2; echo made > made.txt; exec sleep 300')
         )
-        job_dir = Path(ts._background[command_id].job.directory)
+        job_dir = Path((await _job(ts, _ctx(tmp_path), command_id)).directory)
         with anyio.fail_after(10):
             while 'started' not in (checked := await ts.check_command(_ctx(tmp_path), command_id)):
                 await anyio.sleep(0.05)  # pragma: lax no cover
@@ -1967,6 +1853,11 @@ class _RaisingWorkspace(LocalWorkspaceBackend):
         raise self.error
 
 
+class _SlowReads(LocalWorkspaceBackend):
+    async def read_bytes(self, path: str) -> bytes:
+        raise WorkspaceTimeoutError('slow')
+
+
 class TestWorkspaceFailures:
     """Deliberate workspace failures reach the model as failed calls; a vanished workspace ends the run."""
 
@@ -1986,7 +1877,11 @@ class TestWorkspaceFailures:
         with pytest.raises(ToolFailed) as failed:
             await ts.call_tool('start_command', {'command': 'true'}, ctx, tools['start_command'])
         assert failed.value.message == message
-        assert not ts._background
+
+    async def test_timed_out_handle_read_is_not_an_unknown_id(self, shell_dir: Path) -> None:
+        ts = _shell_toolset(shell_dir)
+        with pytest.raises(ToolFailed, match='timed out'):
+            await ts.check_command(_run_context(Workspace(_SlowReads(shell_dir))), 'c' * 32)
 
     async def test_unavailable_workspace_ends_the_run(self, shell_dir: Path) -> None:
         ts = _shell_toolset(shell_dir)

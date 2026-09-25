@@ -23,30 +23,27 @@ pip/uv-add "pydantic-ai-harness[coder]"
 ```
 
 The extra installs `ripgrep==14.1.0` except on Android, where `rg` must be supplied separately on `PATH`.
+In a workspace without `rg`, such as a sandbox image that lacks it, `list_files` and `grep` walk the files instead.
 Add a provider extra such as `[coder,anthropic]` when needed.
-`Coder` edits files and runs commands in the run's [workspace](https://pydantic.dev/docs/ai/workspace/), and does not pick one for you: attach `LocalWorkspace` from `pydantic_ai.capabilities` to work on your own machine, or a sandbox capability to work in isolation. A run without a workspace fails at its start.
+`Coder` works in the run's [workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/). Here that is the current directory on your machine:
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness.coder import Coder
 
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[LocalWorkspace('.'), Coder()],
 )
+agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caught.')
 ```
 
-```python
-result = agent.run_sync('Investigate the failing parser test, fix the cause, and run focused checks.')
-print(result.output)
-```
+File paths resolve from the workspace's working directory, and commands start there. To work in an isolated cloud machine instead, swap `LocalWorkspace` for a sandbox capability (Modal, E2B, Daytona, or Sprites); nothing else changes. Commands run without an allowlist, and the file tools' path limits don't apply to them.
 
-The workspace's working directory, here the current directory, is the project: file paths resolve from it and commands start in it. To run the same agent in isolation, a sandbox capability (Modal, E2B, Daytona, or Sprites) replaces `LocalWorkspace`, and Coder's tools edit files and run commands in the sandbox instead. Commands run without an allowlist, and the file tools' path restrictions do not apply to them.
-
-With [Modal](modal-sandbox.md), for example, on an image with the `git` and `ripgrep` that Coder uses:
+With [Modal](modal-sandbox.md), for example, on an image that has the `git` and `ripgrep` Coder uses:
 
 ```python
 import modal
@@ -54,53 +51,65 @@ from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
 image = modal.Image.debian_slim().apt_install('git', 'ripgrep')
 agent = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[ModalSandbox(image=image), Coder()],
 )
 ```
 
-Interfaces that start runs for you work the same way: [`agent.to_cli_sync()`](https://pydantic.dev/docs/ai/cli/) and [`agent.to_web()`](https://pydantic.dev/docs/ai/web/) run in the attached workspace.
+[`agent.to_cli_sync()`](https://pydantic.dev/docs/ai/cli/) and [`agent.to_web()`](https://pydantic.dev/docs/ai/web/) use the same workspace.
 
-The exported `pydantic_ai_harness.coder:coder_agent` is the same agent, model-less and named `coder`, working in the directory it is imported from.
+The exported `pydantic_ai_harness.coder:coder_agent` is the same agent, model-less and named `coder`, working in the directory that is current when it is imported.
 Use it with the Pydantic AI CLI:
 
 ```bash
-uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-sonnet-5
+uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-opus-5-5
 ```
 
 ### The command environment
 
-Commands in a local workspace get the host's `PATH`, so they find your tools (`rg`, `git`, `uv`, anything under Homebrew or `~/.local/bin`), and `HOME` for tools that keep their configuration there. Nothing else comes from the agent process: add what your commands need with `LocalWorkspace('.', env={...})`. Passing `os.environ` would hand the model's commands every secret in the process, LLM API keys included.
+Commands in a `LocalWorkspace` get your `PATH` and `HOME`, so they find your tools and their configuration, and nothing else from your environment. Add what they need with `LocalWorkspace('.', env={...})`. Don't pass `os.environ`: that hands the model's commands every secret in the process, LLM API keys included.
 
 ## Sharing a workspace
 
-A workspace outlives the run that used it, so the next run can pick up where the last one left off, in the same files.
+A workspace outlives the run that used it. To continue the conversation in the same files, pass its messages:
 
-To continue the conversation, pass its messages. The latest response records which workspace it ran in, and `LocalWorkspace` continues in that directory (it declines a record naming any other directory, so message history cannot point the agent somewhere else on your machine):
+```python {names="defined"}
+from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai_harness.coder import Coder
 
-```python
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[LocalWorkspace('.'), Coder()])
 result = agent.run_sync('Add a --verbose flag to the CLI.')
 result = agent.run_sync('Document the new flag in the README.', message_history=result.all_messages())
 ```
 
-To hand the work to a different agent, or to a later run with a fresh conversation, pass the workspace itself. The reviewer below has no workspace of its own, so it works exactly where it is told:
+Message history can't move a `LocalWorkspace` to another directory.
 
-```python
+To hand the work to another agent, or start a fresh conversation in the same files, pass the workspace itself:
+
+```python {names="defined"}
+from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai_harness.coder import Coder
+
+coder = Agent('anthropic:claude-opus-5-5', capabilities=[LocalWorkspace('.'), Coder()])
 reviewer = Agent(
-    'anthropic:claude-sonnet-5',
+    'anthropic:claude-opus-5-5',
     capabilities=[Coder(instructions='Review the uncommitted change and run the tests. Do not edit files.')],
 )
+
+result = coder.run_sync('Add a --verbose flag to the CLI.')
 review = reviewer.run_sync('Review the change.', workspace=result.workspace)
 ```
 
-With a sandbox this is how several agents collaborate in one isolated environment. Sub-agents need nothing extra: [`SubAgents`](subagents.md) runs each delegate in the parent run's workspace.
+The reviewer works in the workspace you pass. With a sandbox, this is how several agents share one isolated machine. [`SubAgents`](subagents.md) needs nothing extra: each delegate runs in the parent's workspace.
 
 ## Composition
 
 `Coder()` is these capabilities, in this order:
 
 1. A `Capability` carrying the default instructions, plus any `instructions=` you pass.
-2. [`FileSystem`](filesystem.md)`(content_hashes=False, max_read_chars=60000, tools=FILE_TOOL_NAMES)`, where
+2. [`FileSystem`](filesystem.md)`(content_hashes=False, max_read_chars=50000, tools=FILE_TOOL_NAMES)`, where
    `FILE_TOOL_NAMES` is `read_file`, `write_file`, `edit_file`, `list_files`, and `grep`. Its `root_dir` is the workspace's working directory.
 3. [`Shell`](shell.md)`(denied_commands=[], allow_interactive=True, default_timeout=270, tools=['shell'])`.
 4. [`RepoContext`](repo-context.md)`(expose_inventory_tool=False)` for repository instructions and structure.
@@ -123,18 +132,18 @@ or allowlist commands.
 
 | Tool | Behavior |
 | --- | --- |
-| `read_file(path, offset=0, limit=None)` | Zero-based line offset, one-based displayed line numbers, up to 2,000 lines or 60,000 characters of complete lines; the continuation hint names the exact next offset, and a line too long for the window is named and skippable. No hash header. |
+| `read_file(path, offset=0, limit=None)` | Zero-based line offset, one-based displayed line numbers, up to 2,000 lines or 50,000 characters of complete lines; the continuation hint names the exact next offset, and a line too long for the window is named and skippable. No hash header. |
 | `write_file(path, content)` | Create a file in an existing directory, or replace one. No `expected_hash`. |
 | `edit_file(path, old_text, new_text)` or `edit_file(path, replacements=[...])` | Exact replacements, each matching once; a batch is checked in memory and written only if every replacement matches. |
 | `list_files(path='.', glob=None)` | `rg --files`, sorted by path, respecting ignore files and skipping hidden files. |
 | `grep(pattern, ...)` | Ripgrep search with `path`, `glob`, `file_type`, `ignore_case`, `literal`, and `context` (0 to 20). |
 | `shell(command, mode='foreground', timeout=270)` | Unrestricted commands rooted at the workspace that outlive the run. |
 
-Results are bounded by `FileSystem`'s caps (2,000 lines or 60,000 characters per `read_file`, 1,000 lines or files per search or listing) and Coder's 64,000-character
+Results are bounded by `FileSystem`'s caps (2,000 lines or 50,000 characters per `read_file`, 1,000 lines or files per search or listing) and Coder's 64,000-character
 tool-output limit; a truncation marker means more output was omitted, so narrow the search rather than
 assuming it was complete. A `read_file` window stays under the output limit, so paging by `offset` never skips lines. Use `shell` for `mkdir`, `find`, process inspection, and `kill`. File writes
 keep the standalone filesystem's read-only path rules (`.git`, `.env`, keys, and secrets); shell can bypass
-these rules. Coder does not include planning, delegation, or the run-scoped `run_command` family.
+these rules. Coder does not include planning, delegation, or the `run_command` family.
 
 ## Filesystem scope
 

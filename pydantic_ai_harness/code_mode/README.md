@@ -87,8 +87,7 @@ The `code-mode` extra is also supported as an alias.
 
 By default, `CodeMode(tools='all')` sandboxes every eligible regular tool. Framework control tools,
 undiscovered deferred tools, native fallbacks, and other code-execution tools remain native. Shell
-surfaces count as code-execution tools: `Shell`'s `run_command` and `start_command`, and
-`ModalSandbox`'s `run_command`, sit beside `run_code` rather than inside it, so the model never has
+surfaces count as code-execution tools: `Shell`'s `run_command` and `start_command` sit beside `run_code` rather than inside it, so the model never has
 to quote a shell command inside a generated Python string. `CapabilityCreation`'s
 `author_capability` stays native for the same reason: its argument is a complete Python module.
 Their non-command tools (`read_file`, `check_command`, and so on) are folded into `run_code` like
