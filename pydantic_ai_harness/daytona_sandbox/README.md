@@ -126,6 +126,20 @@ A `DaytonaSandboxBackend` can also be built yourself and passed as `workspace=`:
 
 Without `client=`, each run opens its own `AsyncDaytona` API client on first use and closes it when the run ends; `result.workspace` opens a new one if you use it afterwards. Pass `client=` to share one client across runs; you own closing it, for example with `async with AsyncDaytona() as client:`. The reference carries no credentials, so every process that reattaches needs its own `DAYTONA_API_KEY` or `client=`.
 
+## Temporal and other durable engines
+
+Under a durable engine such as Temporal, each activity builds its own backend, and without `client=` each one opens an `AsyncDaytona` client that is never closed. Create one client when the worker starts and pass it as `client=`, so every activity shares it. The capability never closes a client you pass.
+
+```python
+from daytona import AsyncDaytona
+from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
+
+async def run_worker() -> None:
+    async with AsyncDaytona() as client:
+        sandbox = DaytonaSandbox(client=client)
+        ...  # add `sandbox` to the agent's capabilities, then start the worker
+```
+
 ## Lifetime and cost
 
 A sandbox keeps running, and billing, after the run ends. Daytona's own defaults apply: it stops a sandbox after 15 idle minutes (`auto_stop_interval=` changes that, and `0` disables it), archives one that has been stopped for 7 days, and never deletes it. A stopped sandbox keeps its disk, and attaching to it starts it again. Deleting sandboxes you are done with is your job, through `get_client()` or the Daytona dashboard. `auto_stop_interval`, `snapshot`, and `network_block_all` apply when a sandbox is created, not to one attached by reference.
