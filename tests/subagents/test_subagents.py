@@ -29,6 +29,7 @@ from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import UsageLimits
 
+from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness.subagents import SubAgent, SubAgents, SubAgentToolset
 
 
@@ -295,10 +296,9 @@ class TestDelegation:
             return ModelResponse(parts=[TextPart('sub done')])
 
         worker = Agent(FunctionModel(worker_fn), name='worker')
-        parent: Agent[object, str] = Agent(
-            _delegate_then_finish('worker'),
-            capabilities=[SubAgents(agents=[SubAgent(worker)], inherit_tools=True)],
-        )
+        with pytest.warns(HarnessDeprecationWarning, match='inherit_tools'):
+            capability: SubAgents[object] = SubAgents(agents=[SubAgent(worker)], inherit_tools=True)
+        parent: Agent[object, str] = Agent(_delegate_then_finish('worker'), capabilities=[capability])
 
         @parent.tool_plain
         def parent_tool() -> str:  # pyright: ignore[reportUnusedFunction]
@@ -367,9 +367,10 @@ class TestDelegation:
             return ModelResponse(parts=[TextPart('sub done')])
 
         worker = Agent(FunctionModel(worker_fn), name='worker')
+        with pytest.warns(HarnessDeprecationWarning, match='inherit_tools'):
+            capability: SubAgents[object] = SubAgents(agents=[SubAgent(worker)], inherit_tools=True)
         parent: Agent[object, str] = Agent(
-            _delegate_then_finish('worker'),
-            capabilities=[SubAgents(agents=[SubAgent(worker)], inherit_tools=True), _ToolCapability()],
+            _delegate_then_finish('worker'), capabilities=[capability, _ToolCapability()]
         )
 
         @parent.tool_plain
@@ -849,7 +850,9 @@ class TestIncludeSelf:
 
         # `inherit_tools=True` would register the parent's tools a second time on a delegate
         # that already has them, which fails on the duplicate name; it does not apply to `self`.
-        agent = Agent(capabilities=[SubAgents(include_self=True, agent_folders=None, inherit_tools=True)])
+        with pytest.warns(HarnessDeprecationWarning, match='inherit_tools'):
+            capability: SubAgents[object] = SubAgents(include_self=True, inherit_tools=True)
+        agent: Agent[object, str] = Agent(capabilities=[capability])
 
         @agent.tool_plain
         def parent_tool() -> str:  # pyright: ignore[reportUnusedFunction]

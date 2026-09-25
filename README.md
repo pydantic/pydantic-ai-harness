@@ -261,7 +261,7 @@ agent = Agent(
     capabilities=[
         WebSearch(local=True),  # native provider search, DuckDuckGo fallback elsewhere
         WebFetch(local=True),  # read the pages behind the results, native or local
-        SubAgents(agents=[sub_researcher], agent_folders=None),
+        SubAgents(agents=[sub_researcher]),
         ToolOutputLimits(),  # fetched pages don't flood the context
     ],
 )

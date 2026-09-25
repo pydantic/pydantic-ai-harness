@@ -247,8 +247,8 @@ COMBINE_POLICY: dict[str, Policy] = {
     'SubAgents': Combines(
         'one delegate tool per agent, so two rosters become one',
         lambda: (
-            SubAgents[Any](agents=[SubAgent(Agent(TestModel(), name='alpha'))]),
-            SubAgents[Any](agents=[SubAgent(Agent(TestModel(), name='beta'))]),
+            SubAgents[Any](agents=[SubAgent(Agent(TestModel(), name='alpha'))], agent_folders=None),
+            SubAgents[Any](agents=[SubAgent(Agent(TestModel(), name='beta'))], agent_folders=None),
         ),
         _check_sub_agents,
     ),
@@ -581,7 +581,13 @@ async def test_two_of_a_colliding_capability_still_raise(name: str, anyio_backen
         pytest.param(
             'shared_capabilities', {'shared_capabilities': [Thinking(effort='high')]}, {}, id='shared_capabilities'
         ),
-        pytest.param('inherit_tools', {'inherit_tools': True}, {'inherit_tools': False}, id='inherit_tools'),
+        pytest.param(
+            'inherit_tools',
+            {'inherit_tools': True},
+            {'inherit_tools': False},
+            id='inherit_tools',
+            marks=pytest.mark.filterwarnings('ignore::pydantic_ai_harness.HarnessDeprecationWarning'),
+        ),
         pytest.param('tool_name', {'tool_name': 'delegate_task'}, {'tool_name': 'ask_specialist'}, id='tool_name'),
         pytest.param('forward_usage', {'forward_usage': False}, {'forward_usage': True}, id='forward_usage'),
         pytest.param('tool_retries', {'tool_retries': 5}, {'tool_retries': 2}, id='tool_retries'),
@@ -602,8 +608,11 @@ def test_sub_agents_compose_the_roster_and_nothing_else(
     allow-list is what keeps that true for fields added later: they are refused until someone
     decides, rather than merged by a default nobody chose.
     """
-    first = SubAgents[Any](agents=[SubAgent(_child('alpha'), description='alpha')], **first_kwargs)
-    second = SubAgents[Any](agents=[SubAgent(_child('beta'), description='beta')], **second_kwargs)
+    # `agent_folders=None` unless overridden, so this does not depend on the definitions in the
+    # conventional folders of the working directory (this repository has one).
+    no_disk: dict[str, Any] = {'agent_folders': None}
+    first = SubAgents[Any](agents=[SubAgent(_child('alpha'), description='alpha')], **(no_disk | first_kwargs))
+    second = SubAgents[Any](agents=[SubAgent(_child('beta'), description='beta')], **(no_disk | second_kwargs))
 
     with pytest.raises(UserError, match=f'disagree on {field_name!r}'):
         SubAgents.combine([first, second])
@@ -623,8 +632,8 @@ def test_merging_reuses_the_delegates_already_loaded_from_disk(tmp_path: Path, m
     (folder / 'helper.md').write_text('---\nname: helper\ndescription: helps\n---\n\nBe helpful.\n', encoding='utf-8')
     monkeypatch.chdir(project)
 
-    first = SubAgents[Any](agents=[SubAgent(_child('alpha'), description='alpha')])
-    second = SubAgents[Any](agents=[SubAgent(_child('beta'), description='beta')])
+    first = SubAgents[Any](agents=[SubAgent(_child('alpha'), description='alpha')], agent_folders='agents')
+    second = SubAgents[Any](agents=[SubAgent(_child('beta'), description='beta')], agent_folders='agents')
     assert 'helper' in first._by_name, 'the disk delegate is picked up at construction'  # pyright: ignore[reportPrivateUsage]
 
     # The folder is gone by the time the two are combined, which is what a `chdir` amounts to.
@@ -635,6 +644,28 @@ def test_merging_reuses_the_delegates_already_loaded_from_disk(tmp_path: Path, m
     assert set(merged._by_name) == {'alpha', 'beta', 'helper'}, (  # pyright: ignore[reportPrivateUsage]
         'the disk delegate survives the merge because it is reused, not reloaded'
     )
+
+
+def test_coder_composes_with_a_plain_sub_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`Coder`'s bundled `SubAgents` merges with a user's own, rather than disagreeing on `agent_folders`.
+
+    `Coder` passes `agent_folders=None`; a plain `SubAgents(agents=[...])` leaves it unset. Both mean no
+    disk loading, so the merge composes the roster instead of refusing. The working directory and home
+    are pointed at an empty folder so the unset default has no definition to warn about.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    def fake_home(cls: type[Path]) -> Path:
+        return tmp_path
+
+    monkeypatch.setattr(Path, 'home', classmethod(fake_home))
+
+    tree = CombinedCapability([Coder[Any](tmp_path), SubAgents[Any](agents=[SubAgent(_child('worker'))])])
+    combined = combine_duplicate_capabilities(tree, [tree.capabilities])
+    sub_agents = [leaf for leaf in leaf_capabilities(combined) if isinstance(leaf, SubAgents)]
+    assert len(sub_agents) == 1
+    assert sub_agents[0].include_self
+    assert [entry.agent.name for entry in sub_agents[0].agents] == ['worker']
 
 
 def _child(name: str) -> Agent[Any, str]:

@@ -18,6 +18,7 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AgentToolset
 
+from pydantic_ai_harness._warn import HarnessDeprecationWarning, warn_default_changed
 from pydantic_ai_harness.subagents._disk import (
     AgentOverride,
     ParsedAgent,
@@ -40,6 +41,27 @@ if TYPE_CHECKING:
 ToolResolver = Callable[[str], 'Sequence[AgentToolset[object]] | None']
 """Maps one tool name from a disk definition's `tools` list to the toolsets that
 provide it, or `None` when the name is unknown (the loader warns and skips it)."""
+
+
+class _UnsetFolders(tuple[Path, ...]):
+    """The type of the `agent_folders` default, so an unset value is told apart from an explicit `None`.
+
+    An empty tuple of paths, so the public type stays `str | Sequence[Path] | None` and the default
+    reads as what it does (no folders). `__post_init__` replaces it with `None` once it has decided
+    whether to warn, so a constructed capability never holds it.
+    """
+
+
+_UNSET_FOLDERS: Sequence[Path] = _UnsetFolders()
+
+
+def _conventional_definitions() -> list[Path]:
+    """The folders the old `agent_folders='agents'` default would have loaded at least one definition from."""
+    return [
+        folder
+        for folder in resolve_folders('agents', Path.cwd(), Path.home())
+        if folder.is_dir() and any(folder.glob('*.md'))
+    ]
 
 
 def _option_line(key: str, option: ModelOption) -> str:
@@ -86,15 +108,14 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     one of the menu's keys, so the parent routes each task to the model that fits
     it. A `SubAgent` can restrict which keys it accepts (`SubAgent.models`).
 
-    Sub-agents are also loaded from disk by default: each markdown agent definition
-    under `./.agents/agents/` and `~/.agents/agents/` (or the `.claude/` equivalent)
-    becomes a delegate, built with the parent's model. Disk delegates get no tools
-    by default (`inherit_tools` is `False`); set `inherit_tools=True` to expose the
-    parent's tools, or pass a `tool_resolver` to map their frontmatter tool names.
-    Disk delegates coexist with explicitly-passed ones; explicitly-passed agents take
-    precedence, then the project folder, then the home folder. A disk delegate whose
-    name is already taken is skipped with a warning. Configure or disable this with
-    `agent_folders`; see also `agent_overrides` and `tool_resolver`.
+    Sub-agents can also be loaded from markdown agent definitions on disk, when
+    `agent_folders` is set: `agent_folders='agents'` loads `./.agents/agents/` and
+    `~/.agents/agents/` (or the `.claude/` equivalent). Each definition becomes a
+    delegate built with the parent's model and no tools; pass a `tool_resolver` to
+    map their frontmatter tool names to toolsets. Disk delegates coexist with
+    explicitly-passed ones; explicitly-passed agents take precedence, then the
+    project folder, then the home folder. A disk delegate whose name is already
+    taken is skipped with a warning. See also `agent_overrides`.
 
     With `include_self=True`, the roster also lists the running agent itself, as `self`:
     a delegation starts a fresh run of `RunContext.agent`, so the delegate has every
@@ -103,10 +124,9 @@ class SubAgents(AbstractCapability[AgentDepsT]):
 
     The parent's `deps` are forwarded to each sub-agent (sub-agents therefore
     share the parent's `AgentDepsT`), and by default the parent's `usage` is
-    shared so usage limits apply across the whole agent tree. Optionally, the
-    parent's tools can be inherited (`inherit_tools`), extra capabilities can be
-    applied to every sub-agent run (`shared_capabilities`), and sub-agent events
-    can be streamed to a handler (`event_stream_handler`).
+    shared so usage limits apply across the whole agent tree. Optionally, extra
+    capabilities can be applied to every sub-agent run (`shared_capabilities`), and
+    sub-agent events can be streamed to a handler (`event_stream_handler`).
 
     ```python
     from pydantic_ai import Agent
@@ -147,18 +167,22 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     ```
     """
 
-    agent_folders: str | Sequence[Path] | None = 'agents'
+    agent_folders: str | Sequence[Path] | None = _UNSET_FOLDERS
     """Where to load markdown agent definitions from, in addition to `agents`.
-    Defaults to the conventional layout, so constructing the capability auto-loads
-    a repo's agent files with no extra configuration.
+    Off by default: only `agents` are exposed unless this is set.
 
-    - a folder-name `str` (the default `'agents'` is the conventional layout): for
-      the project root (cwd) then the home root, load from `<root>/.agents/<name>/`,
-      falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
+    - a folder-name `str` (`'agents'` is the conventional layout): for the project
+      root (cwd) then the home root, load from `<root>/.agents/<name>/`, falling back
+      to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
     - a sequence of paths: load from exactly those folders, in order.
-    - `None`: disable disk loading entirely (only `agents` are exposed).
+    - `None`: no disk loading (the default).
 
-    Missing folders are skipped. Within a folder every `*.md` file is a candidate."""
+    Missing folders are skipped. Within a folder every `*.md` file is a candidate.
+
+    This previously defaulted to `'agents'`. Leaving it unset while a conventional
+    folder holds a definition emits a `HarnessDeprecationWarning`, since those files
+    are no longer loaded; passing either value explicitly is silent. An unset value
+    reads back as `None` after construction."""
 
     agent_overrides: Mapping[str, AgentOverride] = field(default_factory=dict[str, AgentOverride])
     """Per-disk-agent overrides keyed by the agent's name. An entry can set the
@@ -170,17 +194,21 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     name in a definition's `tools`/`allowed-tools` frontmatter is passed to this
     resolver and the returned toolsets are attached to that agent; an unknown name
     (resolver returns `None`) is skipped with a warning. When unset, the
-    frontmatter tool list is ignored and disk agents inherit the parent's tools
-    via `inherit_tools` (set `inherit_tools=True` to expose them)."""
+    frontmatter tool list is ignored and disk agents have no tools of their own."""
 
     forward_usage: bool = True
     """If `True`, the parent run's `usage` is shared with each sub-agent run, so
     token usage aggregates and usage limits apply across the whole agent tree."""
 
     inherit_tools: bool = False
-    """If `True`, the parent agent's tools are exposed to each sub-agent run (the
-    delegate tool itself is filtered out, so sub-agents can't recurse into
-    further delegation). Off by default to avoid silently widening sub-agent access."""
+    """Deprecated: setting it to `True` emits a `HarnessDeprecationWarning`.
+
+    If `True`, the parent agent's own tools (registered via `tools=` or `toolsets=`,
+    not those contributed by capabilities) are exposed to each sub-agent run, minus
+    the delegate tool. Because capability tools are excluded, it passes little on an
+    agent built from capabilities. To delegate to an agent with all of the parent's
+    tools and capabilities, use `include_self=True`; to give disk-loaded agents
+    tools, use `tool_resolver`."""
 
     shared_capabilities: Sequence[AgentCapability[AgentDepsT]] = ()
     """Capabilities applied to every sub-agent run, in addition to whatever each
@@ -266,6 +294,34 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     toolset and cleared per run in `wrap_run`. Backs `SubAgent.max_calls`."""
 
     def __post_init__(self) -> None:
+        """Resolve the unset `agent_folders` default and warn about deprecated usage, then build the roster.
+
+        The warnings are emitted here directly, not from a helper, so their `stacklevel` points
+        at the caller constructing the capability.
+        """
+        if self.agent_folders is _UNSET_FOLDERS:
+            self.agent_folders = None
+            found = _conventional_definitions()
+            if found:
+                warn_default_changed(
+                    owner='SubAgents',
+                    option='agent_folders',
+                    old='agents',
+                    new=None,
+                    impact=(
+                        f'The agent definitions in {", ".join(repr(str(folder)) for folder in found)} are no '
+                        'longer loaded as delegates.'
+                    ),
+                )
+        if self.inherit_tools:
+            warnings.warn(
+                '`SubAgents(inherit_tools=True)` is deprecated and will be removed in a future release. It passes '
+                "only the parent's own tools, not those of its capabilities. Use `include_self=True` to delegate "
+                'to a fresh run of the agent with all of its tools and capabilities, or `tool_resolver` to give '
+                'disk-loaded agents tools.',
+                category=HarnessDeprecationWarning,
+                stacklevel=3,
+            )
         self._build_roster(self._load_disk_agents())
 
     def _disk_agents(self) -> list[SubAgent[AgentDepsT]]:

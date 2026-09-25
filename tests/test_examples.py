@@ -54,6 +54,13 @@ def test_example_builds_agent(
 ):
     # Keep any filesystem-scoped capabilities and memory stores inside tmp_path.
     monkeypatch.chdir(tmp_path)
+
+    # And keep the home directory's agent definitions out of `SubAgents`, whose unset
+    # `agent_folders` default warns when they exist.
+    def fake_home(cls: type[Path]) -> Path:
+        return tmp_path
+
+    monkeypatch.setattr(Path, 'home', classmethod(fake_home))
     monkeypatch.setenv('SUPPORT_MEMORY_DIR', str(tmp_path / 'memory'))
     try:
         module = _load(path)

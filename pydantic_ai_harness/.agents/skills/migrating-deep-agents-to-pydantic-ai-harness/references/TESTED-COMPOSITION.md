@@ -45,7 +45,7 @@ with TemporaryDirectory() as workspace:
             FileSystem(root, read_only=True),
             RepoContext(workspace_dir=root),
             Skills(root / 'skills'),
-            SubAgents(agents=[SubAgent(worker, max_calls=1)], agent_folders=None),
+            SubAgents(agents=[SubAgent(worker, max_calls=1)]),
             SlidingWindowCompaction(max_messages=20, keep_messages=10),
         ],
     )
