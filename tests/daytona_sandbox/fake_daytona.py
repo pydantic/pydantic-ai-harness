@@ -270,9 +270,9 @@ class _HostProcess(FakeProcess):
                     handler(chunk.decode(errors='replace'))
             if finished:
                 # Like the real log stream, end a stream that did not end in a newline with one.
-                for index, handler in enumerate((on_stdout, on_stderr)):
-                    if last[index] != b'\n':
-                        handler('\n')
+                unterminated = [handler for handler, end in zip((on_stdout, on_stderr), last) if end != b'\n']
+                for handler in unterminated:
+                    handler('\n')
                 return
             await anyio.sleep(0.01)
 
