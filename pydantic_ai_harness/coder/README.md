@@ -177,6 +177,10 @@ Each attempt emits a `repair_tool_arguments` span through `ctx.tracer`, without 
 contents. Other Coder operations rely on core tool spans and on the events its `FileSystem` and `Shell`
 capabilities emit.
 
+## Durable execution
+
+`Coder`, `Shell` and `FileSystem` work under DBOS durable execution, but not yet under Temporal or Prefect.
+
 ## Upgrading
 
 This release makes the workspace the single place that decides where an agent works. Removed arguments are still accepted, emit a `HarnessDeprecationWarning` naming the fix, and are ignored.
