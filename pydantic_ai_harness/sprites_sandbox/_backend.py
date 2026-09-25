@@ -76,7 +76,7 @@ _ACQUIRE_TIMEOUT = 150.0
 _AUTH_MESSAGE = 'Sprites rejected the credentials. Set SPRITE_TOKEN or pass token= and try again.'
 
 
-async def cleanup_call(call: Callable[[], Awaitable[object]], *, timeout: float) -> Exception | None:
+async def _cleanup_call(call: Callable[[], Awaitable[object]], *, timeout: float) -> Exception | None:
     """Run one teardown RPC shielded from cancellation and bounded by `timeout`.
 
     Returns the failure instead of raising so the caller owns translation; a bare `TimeoutError`
@@ -94,7 +94,7 @@ async def cleanup_call(call: Callable[[], Awaitable[object]], *, timeout: float)
     return error
 
 
-async def run_to_completion(call: Callable[[], Awaitable[_T]]) -> _T:
+async def _run_to_completion(call: Callable[[], Awaitable[_T]]) -> _T:
     """Await `call` in a task of its own and see it finish even if the caller is cancelled meanwhile.
 
     For work whose outcome must be recorded, such as a created Sprite or a closed client: the
@@ -123,7 +123,7 @@ async def _close_connection(connection: ControlConnection) -> None:
 
     Finished even when the caller (a cancelled command) is cancelled meanwhile.
     """
-    error = await run_to_completion(lambda: cleanup_call(connection.close, timeout=_CONTROL_TIMEOUT))
+    error = await _run_to_completion(lambda: _cleanup_call(connection.close, timeout=_CONTROL_TIMEOUT))
     if error is not None:
         logger.warning('Could not close a Sprite control connection, aborting it: %r', error)
         # `close` has nothing to fail on before `connect` opened the socket.
@@ -136,7 +136,7 @@ async def _kill(operation: OpConn) -> None:
 
     The signal reaches the command the Sprite started; a child it put in the background may outlive it.
     """
-    error = await cleanup_call(lambda: operation.signal('KILL'), timeout=_CONTROL_TIMEOUT)
+    error = await _cleanup_call(lambda: operation.signal('KILL'), timeout=_CONTROL_TIMEOUT)
     if error is not None:
         logger.warning('Could not stop the remote Sprite command: %r', error)
 
@@ -256,7 +256,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
             try:
                 # Creation runs to completion even if the caller is cancelled, so a Sprite that
                 # was created is never left unnamed; attaching creates nothing and stays cancellable.
-                return await (acquire() if ref is not None else run_to_completion(acquire))
+                return await (acquire() if ref is not None else _run_to_completion(acquire))
             except SpriteError as error:
                 if (mapped := _map_error(error, self._name if ref is None else ref.id)) is None:
                     raise
@@ -279,7 +279,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
                 client = self._client
                 if client is None:
                     return
-                error = await cleanup_call(client.aclose, timeout=_CONTROL_TIMEOUT)
+                error = await _cleanup_call(client.aclose, timeout=_CONTROL_TIMEOUT)
                 if error is not None:
                     # Kept, so a later `aclose()` tries again.
                     logger.warning('Could not close Sprites SDK client: %r', error)
@@ -288,7 +288,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
                     self._workspace = None
 
         # Finished even when the caller (a run being cancelled) is cancelled meanwhile.
-        await run_to_completion(close)
+        await _run_to_completion(close)
 
     async def working_dir(self) -> str:
         if self._canonical_working_dir is None:
