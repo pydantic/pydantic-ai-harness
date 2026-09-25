@@ -68,11 +68,24 @@ async def choose_key(
         if replace and not await run_worker(lambda: confirm_replace(name, runners)):
             return None
         try:
-            await asyncio.to_thread(partial(save_key, name=name, value=value, replace=replace))
+            await _finish(asyncio.to_thread(partial(save_key, name=name, value=value, replace=replace)))
         except KeyExistsError:  # Another session saved `name` since `keys` was read: ask before replacing it.
             replace = True
         else:
             return KeyReference(name=name)
+
+
+async def _finish(write: Coroutine[object, object, object]) -> None:
+    """Let a started `/keys` write complete even when cancelled, so nothing changes after the menu is released.
+
+    A thread cannot be interrupted, and the write is atomic, so the only safe choice is to wait for it.
+    """
+    task = asyncio.ensure_future(write)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
 
 
 def confirm_replace(name: str, runners: Runners) -> bool:
@@ -99,7 +112,8 @@ def on_loop(
 ) -> ResultT | None:
     """Run an async flow from a menu worker thread; `None` when the worker is told to stop first.
 
-    The flow's own widgets watch their own stop signal, so a stopping worker must cancel it explicitly.
+    The flow's own widgets watch their own stop signal, so a stopping worker must cancel it explicitly, then wait
+    for it to wind down.
     """
     running = asyncio.run_coroutine_threadsafe(operation(), loop)
     while True:
@@ -108,4 +122,5 @@ def on_loop(
         except concurrent.futures.TimeoutError:
             if worker_stopping():
                 running.cancel()
+                concurrent.futures.wait([running])  # A started `/keys` write finishes before the menu is released.
                 return None

@@ -7,6 +7,7 @@ from typing import TypeGuard
 
 import anyio
 import pytest
+from anyio import to_thread
 from menu_script import Script, pick, typed
 from pydantic import JsonValue, SecretStr
 from pydantic_ai import Agent, RunContext
@@ -365,6 +366,32 @@ async def test_plugins_menu_stays_open_when_there_is_nothing_to_configure() -> N
         return None
 
     assert await open_plugins_menu(app.plugins, run=run) == ''
+    await app.plugins.close('exit')
+
+
+async def test_closing_the_menu_mid_save_waits_for_the_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    saving = threading.Event()
+    release = threading.Event()
+    order: list[str] = []
+
+    def slow_save(*, name: str, value: str, replace: bool = True) -> str:
+        saving.set()
+        release.wait(5)  # Like another CLAI session holding the /keys lock.
+        order.append('saved')
+        return save_key(name=name, value=value, replace=replace)
+
+    monkeypatch.setattr('pydantic_clai2.plugin_keys.save_key', slow_save)
+    script(monkeypatch, lists=[pick('token')], texts=[typed('xoxp-new')])
+    app = await shell()
+    async with anyio.create_task_group() as group:
+        group.start_soon(app.plugins.command, ['configure', 'slack'])
+        await to_thread.run_sync(saving.wait, 5)
+        group.cancel_scope.cancel()
+        threading.Timer(0.2, release.set).start()
+    order.append('released')
+    assert order == ['saved', 'released']
+    assert load_keys()['SLACK_USER_TOKEN'].get_secret_value() == 'xoxp-new'
+    assert load_codex_credentials(account='slack') is None
     await app.plugins.close('exit')
 
 
