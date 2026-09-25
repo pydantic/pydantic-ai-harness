@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -394,10 +395,22 @@ def test_a_symlink_swapped_in_after_the_check_is_not_read(tmp_path: Path, monkey
         return False
 
     monkeypatch.setattr(Path, 'is_symlink', checked_before_the_swap)
-    with pytest.raises(OSError):
+    with pytest.raises(ValueError, match='Cannot trust a project MCP file'):
         store.trust(claude)
     assert store.trust_state(claude) == 'changed'
     assert store.project_servers() == {}
+
+
+@pytest.mark.skipif(not hasattr(os, 'mkfifo'), reason='FIFOs are POSIX-only')
+async def test_a_fifo_project_file_does_not_block(tmp_path: Path) -> None:
+    command, store = make(tmp_path)
+    fifo = tmp_path / 'repo' / CLAUDE_MCP_FILE
+    os.mkfifo(fifo)
+    with pytest.raises(ValueError, match='not a regular file'):
+        await command(['trust', 'accept'])
+    data = store.load()
+    store.save(data.model_copy(update={'trusted_projects': {str(fifo.resolve()): 'x'}}))
+    assert store.trust_state(fifo.resolve()) == 'changed' and store.project_servers() == {}
 
 
 def test_user_servers_shadow_project_servers(tmp_path: Path) -> None:

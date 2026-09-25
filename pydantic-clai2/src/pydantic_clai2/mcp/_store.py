@@ -11,6 +11,7 @@ in after the check is not read. This follows Code Puppy's `/mcp trust`.
 
 import hashlib
 import os
+import stat
 from pathlib import Path
 from typing import Literal
 
@@ -114,7 +115,11 @@ class MCPStore:
         if linked := [str(path) for path in paths if not _regular(path)]:
             raise ValueError(f'{", ".join(linked)}: a symlink; only a file inside the repository can be trusted.')
         data = self.load()
-        trusted = {**data.trusted_projects, **{_key(path): _digest(_read_regular(path)) for path in paths}}
+        try:
+            digests = {_key(path): _digest(_read_regular(path)) for path in paths}
+        except OSError as exc:
+            raise ValueError(f'Cannot trust a project MCP file: {exc}') from exc
+        trusted = {**data.trusted_projects, **digests}
         self.save(data.model_copy(update={'trusted_projects': trusted}))
 
     def revoke(self, *paths: Path) -> list[Path]:
@@ -161,10 +166,15 @@ def _regular(path: Path) -> bool:
     return not (path.is_symlink() or path.parent.is_symlink())
 
 
+_OPEN_FLAGS = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+"""`O_NONBLOCK` so opening a FIFO a repository ships returns at once instead of waiting for a writer."""
+
+
 def _read_regular(path: Path) -> bytes:
-    """The file's bytes; an `OSError` when the file itself is now a symlink."""
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
-    with os.fdopen(descriptor, 'rb') as file:
+    """The file's bytes; an `OSError` when it is now a symlink, or anything but a regular file."""
+    with os.fdopen(os.open(path, _OPEN_FLAGS), 'rb') as file:
+        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+            raise OSError(f'{path} is not a regular file')
         return file.read()
 
 
