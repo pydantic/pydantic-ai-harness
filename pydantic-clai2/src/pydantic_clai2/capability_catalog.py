@@ -2,7 +2,7 @@
 
 from .config import PluginSettings
 
-# Coder, AskUser and RepoContext already have shell-integrated built-in entries.
+# Coder, AskUser, RepoContext and Slack already have shell-integrated built-in entries.
 _FACTORIES = (
     ('advisor', 'advisor:Advisor'),
     ('aws_lambda', 'aws_lambda:AWSLambdaDurability'),
@@ -50,7 +50,6 @@ _FACTORIES = (
     ('researcher', 'researcher:Researcher'),
     ('shell', 'shell:Shell'),
     ('skills', 'skills:Skills'),
-    ('slack', 'slack:Slack'),
     ('spend_limits', 'spend:SpendLimits'),
     ('stackone', 'stackone:StackOne'),
     ('step_persistence', 'step_persistence:StepPersistence'),

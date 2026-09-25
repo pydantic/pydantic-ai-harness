@@ -385,7 +385,8 @@ order plugin instructions, renderers, and status segments are consulted in.
 
 `/plugins` and `/plugins list` also include every other public harness capability,
 including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
+`Coder`, `AskUser`, and `RepoContext` use the integrated entries above, and
+`Slack` uses the [`slack` plugin](#slack-your-slack-workspace-as-you), instead of
 appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
 are not separate capabilities.
 
@@ -506,6 +507,31 @@ The request and its response are also emitted as `AskUserRequestedEvent` and
 `AskUserAnsweredEvent`, so a plugin that only wants to watch (log the question,
 show a "waiting for you" state) registers `@host.on(EventClass)` or
 `@host.render(EventClass)` without being the answerer.
+
+### `slack`: your Slack workspace, as you
+
+`slack` (`pydantic_clai2.slack`) connects harness
+[`Slack`](../pydantic_ai_harness/slack/README.md) to Slack's hosted MCP server.
+It ships disabled. The tools act as the user whose token CLAI connects with, so
+anything the agent posts appears under your name.
+
+CLAI reads a Slack user token (`xoxp-`; Slack rejects bot tokens) from the
+`SLACK_USER_TOKEN` environment variable, or, when that is unset, from a key saved
+under the same name in [`/keys`](#saved-api-keys). The token is read when the
+plugin loads, so `/plugins enable slack` without one fails with a message naming
+both places and registers nothing. After replacing the key, run
+`/plugins reload slack`. The token never goes in the plugin's settings, which
+are stored in plaintext.
+
+| Key | Default | Does |
+|---|---|---|
+| `read_only` | `true` | keep only the tools Slack marks read-only, so the agent can search and read but not post or edit |
+
+To let the agent send messages and edit canvases as you:
+
+```text
+/plugins add slack pydantic_clai2.slack '{"read_only": false}'
+```
 
 ## Managing plugins
 
