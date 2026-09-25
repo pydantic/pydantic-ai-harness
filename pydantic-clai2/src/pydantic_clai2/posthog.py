@@ -13,7 +13,7 @@ organization pins, and keyring-backed sign-in all need a client of CLAI's own.
 
 import asyncio
 import re
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 from dataclasses import replace
 from typing import Literal
 from urllib.parse import urlencode, urlsplit
@@ -104,6 +104,9 @@ class PostHogSettings(BaseModel):
         local = parts.scheme == 'http' and parts.hostname in _LOOPBACK
         if not (parts.scheme == 'https' or local) or not parts.hostname or parts.query or parts.fragment:
             raise ValueError('Use an https:// URL (http:// only for localhost) with no query string.')
+        if parts.username is not None or parts.password is not None:
+            # Settings are plaintext, so a password in the URL would be stored in the clear.
+            raise ValueError('Leave credentials out of the URL; keep keys in /keys.')
         return url
 
     @field_validator('features')
@@ -144,11 +147,20 @@ class SavedKeyAuth(httpx.Auth):
 
     def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
         """Fail closed when no key is chosen or the chosen one is gone."""
-        reference = saved_key()
-        if reference is None:
-            raise UserError(f'PostHog has no key. {SETUP}')
-        request.headers['Authorization'] = f'Bearer {resolve_key(token=reference)}'
+        request.headers['Authorization'] = _bearer()
         yield request
+
+    async def async_auth_flow(self, request: httpx.Request) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        """The same lookup off the event loop: the keyring and the `/keys` lock can block."""
+        request.headers['Authorization'] = await asyncio.to_thread(_bearer)
+        yield request
+
+
+def _bearer() -> str:
+    reference = saved_key()
+    if reference is None:
+        raise UserError(f'PostHog has no key. {SETUP}')
+    return f'Bearer {resolve_key(token=reference)}'
 
 
 def activate(host: PluginHost[None]) -> None:

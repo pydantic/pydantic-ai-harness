@@ -349,11 +349,13 @@ class PluginLoader(Generic[DepsT]):
         if host.configurer is None:
             raise ValueError(f'Plugin {name} has no settings menu; replace its declaration with /plugins add.')
         before = self._entry(name).declaration.settings
-        message = await host.configurer()
-        if self._entry(name).declaration.settings != before:
-            await self.unload(name)
-            await self.load(name)
-        return message
+        try:
+            return await host.configurer()
+        finally:
+            # Edits are saved as they are made, so a menu that fails or is cancelled still needs them applied.
+            if self._entry(name).declaration.settings != before:
+                await self.unload(name)
+                await self.load(name)
 
     async def _configure_new(self, name: str, message: str) -> str:
         """After enable or add, open a newly loaded plugin's settings menu, if it has one."""

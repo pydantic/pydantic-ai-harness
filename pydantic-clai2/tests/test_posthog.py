@@ -1,6 +1,7 @@
 """The built-in `posthog` plugin: its settings menu, its `/keys` reference, and the connection it builds."""
 
 import io
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -103,6 +104,11 @@ def bearer() -> str:
     request = httpx.Request('GET', US_URL)
     flow = SavedKeyAuth().auth_flow(request)
     return next(flow).headers['Authorization']
+
+
+async def async_bearer() -> str:
+    flow = SavedKeyAuth().async_auth_flow(httpx.Request('GET', US_URL))
+    return (await flow.__anext__()).headers['Authorization']
 
 
 def test_declared_disabled_with_no_settings() -> None:
@@ -209,6 +215,7 @@ async def test_reopening_repicks_a_saved_key_and_region_without_reinstalling(
     assert bearer() == 'Bearer shared-secret'
     api_keys.save_key(name='SHARED_POSTHOG', value='replaced')
     assert bearer() == 'Bearer replaced', 'replacing the key in /keys reaches the next request without a reload'
+    assert await async_bearer() == 'Bearer replaced', 'async clients resolve it too, off the event loop'
     with pytest.raises(ValueError, match='used by posthog'):
         api_keys.rename_key(name='SHARED_POSTHOG', new_name='OTHER')
 
@@ -296,9 +303,11 @@ async def test_a_key_that_vanishes_while_choosing_is_reported_in_the_menu(
     assert await shell.loader.configure('posthog') == 'The selected API key no longer exists. Select a saved key again.'
 
 
-def test_saved_key_auth_fails_closed() -> None:
+async def test_saved_key_auth_fails_closed() -> None:
     with pytest.raises(UserError, match='PostHog has no key. Run /plugins configure posthog'):
         bearer()
+    with pytest.raises(UserError, match='PostHog has no key'):
+        await async_bearer()
     save_codex_credentials(account='posthog', value=f'{{"token": {{"name": "{KEY}"}}}}')
     with pytest.raises(UserError, match=f'{KEY} is missing'):
         bearer()
@@ -316,6 +325,8 @@ def test_menu_validates_resets_and_flags_a_missing_key() -> None:
         'Value error, Use an https:// URL (http:// only for localhost) with no query string.'
     )
     assert source.problem(rows['url'], f'{US_URL}?features=sql') is not None
+    for url in ('https://user:phx_secret@mcp.posthog.com/mcp', 'https://phx_secret@mcp.posthog.com/mcp'):
+        assert source.problem(rows['url'], url) == 'Value error, Leave credentials out of the URL; keep keys in /keys.'
     assert source.problem(rows['project_id'], '12 34') == (
         'Value error, Use the ID as PostHog shows it: letters, digits, and dashes.'
     )
@@ -344,6 +355,24 @@ async def test_missing_key_warns_on_load_but_keeps_the_menu(tmp_path: Path, monk
     await shell.loader.enable('posthog')
     assert 'PostHog uses DELETED, which is missing from /keys.' in shell.output.getvalue()
     assert len(shell.loader.capabilities()) == 1
+
+
+async def test_edits_saved_before_the_menu_fails_still_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shell = Shell(tmp_path)
+    script(monkeypatch, lists=[])
+    await shell.loader.enable('posthog')
+    scripted = script(monkeypatch, lists=[pick('read_only')], choices=[pick('false')])
+
+    def fail_after_the_edit(menu: object) -> MenuResult:
+        if scripted.opened:
+            raise RuntimeError('terminal went away')
+        return scripted.run_list(menu)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(posthog, 'RUNNERS', replace(scripted.runners, run_list=fail_after_the_edit))
+    with pytest.raises(RuntimeError, match='terminal went away'):
+        await shell.loader.configure('posthog')
+    assert shell.saved()['read_only'] is False
+    assert transport(shell.capability()).headers == {}, 'the saved edit is loaded even though the menu failed'
 
 
 async def test_headless_configure_explains_instead_of_drawing(tmp_path: Path) -> None:
