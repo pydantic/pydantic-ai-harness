@@ -61,12 +61,9 @@ _Args = TypeVarTuple('_Args')
 
 
 def in_temporal_workflow() -> bool:
-    """Whether this code runs in a Temporal workflow, however the agent was made durable.
+    """Whether this code runs in a Temporal workflow, where Monty must be called through the portal.
 
-    Asks Temporal itself rather than looking for a durability capability: `TemporalAgent` and
-    workflow code that runs an agent directly add none, and missing a workflow here means calling
-    Monty on Temporal's event loop, which hangs. Reads `sys.modules` so the optional extra is never
-    imported.
+    Reads `sys.modules` so the optional extra is never imported.
     """
     workflow = sys.modules.get('temporalio.workflow')
     return workflow is not None and workflow.in_workflow()
