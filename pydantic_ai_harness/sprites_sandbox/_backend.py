@@ -9,8 +9,8 @@ docs, and (2026-09-15) a local WebSocket transport probe, with no live cloud cal
 * `create_sprite` and `get_sprite` raise `AuthenticationError` (401), `NotFoundError` (404),
   `NetworkError` (transport), and a plain `SpriteError` for any other HTTP failure:
   https://github.com/superfly/sprites-py/blob/v0.7.0/src/sprites/client.py
-* `ControlConnection` is asyncio-based and exposes `connect`, `start_op` (with `cmd`, `env`, and
-  `dir`), `close`, `closed`, `close_error`, and its WebSocket as `ws`; an operation provides
+* `ControlConnection` is asyncio-based and exposes `connect`, `start_op` (with `cmd` and `dir`),
+  `close`, `closed`, `close_error`, and its WebSocket as `ws`; an operation provides
   `wait`, `get_stdout`, `get_stderr`, `closed`, and `signal`, and a failed handshake raises
   `websockets.exceptions.InvalidStatus`. An `op.error` from the Sprite completes the operation
   without an exit status and with `Error: <message>` in stderr, leaving the connection open:
@@ -19,9 +19,9 @@ docs, and (2026-09-15) a local WebSocket transport probe, with no live cloud cal
   Go SDK's list of valid names give it. Whether it reaches the command's process group is not
   documented:
   https://github.com/superfly/sprites-go/blob/main/exec.go
-* The exec API documents that a set `env` replaces the default environment. The backend passes
-  `env` to `start_op` and assumes it is layered on the Sprite's own environment, as the class
-  docstring states; the live tier checks that `PATH` survives:
+* The exec API documents that a set `env` replaces the default environment, so the backend does
+  not pass `env` to `start_op`; it runs the command under the POSIX `env` utility instead, which
+  adds the variables to the Sprite's own environment:
   https://sprites.dev/api/sprites/exec
 * A control WebSocket disconnect does not stop a non-TTY command at once; it may keep running for
   `max_run_after_disconnect` (10 seconds by default), so a timeout or cancellation sends SIGKILL
@@ -311,7 +311,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         directory = absolute_path('cwd', cwd) if cwd is not None else self._working_dir
-        args = command_argv(command, shell)
+        args = _with_env(command_argv(command, shell), {**self._env, **(env or {})})
 
         # Acquiring the Sprite has its own bound; the deadline is the command's alone.
         sprite = await self.get_client()
@@ -322,9 +322,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
         try:
             with deadline:
                 await connection.connect()
-                operation = await connection.start_op(
-                    'exec', cmd=args, env={**self._env, **(env or {})}, dir=directory, stdin=False
-                )
+                operation = await connection.start_op('exec', cmd=args, dir=directory, stdin=False)
                 code = await operation.wait()
             stdout = operation.get_stdout() if operation is not None else b''
             stderr = operation.get_stderr() if operation is not None else b''
@@ -356,6 +354,23 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
             raise
         await _close_connection(connection)
         return CommandResult(exit_code=code, stdout=_decode(stdout), stderr=_decode(stderr))
+
+
+def _with_env(args: list[str], env: dict[str, str]) -> list[str]:
+    """`args` run under the POSIX `env` utility, which adds `env` to the Sprite's own environment."""
+    if not env:
+        return args
+    for key, value in env.items():
+        if not key or '=' in key or '\0' in key or '\0' in value:
+            raise ValueError(
+                f'illegal environment variable {key!r}: a name is non-empty without "=" or NUL, a value without NUL'
+            )
+    if '=' in args[0]:
+        # `env` reads any operand containing `=` as an assignment, even after `--`, so no portable
+        # spelling runs this program with variables set.
+        raise ValueError(f'cannot run {args[0]!r} with env: a program name containing "=" is read as a variable')
+    # `--` ends `env`'s options, so a name starting with `-` is not read as one.
+    return ['env', '--', *(f'{key}={value}' for key, value in env.items()), *args]
 
 
 def _decode(data: bytes) -> str:

@@ -2,8 +2,8 @@
 
 The Sprite handles, clients and exception classes are the real ones from the installed SDK; only
 the network calls are replaced. Commands run for real: an exec operation runs its argv in a local
-subprocess, in its `dir` (`SpriteTransport.root` by default) with its `env` layered on this
-process's environment, so commands share one host directory and deadlines are real. A command that
+subprocess, in its `dir` (`SpriteTransport.root` by default) and this process's environment, so
+commands share one host directory and deadlines are real. A command that
 cannot start completes without an exit status and with the error on stderr, as `op.error` does, and
 `signal()` reaches only the command's own process.
 
@@ -15,7 +15,6 @@ deleted Sprite fails its WebSocket handshake with HTTP 404 (`websockets.exceptio
 from __future__ import annotations
 
 import asyncio
-import os
 import signal
 import subprocess
 import threading
@@ -31,7 +30,7 @@ from websockets.http11 import Response
 
 
 class FakeOperation:
-    def __init__(self, transport: SpriteTransport, cmd: list[str], env: dict[str, str], dir: str | None) -> None:
+    def __init__(self, transport: SpriteTransport, cmd: list[str], dir: str | None) -> None:
         self.transport = transport
         self.closed = False
         self.stdout = b''
@@ -41,7 +40,6 @@ class FakeOperation:
             self.process = subprocess.Popen(
                 cmd,
                 cwd=dir or transport.root,
-                env={**os.environ, **env},
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
@@ -125,12 +123,10 @@ class FakeControlConnection:
             raise InvalidStatus(Response(404, 'Not Found', Headers()))
         self.ws = FakeSocket(self.transport)
 
-    async def start_op(
-        self, op: str, *, cmd: list[str], env: dict[str, str], dir: str | None, stdin: bool
-    ) -> FakeOperation:
+    async def start_op(self, op: str, *, cmd: list[str], dir: str | None, stdin: bool) -> FakeOperation:
         assert op == 'exec'
         assert stdin is False
-        operation = FakeOperation(self.transport, cmd, env, dir)
+        operation = FakeOperation(self.transport, cmd, dir)
         self.transport.operations.append(operation)
         self.transport.exec_started.set()
         return operation

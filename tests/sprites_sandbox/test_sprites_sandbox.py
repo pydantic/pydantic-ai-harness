@@ -406,6 +406,30 @@ class TestSpritesSandbox:
         )
         assert (result.exit_code, result.stdout, result.stderr) == (124, '/bin/sh base command', 'error')
 
+    async def test_env_is_added_to_the_sprite_environment(
+        self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The fake runs commands in this process's environment, standing in for the Sprite's own.
+        monkeypatch.setenv('SPRITE_OWN', 'kept')
+        result = await SpritesSandboxBackend().run(['env'], env={'-i': 'option-like'})
+        assert {'SPRITE_OWN=kept', '-i=option-like'} <= set(result.stdout.splitlines())
+
+    @pytest.mark.parametrize(
+        'command,env',
+        [
+            (['true'], {'A=B': 'x'}),
+            (['true'], {'': 'x'}),
+            (['true'], {'A': 'x\0'}),
+            (['A=B'], {'A': 'x'}),
+        ],
+    )
+    async def test_env_that_env_cannot_express_is_rejected(
+        self, transport: SpriteTransport, command: list[str], env: dict[str, str]
+    ) -> None:
+        with pytest.raises(ValueError):
+            await SpritesSandboxBackend().run(command, env=env)
+        assert transport.operations == []
+
     async def test_canonical_working_directory_preserves_spaces(self, transport: SpriteTransport) -> None:
         target = transport.root / ' directory '
         target.mkdir()

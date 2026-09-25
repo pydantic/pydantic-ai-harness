@@ -116,10 +116,11 @@ async def test_command_and_file_round_trip(client: AsyncSpritesClient) -> None:
 
 
 async def test_env_is_layered_on_the_sprite_environment(client: AsyncSpritesClient) -> None:
-    """Validates the fake-encoded assumption that exec `env` is added to the Sprite's own environment.
+    """Validates the fake-encoded assumption that the Sprite has a POSIX `env` utility that adds
+    variables to the Sprite's own environment.
 
-    The exec API documents that a set `env` replaces the default environment; if it does here,
-    every command given `env=` loses `PATH`.
+    The fake runs the host's `env`; if the Sprite's is missing or differs, every command given
+    `env=` fails or loses `PATH`.
     """
     async with _owned(client) as backend:
         result = await backend.run(
