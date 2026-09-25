@@ -57,7 +57,9 @@ agent = Agent('anthropic:claude-sonnet-5', capabilities=[LocalWorkspace('.'), To
 ```
 
 The capability registers a single `read_tool_result` tool so the model can page back into any
-spilled payload. Its own returns are exempt from reduction.
+spilled payload. Its own returns are exempt from reduction. When the agent's file tool can read
+the spill files, that tool replaces it: see
+[Reading spills with your file tool](#reading-spills-with-your-file-tool).
 
 ## Bands: combine the modes
 
@@ -330,6 +332,25 @@ class OverflowStore(Protocol):
     async def write(self, key: str, data: bytes) -> str: ...   # returns a handle
     async def read(self, handle: str) -> bytes: ...
 ```
+
+
+### Reading spills with your file tool
+
+When the agent also has a file tool that can read the spill files, the model uses that tool
+instead of `read_tool_result`, so it isn't offered two tools that read files. `FileSystem`
+qualifies when `read_file` is registered, `max_read_chars` is at most 50,000, it has no
+`root_dir` of its own, and its patterns allow the spill files. Then:
+
+- `read_tool_result` is not offered, and each spill marker names `read_file` and the file.
+- A `read_file` call on a spill file is exempt from reduction, as `read_tool_result`'s returns
+  are; `max_read_chars` keeps it bounded.
+- Once a marker in the conversation has named `read_tool_result`, for example before a deferred
+  `FileSystem` was loaded, `read_tool_result` stays offered for the rest of the run.
+
+The check uses configuration only, so it does no workspace I/O and never starts a sandbox.
+Spills kept in a store with its own `workspace`, in an absolute `directory`, or in another kind
+of store keep `read_tool_result`. A capability of your own that reads workspace files takes the
+same role by implementing [`FileReader`](filesystem.md#reading-files-other-capabilities-keep).
 
 ## Usage accounting
 
