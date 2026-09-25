@@ -3751,6 +3751,9 @@ codemode = [
 coder = [
     { name = "ripgrep", marker = "sys_platform != 'android'" },
 ]
+day-ai = [
+    { name = "pydantic-ai-slim", extra = ["mcp"] },
+]
 dbos = [
     { name = "pydantic-ai-slim", extra = ["dbos"] },
 ]
@@ -3764,6 +3767,9 @@ github = [
     { name = "pydantic-ai-slim", extra = ["mcp"] },
 ]
 google-workspace = [
+    { name = "pydantic-ai-slim", extra = ["mcp"] },
+]
+grain = [
     { name = "pydantic-ai-slim", extra = ["mcp"] },
 ]
 linear = [
@@ -3791,6 +3797,9 @@ ordinal = [
 playwright = [
     { name = "idna" },
     { name = "playwright" },
+]
+posthog = [
+    { name = "pydantic-ai-slim", extra = ["mcp"] },
 ]
 prompt-injection-defender = [
     { name = "stackone-defender", marker = "python_full_version >= '3.11'" },
@@ -3862,12 +3871,15 @@ requires-dist = [
     { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'code-mode'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
     { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'codemode'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
     { name = "pydantic-ai-slim", extras = ["duckduckgo", "web-fetch"], marker = "extra == 'researcher'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'day-ai'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'github'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'google-workspace'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'grain'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'linear'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'logfire-mcp'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'notion'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'ordinal'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'posthog'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'slack'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'stackone'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
     { name = "pydantic-ai-slim", extras = ["spec"], marker = "extra == 'logfire'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=e58a5f22da8ed8707e93fb292ad6f38369cd8d26" },
@@ -3882,7 +3894,7 @@ requires-dist = [
     { name = "stackone-defender", extras = ["onnx"], marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender-ml'", specifier = ">=0.7.3,<0.8" },
     { name = "youdotcom", marker = "extra == 'youdotcom'", specifier = ">=3.1.2,<4" },
 ]
-provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "coder", "dbos", "dynamic-workflow", "exa", "github", "google-workspace", "linear", "logfire", "logfire-mcp", "modal", "mongodb", "notion", "ordinal", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "slack", "stackone", "temporal", "youdotcom"]
+provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "coder", "day-ai", "dbos", "dynamic-workflow", "exa", "github", "google-workspace", "grain", "linear", "logfire", "logfire-mcp", "modal", "mongodb", "notion", "ordinal", "playwright", "posthog", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "slack", "stackone", "temporal", "youdotcom"]
 
 [package.metadata.requires-dev]
 dev = [
