@@ -24,19 +24,24 @@ def anyio_backend() -> str:
 
 
 async def _run(
-    code: str, *, max_sleep_secs: float | None = None, global_sequential: bool = False
+    code: str, *, max_sleep_secs: float | None = None, global_sequential: bool = False, starts_before_waking: int = 1
 ) -> tuple[Any, list[str]]:
     """Run `code` through the executor with a sleep that records when each wait starts and ends.
 
-    Each wait lasts a fixed number of event-loop turns, enough for a sleep started alongside it to
-    begin, so overlapping sleeps both start before either ends.
+    A wait ends only once `starts_before_waking` sleeps have started, so sleeps that overlap both
+    start before either ends, while sleeps that were run one at a time never finish.
     """
     events: list[str] = []
+    started = 0
+    all_started = asyncio.Event()
 
     async def sleep(secs: float) -> None:
+        nonlocal started
         events.append(f'start {secs:g}')
-        for _ in range(20):
-            await asyncio.sleep(0)
+        started += 1
+        if started >= starts_before_waking:
+            all_started.set()
+        await asyncio.wait_for(all_started.wait(), timeout=30)  # hang guard, not a timing assertion
         events.append(f'end {secs:g}')
 
     async def dispatch(name: str, kwargs: dict[str, Any]) -> Any:
@@ -68,7 +73,7 @@ def _kinds(events: list[str]) -> list[str]:
 
 
 async def test_gathered_sleeps_overlap() -> None:
-    output, events = await _run(_GATHER)
+    output, events = await _run(_GATHER, starts_before_waking=2)
     assert output == 'awake'
     assert sorted(events) == ['end 1', 'end 2', 'start 1', 'start 2']
     assert _kinds(events) == ['start', 'start', 'end', 'end']
