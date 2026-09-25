@@ -326,7 +326,9 @@ import tempfile
 import time
 from pathlib import Path
 
-root = Path(tempfile.gettempdir()) / f'pyai_harness_overflow-{os.geteuid()}'  # or your base_dir
+# The default root; use your `base_dir` instead if you set one.
+name = f'pyai_harness_overflow-{os.geteuid()}' if hasattr(os, 'geteuid') else 'pyai_harness_overflow'
+root = Path(tempfile.gettempdir()) / name
 cutoff = time.time() - 6 * 3600
 for path in root.rglob('*'):
     if path.is_file() and path.stat().st_mtime < cutoff:
