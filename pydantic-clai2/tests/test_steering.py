@@ -298,6 +298,18 @@ async def test_up_walks_queue_newest_first_then_history() -> None:
         assert live.queued_messages == ('first', 'second')
 
 
+async def test_up_moves_within_a_multiline_draft_before_reaching_the_queue() -> None:
+    async with editor() as (live, _, _):
+        queue(live, 'queued')
+        live.buffer.replace('one\ntwo')
+        live.feed('up')
+        assert (live.buffer.text, live.buffer.cursor, live.buffer.recall_offset) == ('one\ntwo', 3, None)
+        live.feed('up')
+        assert live.buffer.text == 'queued'
+        live.feed('down')
+        assert live.buffer.text == 'one\ntwo'
+
+
 async def test_enter_rewrites_recalled_queued_prompt_in_place() -> None:
     async with editor() as (live, _, _):
         queue(live, 'a', 'b', 'c')
