@@ -513,18 +513,31 @@ show a "waiting for you" state) registers `@host.on(EventClass)` or
 the Grain meetings, transcripts, and notes you can see. It starts disabled;
 `/plugins enable grain` turns it on.
 
-When `GRAIN_ACCESS_TOKEN` is set, the plugin uses that token. Otherwise the
-first prompt that connects opens your browser to sign in to Grain and prints the
-sign-in URL, in case the browser does not open (over SSH, for example). The
-tokens go to the OS keyring (or CLAI's private credential file when there is
-no keyring), the way `/mcp` OAuth servers keep theirs, so later sessions refresh
-them instead of signing in again. A headless run (`clai2 -p`) cannot sign in:
-with no saved sign-in or token, its Grain connection fails and says so.
+No token goes in plugin settings, which are plaintext SQLite. The plugin takes
+the first of these that applies:
 
-`/grain` says which of the two this session uses. `/grain logout` forgets the
-saved sign-in and the tokens the session holds, so the next prompt that uses
-Grain signs in again. It cannot revoke `GRAIN_ACCESS_TOKEN`: unset it, then
-`/plugins reload grain`.
+1. The `GRAIN_ACCESS_TOKEN` environment variable.
+2. A [saved API key](#saved-api-keys) chosen with `/grain key`. Pick an existing
+   `/keys` entry, or type a token (masked); a typed token is saved in `/keys` as
+   `GRAIN_ACCESS_TOKEN`, the name harness's `Grain` documents. CLAI keeps only the
+   key's name and looks the key up on every run, so replacing it in `/keys` takes
+   effect on the next prompt, deleting it makes Grain fail rather than connect
+   without it, and `/keys` refuses to rename it while Grain uses it. Several
+   plugins can share one named key, the way `vllm` and `openrouter` connections
+   can; choose "No API key" to stop using one. `/plugins reload grain` applies a
+   new choice.
+3. A browser sign-in. The first prompt that connects opens your browser and
+   prints the sign-in URL, in case the browser does not open (over SSH, for
+   example). The tokens go to the OS keyring (or CLAI's private credential file
+   when there is no keyring), the way `/mcp` OAuth servers keep theirs, so later
+   sessions refresh them instead of signing in again. A headless run
+   (`clai2 -p`) cannot sign in: with no saved sign-in, its Grain connection fails
+   and says so.
+
+`/grain` says which of the three this session uses. `/grain logout` forgets the
+browser sign-in and the tokens the session holds, so the next prompt that uses
+Grain signs in again. It cannot revoke `GRAIN_ACCESS_TOKEN` (unset it, then
+`/plugins reload grain`) or a `/keys` entry (use `/grain key`).
 
 If you enabled `grain` from the old `/plugins` catalog, which saved
 `pydantic_ai_harness.grain:Grain` under that id, CLAI moves that declaration onto
@@ -1044,8 +1057,14 @@ the secret on the command line.
 
 When saved keys exist, vLLM's token prompt and OpenRouter's **Enter API key** flow
 show a searchable list of names. Choose one, enter a different key privately, or
-choose **No API key** for vLLM. Esc closes the picker without connecting. Browser
-login flows are unchanged. Select keys only for endpoints you trust.
+choose **No API key** for vLLM. `/grain key` uses the same picker, and a token
+typed there is saved under `GRAIN_ACCESS_TOKEN`. Esc closes the picker without
+connecting. Browser login flows are unchanged. Select keys only for endpoints you trust.
+
+Plugins keep secrets here rather than in plugin settings, which are plaintext
+SQLite. Name a key after the environment variable the service documents (for
+example `GITHUB_TOKEN` or `GRAIN_ACCESS_TOKEN`) so every plugin for that service
+can pick the same entry, and replacing it once updates them all.
 
 Named keys use the existing credential backend, separate from provider logins and
 SQLite settings. If no OS keyring exists, CLAI warns that it saved them in the

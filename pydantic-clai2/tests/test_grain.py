@@ -1,4 +1,4 @@
-"""The built-in `grain` plugin: harness `Grain` with a token from the environment or a keyring-backed sign-in."""
+"""The built-in `grain` plugin: harness `Grain` with a token from the environment, `/keys`, or a keyring sign-in."""
 
 import io
 from pathlib import Path
@@ -11,18 +11,28 @@ from fastmcp.client.auth.oauth import TokenStorageAdapter
 from fastmcp.client.transports import StreamableHttpTransport
 from keyring.errors import PasswordDeleteError
 from mcp.shared.auth import OAuthToken
-from pydantic import ValidationError
-from pydantic_ai import Agent
+from pydantic import JsonValue, ValidationError
+from pydantic_ai import Agent, RunContext
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.grain import Grain
 from rich.console import Console
 
-from pydantic_clai2 import DEFAULT_PLUGINS
+from pydantic_clai2 import DEFAULT_PLUGINS, api_keys
 from pydantic_clai2._app import create_shell
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.config import PluginSettings
-from pydantic_clai2.grain import GRAIN_MCP_URL, TOKEN_ACCOUNT, GrainSignIn, activate
+from pydantic_clai2.credential_store import load_codex_credentials, save_codex_credentials
+from pydantic_clai2.grain import (
+    GRAIN_MCP_URL,
+    KEY_ACCOUNT,
+    KEY_NAME,
+    TOKEN_ACCOUNT,
+    GrainSignIn,
+    activate,
+    grain_command,
+)
 from pydantic_clai2.headless import no_screen
 from pydantic_clai2.plugin_loader import PluginLoader
 from pydantic_clai2.plugins import FullScreen, PluginHost, SessionStart, bare_screen
@@ -57,7 +67,10 @@ def keyring_vault(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def host(
-    settings: dict[str, bool] | None = None, *, full_screen: FullScreen = bare_screen, output: io.StringIO | None = None
+    settings: dict[str, JsonValue] | None = None,
+    *,
+    full_screen: FullScreen = bare_screen,
+    output: io.StringIO | None = None,
 ) -> PluginHost[None]:
     return PluginHost(
         name='grain',
@@ -146,7 +159,7 @@ async def test_token_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> No
     activate(plugin)
     capability = grain(plugin)
     assert capability.client is None and capability.auth is None and not capability.read_only
-    assert await plugin.commands.execute_async('/grain') == 'Grain uses GRAIN_ACCESS_TOKEN.'
+    assert await plugin.commands.execute_async('/grain') == 'Grain uses the GRAIN_ACCESS_TOKEN environment variable.'
     assert 'cannot revoke' in await plugin.commands.execute_async('/grain logout')
 
 
@@ -199,14 +212,99 @@ async def test_headless_sign_in_fails_clearly(monkeypatch: pytest.MonkeyPatch) -
         await sign_in(grain(plugin)).redirect_handler('https://api.grain.com/oauth/authorize')
 
 
-def test_settings_reject_unknown_keys() -> None:
+@pytest.mark.parametrize('settings', [{'readonly': True}, {'auth': 'secret'}, {'token': 'secret'}])
+def test_settings_hold_no_secret(settings: dict[str, JsonValue]) -> None:
     with pytest.raises(ValidationError):
-        activate(host({'readonly': True}))
+        activate(host(settings))
 
 
-def test_completes_logout() -> None:
+def test_completes_subcommands() -> None:
     plugin = host()
     activate(plugin)
     [command] = plugin.commands
-    assert list(command.complete([])) == ['logout']
+    assert list(command.complete([])) == ['key', 'logout']
     assert list(command.complete(['logout', ''])) == []
+
+
+class Prompt:
+    """The masked prompt `prompt_api_key` reads a typed token from."""
+
+    def __init__(self, *values: str) -> None:
+        self.values = iter(values)
+        self.labels: list[tuple[str, bool]] = []
+
+    async def prompt_async(self, label: str, *, is_password: bool = False) -> str:
+        self.labels.append((label, is_password))
+        return next(self.values)
+
+
+def configure(monkeypatch: pytest.MonkeyPatch, *, typed: tuple[str, ...] = (), keys: tuple[str, ...] = ()) -> Prompt:
+    """Answer `/grain key`: `keys` drive the saved-key picker, `typed` the masked prompt."""
+    prompt = Prompt(*typed)
+    monkeypatch.setattr('pydantic_clai2.grain.PromptSession', lambda: prompt)
+    pressed = iter(keys)
+    monkeypatch.setattr(api_keys, 'menu_key', lambda: next(pressed))
+    return prompt
+
+
+def run_context() -> RunContext[None]:
+    return RunContext(deps=None, model=TestModel(), usage=RunUsage())
+
+
+async def test_a_typed_token_goes_to_keys_and_only_its_name_is_saved(monkeypatch: pytest.MonkeyPatch) -> None:
+    prompt = configure(monkeypatch, typed=('typed-secret',))
+    plugin = host()
+    activate(plugin)
+    result = await plugin.commands.execute_async('/grain key')
+    assert result == 'Grain uses the /keys entry GRAIN_ACCESS_TOKEN. /plugins reload grain applies it.'
+    assert prompt.labels == [('Grain access token (saved in /keys as GRAIN_ACCESS_TOKEN; Enter for none): ', True)]
+    assert api_keys.load_keys()[KEY_NAME].get_secret_value() == 'typed-secret'
+    saved = load_codex_credentials(account=KEY_ACCOUNT)
+    assert saved is not None and 'typed-secret' not in saved
+    assert api_keys.key_users(name=KEY_NAME) == ['grain'], 'renaming a key Grain uses is refused'
+
+    reloaded = host()
+    activate(reloaded)
+    capability = grain(reloaded)
+    assert capability.client is None and callable(capability.auth)
+    assert capability.auth(run_context()) == 'typed-secret'
+    assert await reloaded.commands.execute_async('/grain') == 'Grain uses the /keys entry GRAIN_ACCESS_TOKEN.'
+    assert 'No API key' in await reloaded.commands.execute_async('/grain logout')
+
+    api_keys.save_key(name=KEY_NAME, value='replaced')
+    assert capability.auth(run_context()) == 'replaced', 'the key is resolved on every run'
+    api_keys.delete_key(name=KEY_NAME)
+    with pytest.raises(UserError, match='Saved API key GRAIN_ACCESS_TOKEN is missing'):
+        capability.auth(run_context())
+
+
+async def test_an_existing_key_is_shared_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    api_keys.save_key(name='SHARED_GRAIN', value='shared-secret')
+    configure(monkeypatch, keys=('enter',))
+    assert 'SHARED_GRAIN' in await grain_command(['key'], auth=None)
+    plugin = host()
+    activate(plugin)
+    auth = grain(plugin).auth
+    assert callable(auth) and auth(run_context()) == 'shared-secret'
+
+
+@pytest.mark.parametrize(
+    ('keys', 'expected'),
+    [(('down', 'down', 'enter'), 'Grain uses no /keys entry.'), (('escape',), 'Grain key unchanged.')],
+)
+async def test_no_key_or_cancel(monkeypatch: pytest.MonkeyPatch, keys: tuple[str, ...], expected: str) -> None:
+    api_keys.save_key(name='SHARED_GRAIN', value='shared-secret')
+    configure(monkeypatch, keys=('enter',))
+    await grain_command(['key'], auth=None)
+    configure(monkeypatch, keys=keys)
+    assert (await grain_command(['key'], auth=None)).startswith(expected)
+    plugin = host()
+    activate(plugin)
+    uses_key = grain(plugin).client is None
+    assert uses_key == (expected == 'Grain key unchanged.')
+
+
+def test_an_invalid_saved_choice_fails_closed() -> None:
+    save_codex_credentials(account=KEY_ACCOUNT, value='not json')
+    with pytest.raises(UserError, match='/grain key'):
+        activate(host())
