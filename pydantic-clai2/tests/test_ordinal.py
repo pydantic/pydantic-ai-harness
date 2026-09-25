@@ -20,13 +20,14 @@ from pydantic_ai_harness.ordinal import Ordinal
 from rich.console import Console
 
 from pydantic_clai2 import DEFAULT_PLUGINS
-from pydantic_clai2.capability_catalog import HARNESS_PLUGINS
+from pydantic_clai2._app import RETIRED_PLUGINS, create_shell
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.mcp import TokenStore
 from pydantic_clai2.ordinal import TOKEN_ENV, TOKENS, URL, USAGE, activate
 from pydantic_clai2.plugin_loader import PluginError, PluginLoader
 from pydantic_clai2.plugins import PluginHost, SessionStart
+from pydantic_clai2.project_settings import ProjectSettings
 from pydantic_clai2.settings_store import SettingsStore
 
 Vault = dict[tuple[str, str], str]
@@ -80,11 +81,13 @@ def run(plugin: PluginHost[None], *args: str) -> object:
     return command.handler(list(args))
 
 
-def test_declared_as_a_disabled_built_in_not_a_catalog_entry() -> None:
+def test_declared_as_a_disabled_built_in_backed_by_the_plugin_module() -> None:
     [declaration] = [plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'ordinal']
     assert declaration.factory == 'pydantic_clai2.ordinal'
     assert not declaration.enabled
-    assert not any(plugin.factory.startswith('pydantic_ai_harness.ordinal') for plugin in HARNESS_PLUGINS)
+    assert [plugin.factory for plugin in RETIRED_PLUGINS if plugin.id == 'ordinal'] == [
+        'pydantic_ai_harness.ordinal:Ordinal'
+    ]
 
 
 def test_url_matches_the_harness_endpoint() -> None:
@@ -171,8 +174,22 @@ async def test_saved_catalog_toggle_becomes_the_built_in(
 ) -> None:
     monkeypatch.setenv(TOKEN_ENV, 'token')
     store = SettingsStore(tmp_path / 'settings.db')
+
+    def shell_loader() -> PluginLoader[None]:
+        return create_shell(
+            Agent(TestModel()),
+            deps=None,
+            plugins=(),
+            usage_limits=None,
+            settings=None,
+            project=ProjectSettings(),
+            console=Console(file=io.StringIO(), force_terminal=True),
+            store=store,
+            builtin_plugins=[plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'ordinal'],
+        ).loader
+
     store.save_plugin(PluginSettings(id='ordinal', factory='pydantic_ai_harness.ordinal:Ordinal', enabled=True))
-    loader = ordinal_loader(store)
+    loader = shell_loader()
     [entry] = loader.entries()
     assert entry.builtin and entry.declaration.enabled
     assert entry.declaration.factory == 'pydantic_clai2.ordinal'
@@ -182,7 +199,7 @@ async def test_saved_catalog_toggle_becomes_the_built_in(
 
     customized = PluginSettings(id='ordinal', factory='pydantic_ai_harness.ordinal:Ordinal', settings={'id': 'mine'})
     store.save_plugin(customized)
-    [entry] = ordinal_loader(store).entries()
+    [entry] = shell_loader().entries()
     assert entry.declaration == customized and not entry.builtin
 
 

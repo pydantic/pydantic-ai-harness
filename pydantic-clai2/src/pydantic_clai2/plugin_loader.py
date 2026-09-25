@@ -18,7 +18,6 @@ from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from rich.console import Console
 
 from . import theme
-from .capability_catalog import RETIRED_PLUGINS
 from .commands import Commands, plugins_command
 from .config import PluginSettings
 from .plugins import (
@@ -103,11 +102,15 @@ class PluginLoader(Generic[DepsT]):
         session_start: Callable[[], SessionStart],
         builtin: Sequence[PluginSettings] = (),
         project: Sequence[PluginSettings] = (),
+        retired: Sequence[PluginSettings] = (),
         conversation: Conversation | None = None,
         status: Status | None = None,
         full_screen: FullScreen = bare_screen,
     ) -> None:
         """`builtin` ships with CLAI, `project` comes from `.clai/settings.json`; the store overrides both.
+
+        `retired` lists declarations CLAI used to offer under a built-in's id; a saved copy of one is read as
+        that built-in, keeping its `enabled`, instead of outranking it.
 
         `full_screen` is handed to every host; the shell binds it to the live renderer per prompt.
         `conversation` and `status` are handed to every host; see `PluginHost` for the defaults.
@@ -121,6 +124,7 @@ class PluginLoader(Generic[DepsT]):
         self._status = status
         self._builtin = {declaration.id: declaration for declaration in builtin}
         self._project = {declaration.id: declaration for declaration in project}
+        self._retired = tuple(retired)
         self._entries: dict[str, PluginEntry[DepsT]] = {}
         self._loaded: dict[str, PluginHost[DepsT]] = {}
 
@@ -159,7 +163,7 @@ class PluginLoader(Generic[DepsT]):
     def _current(self, declaration: PluginSettings) -> PluginSettings:
         """A saved toggle of a retired catalog row becomes the built-in that replaced it, keeping `enabled`."""
         builtin = self._builtin.get(declaration.id)
-        if builtin is not None and any(_same_plugin(declaration, retired) for retired in RETIRED_PLUGINS):
+        if builtin is not None and any(_same_plugin(declaration, retired) for retired in self._retired):
             return builtin.model_copy(update={'enabled': declaration.enabled})
         return declaration
 

@@ -30,7 +30,6 @@ from ._branding import print_banner
 from ._completion_adapter import COMPLETION_STYLE, PromptCompleter
 from ._rendering import StreamRenderer
 from ._session import Session
-from .capability_catalog import HARNESS_PLUGINS
 from .command_context import CommandContext, CommandProvider
 from .commands import (
     Command,
@@ -98,11 +97,21 @@ DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (
     PluginSettings(id='notifications', factory='pydantic_clai2.notifications'),
     PluginSettings(id='mcp', factory='pydantic_clai2.mcp'),
     PluginSettings(id='ordinal', factory='pydantic_clai2.ordinal', enabled=False),
-    *HARNESS_PLUGINS,
 )
-"""Built-in declarations, including opt-in harness capabilities. `remove` restores their defaults.
+"""Built-in declarations, each integrated with the shell. `remove` restores their defaults.
+
+Other harness capabilities are not listed here: a user adds one on purpose with `/plugins add` or a plugin module.
 
 `coder` leaves out its own `RepoContext` because `repo_context` binds one, so instruction files load once.
+"""
+
+RETIRED_PLUGINS: tuple[PluginSettings, ...] = (
+    PluginSettings(id='ordinal', factory='pydantic_ai_harness.ordinal:Ordinal', enabled=False),
+)
+"""Former `/plugins` catalog rows whose id a built-in now serves.
+
+Toggling a catalog row saved it as the user's own declaration, which would outrank the built-in, so the
+loader reads a saved copy of one of these as the built-in, keeping its `enabled`.
 """
 
 
@@ -408,6 +417,7 @@ def create_shell(
         builtin=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in builtin_plugins),
         full_screen=screen.full,
         project=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in project.plugins),
+        retired=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in RETIRED_PLUGINS),
         conversation=session,
         status=status,
     )
