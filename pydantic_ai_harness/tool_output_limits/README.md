@@ -251,8 +251,8 @@ class OverflowStore(Protocol):
 The store root is stable on purpose -- spilled files must be readable by a later agent or run
 -- so security does not come from per-instance isolation. It comes from three mechanisms:
 
-- **Per-user default root**: without `base_dir`, the root is `pyai_harness_overflow-<uid>` under
-  the system temp dir, so users on the same host do not share a directory.
+- **Per-user default root**: without `base_dir`, the root is `pyai_harness_overflow-<euid>`
+  (effective uid) under the system temp dir, so users on the same host do not share a directory.
 - **Ownership check**: before each write, on POSIX, the root (default or an explicit
   `base_dir`) must be owned by the current user. Group and other permission bits are removed
   (`0700`). A root owned by another user raises `PermissionError` and nothing is written; the
@@ -293,7 +293,7 @@ import tempfile
 import time
 from pathlib import Path
 
-root = Path(tempfile.gettempdir()) / f'pyai_harness_overflow-{os.getuid()}'  # or your base_dir
+root = Path(tempfile.gettempdir()) / f'pyai_harness_overflow-{os.geteuid()}'  # or your base_dir
 cutoff = time.time() - 6 * 3600
 for path in root.rglob('*'):
     if path.is_file() and path.stat().st_mtime < cutoff:

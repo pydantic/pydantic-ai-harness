@@ -61,8 +61,8 @@ def _safe_segment(segment: str) -> str:
 
 def _default_root() -> Path:
     """Per-user root under the system temp dir, so users on one host never share it."""
-    getuid = getattr(os, 'getuid', None)
-    name = 'pyai_harness_overflow' if getuid is None else f'pyai_harness_overflow-{getuid()}'
+    geteuid = getattr(os, 'geteuid', None)
+    name = 'pyai_harness_overflow' if geteuid is None else f'pyai_harness_overflow-{geteuid()}'
     return Path(tempfile.gettempdir()) / name
 
 
@@ -75,7 +75,7 @@ class LocalFileStore:
     read a spill a previous run produced, so the store is not isolated per instance.
 
     Security comes from three mechanisms: the default root is per user
-    (`pyai_harness_overflow-<uid>` under the system temp dir); before each write, on POSIX,
+    (`pyai_harness_overflow-<euid>` under the system temp dir); before each write, on POSIX,
     the root must be owned by the current user and is tightened to `0700` if group or
     other bits are set, and a root owned by anyone else raises `PermissionError` instead
     of being written to; and `read` resolves the target (following symlinks) and rejects
@@ -123,11 +123,11 @@ class LocalFileStore:
         in which another user could plant an entry in it.
         """
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        getuid = getattr(os, 'getuid', None)
-        if getuid is None:
+        geteuid = getattr(os, 'geteuid', None)
+        if geteuid is None:
             return
         st = self._root.stat()
-        if st.st_uid != getuid():
+        if st.st_uid != geteuid():
             raise PermissionError(
                 f'Overflow store root {str(self._root)!r} is not owned by the current user; '
                 'refusing to write spilled tool output there.'

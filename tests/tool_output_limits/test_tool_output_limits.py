@@ -223,18 +223,18 @@ class TestStore:
         assert store._root.name.startswith('pyai_harness_overflow')
 
     def test_default_root_is_per_user(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(os, 'getuid', lambda: 1001, raising=False)
+        monkeypatch.setattr(os, 'geteuid', lambda: 1001, raising=False)
         first = LocalFileStore()._root
-        monkeypatch.setattr(os, 'getuid', lambda: 1002, raising=False)
+        monkeypatch.setattr(os, 'geteuid', lambda: 1002, raising=False)
         second = LocalFileStore()._root
         assert first.name == 'pyai_harness_overflow-1001'
         assert second.name == 'pyai_harness_overflow-1002'
 
     def test_default_root_without_uid(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.delattr(os, 'getuid', raising=False)
+        monkeypatch.delattr(os, 'geteuid', raising=False)
         assert LocalFileStore()._root.name == 'pyai_harness_overflow'
 
-    @pytest.mark.skipif(not hasattr(os, 'getuid'), reason='POSIX ownership check')
+    @pytest.mark.skipif(not hasattr(os, 'geteuid'), reason='POSIX ownership check')
     async def test_new_root_created_0700_regardless_of_umask(self, tmp_path: Path):
         root = tmp_path / 'store'
         store = LocalFileStore(base_dir=root)
@@ -246,7 +246,7 @@ class TestStore:
             os.umask(old_umask)
         assert oct(root.stat().st_mode & 0o777) == '0o700'
 
-    @pytest.mark.skipif(not hasattr(os, 'getuid'), reason='POSIX ownership check')
+    @pytest.mark.skipif(not hasattr(os, 'geteuid'), reason='POSIX ownership check')
     async def test_preexisting_open_root_is_tightened(self, tmp_path: Path):
         root = tmp_path / 'store'
         root.mkdir()
@@ -255,20 +255,20 @@ class TestStore:
         await store.write('run/c.0', b'x')
         assert oct(root.stat().st_mode & 0o777) == '0o700'
 
-    @pytest.mark.skipif(not hasattr(os, 'getuid'), reason='POSIX ownership check')
+    @pytest.mark.skipif(not hasattr(os, 'geteuid'), reason='POSIX ownership check')
     async def test_root_owned_by_another_user_is_refused(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         root = tmp_path / 'store'
         root.mkdir()
         root.chmod(0o777)
         other_uid = root.stat().st_uid + 1
-        monkeypatch.setattr(os, 'getuid', lambda: other_uid)
+        monkeypatch.setattr(os, 'geteuid', lambda: other_uid)
         store = LocalFileStore(base_dir=root)
         with pytest.raises(PermissionError, match='not owned by the current user'):
             await store.write('run/c.0', b'secret')
         assert list(root.iterdir()) == []
 
     async def test_root_check_skipped_without_uid(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.delattr(os, 'getuid', raising=False)
+        monkeypatch.delattr(os, 'geteuid', raising=False)
         store = LocalFileStore(base_dir=tmp_path / 'store')
         handle = await store.write('run/c.0', b'x')
         assert await store.read(handle) == b'x'
