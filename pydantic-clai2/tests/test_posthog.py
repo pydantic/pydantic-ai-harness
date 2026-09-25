@@ -1,249 +1,466 @@
-"""The built-in `posthog` plugin: its declaration, its `/keys` reference, read-only mode, and browser sign-in."""
+"""The built-in `posthog` plugin: its settings menu, its `/keys` reference, and the connection it builds."""
 
 import io
 from pathlib import Path
 
+import httpx
 import keyring
 import pytest
 from fastmcp import Client
 from fastmcp.client.auth import OAuth
 from fastmcp.client.transports import StreamableHttpTransport
 from keyring.errors import KeyringLocked
-from pydantic import JsonValue, ValidationError
-from pydantic_ai import Agent, RunContext
+from menu_script import Script, pick, typed
+from pydantic import JsonValue
+from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.posthog import PostHog
 from rich.console import Console
+from termflow.tui import MenuItem  # pyright: ignore[reportMissingTypeStubs]
+from termflow.tui.menu import MenuResult  # pyright: ignore[reportMissingTypeStubs]
+from termflow.tui.textinput import TextInputResult  # pyright: ignore[reportMissingTypeStubs]
 
 from pydantic_clai2 import DEFAULT_PLUGINS, api_keys, posthog
+from pydantic_clai2.api_keys import KeyReference
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.credential_store import load_codex_credentials, save_codex_credentials
+from pydantic_clai2.field_menu import CUSTOM
 from pydantic_clai2.mcp import OAUTH_TIMEOUT, TokenStore
-from pydantic_clai2.plugin_loader import PluginLoader
+from pydantic_clai2.plugin_loader import PluginError, PluginLoader
+from pydantic_clai2.plugin_menu import PluginMenu, open_plugins_menu
 from pydantic_clai2.plugins import PluginHost, SessionStart
+from pydantic_clai2.posthog import EU_URL, EVERY_GROUP, US_URL, PostHogSource, SavedKeyAuth
 from pydantic_clai2.settings_store import SettingsStore
 
 pytestmark = pytest.mark.anyio
 
-
-class Prompt:
-    def __init__(self, *values: str | BaseException) -> None:
-        self.values = iter(values)
-        self.labels: list[tuple[str, bool]] = []
-
-    async def prompt_async(self, label: str, *, is_password: bool = False) -> str:
-        self.labels.append((label, is_password))
-        value = next(self.values)
-        if isinstance(value, BaseException):
-            raise value
-        return value
+BUILTIN = next(plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'posthog')
+CLOSE = MenuResult(cancelled=True)
+KEY = 'POSTHOG_PERSONAL_API_KEY'
 
 
-def make_host(settings: dict[str, JsonValue] | None = None) -> PluginHost[None]:
-    return PluginHost(name='posthog', console=Console(file=io.StringIO()), settings=settings or {})
+class Shell:
+    """A loader in a terminal plus what a test inspects: printed output and the settings file."""
 
-
-def loaded(**settings: JsonValue) -> tuple[PluginHost[None], PostHog[None]]:
-    host = make_host(settings)
-    posthog.activate(host)
-    [capability] = host.capabilities
-    assert isinstance(capability, PostHog)
-    return host, capability  # pyright: ignore[reportUnknownVariableType]
-
-
-def activated(**settings: JsonValue) -> PostHog[None]:
-    return loaded(**settings)[1]
-
-
-def use_prompt(monkeypatch: pytest.MonkeyPatch, prompt: Prompt) -> None:
-    monkeypatch.setattr(posthog, 'PromptSession', lambda: prompt)
-
-
-async def command(host: PluginHost[None], *args: str) -> str:
-    return await host.commands.execute_async(' '.join(['/posthog', *args]))
-
-
-def browser_transport(capability: PostHog[None]) -> StreamableHttpTransport:
-    client = capability.client
-    assert isinstance(client, Client)
-    assert client._init_timeout == OAUTH_TIMEOUT, 'the browser gets as long as `/mcp` gives it'  # pyright: ignore[reportPrivateUsage]
-    transport = client.transport
-    assert isinstance(transport, StreamableHttpTransport)
-    assert transport.url == posthog.POSTHOG_MCP_URL == 'https://mcp.posthog.com/mcp'
-    assert isinstance(transport.auth, OAuth)
-    return transport
-
-
-def posthog_tools(capability: PostHog[None]) -> list[str]:
-    """Run once and report the PostHog tools the run could see; `TestModel` calls none of them."""
-    model = TestModel(call_tools=[])
-    Agent(model, deps_type=type(None), capabilities=[capability]).run_sync('hi')
-    assert model.last_model_request_parameters is not None
-    return [tool.name for tool in model.last_model_request_parameters.function_tools]
-
-
-class TestPostHogPlugin:
-    def test_declared_as_disabled_clai_built_in(self) -> None:
-        [declaration] = [plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'posthog']
-        assert declaration.factory == 'pydantic_clai2.posthog'
-        assert not declaration.enabled
-        assert declaration.settings == {}
-
-    def test_key_mode_is_read_only_by_default_and_ignores_the_environment(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv('POSTHOG_PERSONAL_API_KEY', 'phx_env')
-        capability = activated()
-        assert capability.read_only and callable(capability.auth) and capability.client is None
-        assert not activated(read_only=False).read_only
-        assert posthog_tools(capability) == [], 'no key chosen means no PostHog tools, not the environment variable'
-
-    async def test_new_key_is_saved_in_keys_and_only_its_name_is_referenced(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        prompt = Prompt(' phx_secret ')
-        use_prompt(monkeypatch, prompt)
-        assert await posthog.choose_key() == 'PostHog connects with POSTHOG_PERSONAL_API_KEY from /keys.'
-        assert prompt.labels[0][1], 'the value is entered masked'
-        assert api_keys.load_keys()['POSTHOG_PERSONAL_API_KEY'].get_secret_value() == 'phx_secret'
-        raw = load_codex_credentials(account='posthog')
-        assert raw is not None and 'phx_secret' not in raw
-        assert posthog.saved_key() == api_keys.KeyReference(name='POSTHOG_PERSONAL_API_KEY')
-
-    async def test_shared_key_is_referenced_and_resolved_each_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        api_keys.save_key(name='SHARED_POSTHOG', value='first')
-
-        async def pick(**_: object) -> api_keys.KeyReference:
-            return api_keys.KeyReference(name='SHARED_POSTHOG')
-
-        monkeypatch.setattr(posthog, 'prompt_api_key', pick)
-        assert await posthog.choose_key() == 'PostHog connects with SHARED_POSTHOG from /keys.'
-        auth = activated().auth
-        assert callable(auth)
-        ctx = RunContext[None](deps=None, model=TestModel(), usage=RunUsage())
-        assert auth(ctx) == 'first'
-        api_keys.save_key(name='SHARED_POSTHOG', value='replaced')
-        assert auth(ctx) == 'replaced', 'replacing the key in /keys reaches the next run without a reload'
-        with pytest.raises(ValueError, match='used by posthog'):
-            api_keys.rename_key(name='SHARED_POSTHOG', new_name='OTHER')
-
-    def test_deleted_key_fails_the_run_closed(self) -> None:
-        api_keys.save_key(name='POSTHOG_PERSONAL_API_KEY', value='secret')
-        save_codex_credentials(account='posthog', value='{"token": {"name": "POSTHOG_PERSONAL_API_KEY"}}')
-        api_keys.delete_key(name='POSTHOG_PERSONAL_API_KEY')
-        with pytest.raises(UserError, match='POSTHOG_PERSONAL_API_KEY is missing'):
-            posthog_tools(activated())
-
-    def test_invalid_saved_reference_fails_closed(self) -> None:
-        save_codex_credentials(account='posthog', value='{"token": "inline-secret"}')
-        with pytest.raises(UserError, match='/posthog key'):
-            posthog.saved_key()
-
-    @pytest.mark.parametrize('answer', ['n', EOFError()])
-    async def test_existing_label_is_not_replaced_without_consent(
-        self, monkeypatch: pytest.MonkeyPatch, answer: str | BaseException
-    ) -> None:
-        api_keys.save_key(name='POSTHOG_PERSONAL_API_KEY', value='keep')
-
-        async def enter(**_: object) -> str:
-            return 'new'
-
-        monkeypatch.setattr(posthog, 'prompt_api_key', enter)
-        use_prompt(monkeypatch, Prompt(answer))
-        assert await posthog.choose_key() == 'PostHog key unchanged.'
-        assert api_keys.load_keys()['POSTHOG_PERSONAL_API_KEY'].get_secret_value() == 'keep'
-        assert posthog.saved_key() is None
-
-    async def test_replacing_the_label_with_consent(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        api_keys.save_key(name='POSTHOG_PERSONAL_API_KEY', value='old')
-
-        async def enter(**_: object) -> str:
-            return 'new'
-
-        monkeypatch.setattr(posthog, 'prompt_api_key', enter)
-        use_prompt(monkeypatch, Prompt('y'))
-        assert await posthog.choose_key() == 'PostHog connects with POSTHOG_PERSONAL_API_KEY from /keys.'
-        assert api_keys.load_keys()['POSTHOG_PERSONAL_API_KEY'].get_secret_value() == 'new'
-
-    async def test_cancel_and_blank_entries_save_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        use_prompt(monkeypatch, Prompt(KeyboardInterrupt(), '  '))
-        assert await posthog.choose_key() == 'PostHog key unchanged.'
-        with pytest.raises(ValueError, match='personal API key is required'):
-            await posthog.choose_key()
-        assert posthog.saved_key() is None and api_keys.load_keys() == {}
-
-    async def test_command_reports_and_chooses(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        host = make_host()
-        posthog.activate(host)
-        assert 'no key yet' in await command(host)
-        use_prompt(monkeypatch, Prompt('secret'))
-        assert await command(host, 'key') == 'PostHog connects with POSTHOG_PERSONAL_API_KEY from /keys.'
-        assert await command(host) == (
-            'PostHog (read-only) connects with POSTHOG_PERSONAL_API_KEY from /keys. /posthog key chooses another.'
-        )
-        with pytest.raises(ValueError, match='Usage: /posthog'):
-            await command(host, 'nope')
-        [registered] = host.commands
-        assert list(registered.complete([])) == ['key'] and list(registered.complete(['key', ''])) == []
-
-    @pytest.mark.parametrize('terminal', [True, False])
-    async def test_enabling_asks_for_a_key_only_in_a_terminal(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, terminal: bool
-    ) -> None:
-        prompt = Prompt('secret')
-        use_prompt(monkeypatch, prompt)
-        store = SettingsStore(tmp_path / 'settings.db')
-        [declaration] = [plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'posthog']
-        output = io.StringIO()
-        loader: PluginLoader[None] = PluginLoader(
-            store=store,
-            console=Console(file=output, force_terminal=terminal, width=200),
-            commands=Commands(),
-            session_start=lambda: SessionStart(agent=Agent(TestModel()), settings=store.load()),
+    def __init__(self, tmp_path: Path, settings: dict[str, JsonValue] | None = None, *, terminal: bool = True) -> None:
+        self.path = tmp_path / 'config.db'
+        self.store = SettingsStore(self.path)
+        self.output = io.StringIO()
+        self.commands = Commands()
+        declaration = BUILTIN if settings is None else BUILTIN.model_copy(update={'settings': settings})
+        self.loader: PluginLoader[None] = PluginLoader(
+            store=self.store,
+            console=Console(file=self.output, width=200, force_terminal=terminal),
+            commands=self.commands,
+            session_start=lambda: SessionStart(agent=Agent(TestModel()), settings=self.store.load()),
             builtin=(declaration,),
         )
-        await loader.enable('posthog')
-        assert len(loader.capabilities()) == 1
-        assert bool(prompt.labels) == terminal
-        assert (posthog.saved_key() is not None) == terminal
-        assert ('PostHog has no key' in output.getvalue()) != terminal, 'without a key, enabling says so'
-        await loader.reload('posthog')
-        assert len(prompt.labels) == int(terminal), 'a chosen key is not asked for again'
-        await loader.close('exit')
 
-    async def test_browser_sign_in_status_and_logout(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        host, capability = loaded(auth='browser')
-        assert not capability.read_only, 'the read-only header does the filtering, which keeps the `posthog` tool'
-        before = capability.client
-        assert browser_transport(capability).headers == {'x-posthog-read-only': 'true'}
-        assert 'not signed in' in await command(host)
-        await TokenStore(posthog.TOKENS).put('token', {'access_token': 'x'}, collection='mcp-oauth-token')
-        assert await command(host) == 'PostHog (read-only) is signed in through the browser.'
+    def saved(self) -> dict[str, JsonValue]:
+        [declaration] = self.store.plugins()
+        assert declaration.enabled
+        return declaration.settings
 
-        def delete(service: str, account: str) -> None:
-            pass
+    def capability(self) -> PostHog[None]:
+        [capability] = self.loader.capabilities()
+        assert isinstance(capability, PostHog)
+        return capability  # pyright: ignore[reportUnknownVariableType]
 
-        monkeypatch.setattr(keyring, 'delete_password', delete)
-        assert 'Signed out' in await command(host, 'logout')
-        assert capability.client is not before, 'the live sign-in is replaced, not reused'
-        assert browser_transport(capability).headers == {'x-posthog-read-only': 'true'}
-        with pytest.raises(ValueError, match='Usage'):
-            await command(host, 'login')
-        [registered] = host.commands
-        assert list(registered.complete([''])) == ['logout'] and list(registered.complete(['logout', ''])) == []
 
-        def locked(service: str, account: str) -> str | None:
-            raise KeyringLocked('locked')
+def script(
+    monkeypatch: pytest.MonkeyPatch,
+    lists: list[MenuResult],
+    choices: list[MenuResult] | None = None,
+    texts: list[TextInputResult] | None = None,
+) -> Script:
+    scripted = Script(lists=[*lists, CLOSE], choices=choices or [], texts=texts or [])
+    monkeypatch.setattr(posthog, 'RUNNERS', scripted.runners)
+    return scripted
 
-        monkeypatch.setattr(keyring, 'get_password', locked)
-        assert 'unknown sign-in state' in await command(host)
 
-    def test_browser_read_write_sends_no_read_only_header(self) -> None:
-        assert browser_transport(activated(auth='browser', read_only=False)).headers == {}
+def key_choice(monkeypatch: pytest.MonkeyPatch, choice: str | KeyReference | None) -> list[str]:
+    """Answer `prompt_api_key`, whose saved-key list needs a real terminal, and record its labels."""
+    labels: list[str] = []
 
-    @pytest.mark.parametrize('settings', [{'api_key': 'phx_secret'}, {'auth': 'api_key'}, {'auth': 'oauth'}])
-    def test_settings_reject_secrets_and_unknown_modes(self, settings: dict[str, JsonValue]) -> None:
-        with pytest.raises(ValidationError):
-            activated(**settings)
+    async def prompt_api_key(*, prompt: object, label: str, optional: bool = False) -> str | KeyReference | None:
+        labels.append(label)
+        return choice
+
+    monkeypatch.setattr(posthog, 'prompt_api_key', prompt_api_key)
+    return labels
+
+
+def transport(capability: PostHog[None]) -> StreamableHttpTransport:
+    client = capability.client
+    assert isinstance(client, Client)
+    result = client.transport
+    assert isinstance(result, StreamableHttpTransport)
+    return result
+
+
+def bearer() -> str:
+    request = httpx.Request('GET', US_URL)
+    flow = SavedKeyAuth().auth_flow(request)
+    return next(flow).headers['Authorization']
+
+
+def test_declared_disabled_with_no_settings() -> None:
+    assert BUILTIN.factory == 'pydantic_clai2.posthog'
+    assert not BUILTIN.enabled
+    assert BUILTIN.settings == {}
+
+
+async def test_enable_opens_the_menu_and_every_option_saves_immediately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(KEY, 'phx_the_environment_is_not_a_source')
+    labels = key_choice(monkeypatch, ' phx_new ')
+    shown = script(
+        monkeypatch,
+        lists=[
+            pick('key'),
+            pick('url'),
+            pick('read_only'),
+            pick('features'),
+            pick('mode'),
+            pick('project_id'),
+            pick('organization_id'),
+            pick('include_instructions'),
+        ],
+        choices=[
+            pick(EU_URL),
+            pick('false'),
+            pick('flags'),
+            pick('sql'),
+            CLOSE,
+            pick('tools'),
+            pick('false'),
+        ],
+        texts=[typed('12345'), typed('0190-abcd')],
+    )
+    shell = Shell(tmp_path)
+    assert await shell.loader.command(['enable', 'posthog']) == '\n'.join(
+        [
+            'Enabled posthog.',
+            f'PostHog connects with {KEY} from /keys.',
+            'Saved Region.',
+            'Saved Tools.',
+            'Saved Feature groups.',
+            'Saved Server mode.',
+            'Saved Project ID.',
+            'Saved Organization ID.',
+            'Saved Server instructions.',
+        ]
+    )
+    assert 'PostHog has no key yet' in shell.output.getvalue()
+    assert labels == [f'PostHog personal API key (new keys are saved in /keys as {KEY})']
+    assert shown.opened.count('list') == 9
+    assert api_keys.load_keys()[KEY].get_secret_value() == 'phx_new'
+    assert shell.saved() == {
+        'auth': 'key',
+        'url': EU_URL,
+        'read_only': False,
+        'features': ['flags', 'sql'],
+        'mode': 'tools',
+        'project_id': '12345',
+        'organization_id': '0190-abcd',
+        'include_instructions': False,
+    }
+    assert b'phx_new' not in shell.path.read_bytes()
+    raw = load_codex_credentials(account='posthog')
+    assert raw is not None and 'phx_new' not in raw
+    capability = shell.capability()
+    assert not capability.include_instructions and not capability.read_only and capability.auth is None
+    connection = transport(capability)
+    assert connection.url == f'{EU_URL}?features=flags%2Csql'
+    assert connection.headers == {
+        'x-posthog-mcp-mode': 'tools',
+        'x-posthog-project-id': '12345',
+        'x-posthog-organization-id': '0190-abcd',
+    }
+    assert isinstance(connection.auth, SavedKeyAuth)
+    assert bearer() == 'Bearer phx_new'
+
+
+async def test_reopening_repicks_a_saved_key_and_region_without_reinstalling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api_keys.save_key(name='SHARED_POSTHOG', value='shared-secret')
+    shell = Shell(tmp_path, {'url': EU_URL, 'read_only': False})
+    script(monkeypatch, lists=[])
+    await shell.loader.command(['enable', 'posthog'])
+    key_choice(monkeypatch, KeyReference(name='SHARED_POSTHOG'))
+    script(monkeypatch, lists=[pick('key'), pick('url')], choices=[pick(US_URL)])
+    assert await shell.loader.command(['configure', 'posthog']) == (
+        'PostHog connects with SHARED_POSTHOG from /keys.\nSaved Region.'
+    )
+    assert shell.saved() == {
+        'auth': 'key',
+        'url': US_URL,
+        'read_only': False,
+        'features': None,
+        'mode': 'auto',
+        'project_id': None,
+        'organization_id': None,
+        'include_instructions': True,
+    }
+    assert transport(shell.capability()).url == US_URL
+    assert bearer() == 'Bearer shared-secret'
+    api_keys.save_key(name='SHARED_POSTHOG', value='replaced')
+    assert bearer() == 'Bearer replaced', 'replacing the key in /keys reaches the next request without a reload'
+    with pytest.raises(ValueError, match='used by posthog'):
+        api_keys.rename_key(name='SHARED_POSTHOG', new_name='OTHER')
+
+
+async def test_custom_region_url_is_validated_as_typed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shell = Shell(tmp_path)
+    script(monkeypatch, lists=[])
+    await shell.loader.enable('posthog')
+    script(monkeypatch, lists=[pick('url')], choices=[pick(CUSTOM)], texts=[typed('http://localhost:8000/mcp')])
+    assert await shell.loader.configure('posthog') == 'Saved Region.'
+    assert transport(shell.capability()).url == 'http://localhost:8000/mcp'
+
+
+async def test_feature_groups_toggle_and_every_group_clears_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shell = Shell(tmp_path, {'features': ['flags', 'custom_group']})
+    script(monkeypatch, lists=[])
+    await shell.loader.enable('posthog')
+    script(monkeypatch, lists=[pick('features'), pick('features')], choices=[pick('flags'), pick(EVERY_GROUP), CLOSE])
+    assert await shell.loader.configure('posthog') == 'Saved Feature groups.', 'the second open changed nothing'
+    assert shell.saved()['features'] is None
+    assert transport(shell.capability()).url == US_URL
+    script(monkeypatch, lists=[pick('features')], choices=[pick('custom_group'), CLOSE])
+    assert await shell.loader.configure('posthog') == 'Saved Feature groups.'
+    assert shell.saved()['features'] == ['custom_group']
+    script(monkeypatch, lists=[pick('features')], choices=[pick('custom_group'), CLOSE])
+    await shell.loader.configure('posthog')
+    assert shell.saved()['features'] is None, 'unchecking the last group offers every group, never an empty list'
+    script(monkeypatch, lists=[pick('features')], choices=[CLOSE])
+    assert await shell.loader.configure('posthog') == 'PostHog settings unchanged.'
+
+
+def test_feature_menu_marks_the_selection_and_keeps_unknown_groups() -> None:
+    labels = [item.label for item in posthog.feature_menu(['flags', 'zz_new'], 3)._items]  # pyright: ignore[reportPrivateUsage]
+    assert labels[0] == '[ ] every group (no filter)'
+    assert '[x] flags' in labels and '[x] zz_new' in labels and '[ ] sql' in labels
+    every = posthog.feature_menu(None, 0)._items[0]  # pyright: ignore[reportPrivateUsage]
+    assert every.label == '[x] every group (no filter)'
+
+
+async def test_new_key_is_typed_masked_when_no_keys_are_saved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shell = Shell(tmp_path)
+    script(monkeypatch, lists=[])
+    await shell.loader.enable('posthog')
+    script(monkeypatch, lists=[pick('key')], texts=[typed('phx_typed')])
+    assert await shell.loader.configure('posthog') == f'PostHog connects with {KEY} from /keys.'
+    assert api_keys.load_keys()[KEY].get_secret_value() == 'phx_typed'
+    assert posthog.saved_key() == KeyReference(name=KEY)
+
+
+@pytest.mark.parametrize('answer', [TextInputResult(cancelled=True), typed('   ')])
+async def test_cancelled_or_blank_key_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: TextInputResult
+) -> None:
+    shell = Shell(tmp_path)
+    script(monkeypatch, lists=[])
+    await shell.loader.enable('posthog')
+    script(monkeypatch, lists=[pick('key')], texts=[answer])
+    assert await shell.loader.configure('posthog') == 'PostHog key unchanged.'
+    assert api_keys.load_keys() == {} and posthog.saved_key() is None
+
+
+async def test_replacing_a_shared_key_needs_confirmation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    api_keys.save_key(name=KEY, value='shared')
+    shell = Shell(tmp_path)
+    script(monkeypatch, lists=[])
+    await shell.loader.enable('posthog')
+    key_choice(monkeypatch, 'other')
+    script(monkeypatch, lists=[pick('key'), pick('key')], choices=[pick(False), pick(True)])
+    assert await shell.loader.configure('posthog') == (
+        f'PostHog key unchanged.\nPostHog connects with {KEY} from /keys.'
+    )
+    assert api_keys.load_keys()[KEY].get_secret_value() == 'other'
+
+
+async def test_a_key_that_vanishes_while_choosing_is_reported_in_the_menu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shell = Shell(tmp_path)
+    script(monkeypatch, lists=[])
+    await shell.loader.enable('posthog')
+    key_choice(monkeypatch, KeyReference(name='GONE'))
+    script(monkeypatch, lists=[pick('key')])
+    assert await shell.loader.configure('posthog') == 'The selected API key no longer exists. Select a saved key again.'
+
+
+def test_saved_key_auth_fails_closed() -> None:
+    with pytest.raises(UserError, match='PostHog has no key. Run /plugins configure posthog'):
+        bearer()
+    save_codex_credentials(account='posthog', value=f'{{"token": {{"name": "{KEY}"}}}}')
+    with pytest.raises(UserError, match=f'{KEY} is missing'):
+        bearer()
+    save_codex_credentials(account='posthog', value='{"token": "inline-secret"}')
+    with pytest.raises(UserError, match='reference is invalid'):
+        bearer()
+
+
+def test_menu_validates_resets_and_flags_a_missing_key() -> None:
+    host = PluginHost[None](name='posthog', console=Console(file=io.StringIO()), settings={'read_only': False})
+    source = PostHogSource(host)
+    rows = {row.key: row for row in source.rows()}
+    assert rows['key'].note == 'needs a key' and source.current(rows['key']) == '(none)'
+    assert source.problem(rows['url'], 'http://posthog.example.com/mcp') == (
+        'Value error, Use an https:// URL (http:// only for localhost) with no query string.'
+    )
+    assert source.problem(rows['url'], f'{US_URL}?features=sql') is not None
+    assert source.problem(rows['project_id'], '12 34') == (
+        'Value error, Use the ID as PostHog shows it: letters, digits, and dashes.'
+    )
+    assert source.problem(rows['read_only'], 'maybe') == 'Input should be a valid boolean'
+    assert source.problem(rows['project_id'], '42') is None
+    assert source.current(rows['project_id']) == '(not set)'
+    assert source.current(rows['read_only']) == 'false'
+    assert source.reset(rows['read_only']) == 'Reset Tools.'
+    assert source.current(rows['read_only']) == 'true'
+    assert source.current(rows['features']) == 'every group'
+    assert source.reset(rows['key']).startswith('The API key has no default')
+    api_keys.save_key(name=KEY, value='saved')
+    save_codex_credentials(account='posthog', value=f'{{"token": {{"name": "{KEY}"}}}}')
+    rows = {row.key: row for row in source.rows()}
+    assert rows['key'].note == '' and source.current(rows['key']) == KEY
+    api_keys.delete_key(name=KEY)
+    assert {row.key: row for row in source.rows()}['key'].note == 'needs a key'
+    browser = PostHogSource(PluginHost[None](name='posthog', console=Console(), settings={'auth': 'browser'}))
+    assert browser.rows()[0].note == '', 'browser sign-in needs no key'
+
+
+async def test_missing_key_warns_on_load_but_keeps_the_menu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    save_codex_credentials(account='posthog', value='{"token": {"name": "DELETED"}}')
+    shell = Shell(tmp_path, terminal=False)
+    script(monkeypatch, lists=[])
+    await shell.loader.enable('posthog')
+    assert 'PostHog uses DELETED, which is missing from /keys.' in shell.output.getvalue()
+    assert len(shell.loader.capabilities()) == 1
+
+
+async def test_headless_configure_explains_instead_of_drawing(tmp_path: Path) -> None:
+    shell = Shell(tmp_path, terminal=False)
+    assert await shell.loader.command(['enable', 'posthog']) == (
+        'Enabled posthog.\nConfigure PostHog from a terminal: Run /plugins configure posthog to choose or enter a key.'
+    )
+
+
+async def test_status_command_in_key_mode(tmp_path: Path) -> None:
+    shell = Shell(tmp_path, terminal=False)
+    await shell.loader.enable('posthog')
+    commands = shell.commands
+    assert 'has no key yet' in await commands.execute_async('/posthog')
+    api_keys.save_key(name=KEY, value='saved')
+    save_codex_credentials(account='posthog', value=f'{{"token": {{"name": "{KEY}"}}}}')
+    assert await commands.execute_async('/posthog') == f'PostHog (read-only, {US_URL}) connects with {KEY} from /keys.'
+    with pytest.raises(ValueError, match='Usage: /posthog'):
+        await commands.execute_async('/posthog key')
+
+
+async def test_browser_sign_in_status_and_logout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shell = Shell(tmp_path, {'auth': 'browser', 'read_only': False}, terminal=False)
+    await shell.loader.enable('posthog')
+    capability = shell.capability()
+    before = capability.client
+    assert isinstance(before, Client) and before._init_timeout == OAUTH_TIMEOUT  # pyright: ignore[reportPrivateUsage]
+    connection = transport(capability)
+    assert isinstance(connection.auth, OAuth) and connection.headers == {}
+    commands = shell.commands
+    assert 'not signed in' in await commands.execute_async('/posthog')
+    await TokenStore(posthog.TOKENS).put('token', {'access_token': 'x'}, collection='mcp-oauth-token')
+    assert await commands.execute_async('/posthog') == (
+        f'PostHog (read-write, {US_URL}) is signed in through the browser.'
+    )
+
+    def delete(service: str, account: str) -> None:
+        pass
+
+    monkeypatch.setattr(keyring, 'delete_password', delete)
+    assert 'Signed out' in await commands.execute_async('/posthog logout')
+    assert capability.client is not before, 'the live sign-in is replaced, not reused'
+    assert isinstance(transport(capability).auth, OAuth)
+    [registered] = [command for command in commands if command.name == 'posthog']
+    assert list(registered.complete([''])) == ['logout'] and list(registered.complete(['logout', ''])) == []
+
+    def locked(service: str, account: str) -> str | None:
+        raise KeyringLocked('locked')
+
+    monkeypatch.setattr(keyring, 'get_password', locked)
+    assert 'unknown sign-in state' in await commands.execute_async('/posthog')
+
+
+@pytest.mark.parametrize(
+    'settings',
+    [
+        {'api_key': 'phx_inline_secret'},
+        {'token': {'name': KEY}},
+        {'auth': 'oauth'},
+        {'features': []},
+        {'features': ['Flags']},
+        {'url': 'http://mcp.posthog.com/mcp'},
+        {'mode': 'all'},
+    ],
+)
+async def test_settings_cannot_hold_a_secret_or_invalid_options(tmp_path: Path, settings: dict[str, JsonValue]) -> None:
+    shell = Shell(tmp_path, settings)
+    with pytest.raises(PluginError):
+        await shell.loader.enable('posthog')
+    assert shell.loader.capabilities() == []
+
+
+async def test_add_replacing_the_builtin_opens_the_menu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shell = Shell(tmp_path)
+    script(monkeypatch, lists=[pick('read_only')], choices=[pick('true')])
+    assert await shell.loader.command(['add', 'posthog', 'pydantic_clai2.posthog', '{"read_only": false}']) == (
+        'Replaced built-in posthog.\nSaved Tools.'
+    )
+    assert transport(shell.capability()).headers == {'x-posthog-read-only': 'true'}
+
+
+async def test_configure_needs_a_loaded_plugin_with_a_menu(tmp_path: Path) -> None:
+    shell = Shell(tmp_path)
+    with pytest.raises(ValueError, match='not loaded; enable it before configuring'):
+        await shell.loader.command(['configure', 'posthog'])
+    shell.store.save_plugin(BUILTIN.model_copy(update={'id': 'plain', 'factory': 'pydantic_clai2.repo_context'}))
+    assert await shell.loader.command(['enable', 'plain']) == 'Enabled plain.'
+    with pytest.raises(ValueError, match='no settings menu'):
+        await shell.loader.configure('plain')
+
+
+async def test_plugins_menu_configure_key_opens_the_settings_menu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shell = Shell(tmp_path)
+    script(monkeypatch, lists=[pick('read_only')], choices=[pick('false')])
+
+    def run(menu: PluginMenu[None]) -> MenuResult | None:
+        [item] = menu.items()
+        menu.toggle(Redraw(), item)
+        assert menu.notice == 'Press C to configure posthog.'
+        return menu.configure(Redraw(), item)
+
+    assert await open_plugins_menu(shell.loader, run=run) == 'Saved Tools.'
+    assert transport(shell.capability()).headers == {}
+
+
+async def test_plugins_menu_reports_a_configure_error(tmp_path: Path) -> None:
+    shell = Shell(tmp_path)
+
+    def run(menu: PluginMenu[None]) -> MenuResult | None:
+        assert menu.configure(Redraw(), MenuItem('none', value=None)) is None
+        return menu.configure(Redraw(), menu.items()[0])
+
+    assert 'enable it before configuring' in await open_plugins_menu(shell.loader, run=run)
+
+
+class Redraw:
+    def replace_items(self, items: object) -> None:
+        pass
