@@ -134,26 +134,6 @@ working directory but inside `root_dir` use `..` components. Containment,
 access patterns, and event paths retain their `root_dir` basis, as does
 `search_files`'s `include_glob` filter.
 
-### Reading files other capabilities keep
-
-Some capabilities keep files in the workspace for the model to read later, such as
-`ToolOutputLimits` spilling an oversized tool result. Rather than add a reader tool of their own,
-they ask whether an active capability implements `FileReader` and can read the file, and if so
-point the model at that tool. `FileSystem` answers with `read_file` when `read_file` is
-registered, `max_read_chars` caps a read at or below what the asker needs, `root_dir` is unset,
-and the patterns allow the path. It answers from configuration alone, without workspace I/O.
-
-A capability of your own can take either side:
-
-```python {test="skip"}
-from pydantic_ai_harness.filesystem import FileReader, find_file_reader
-
-# Asking: the file tool that reads this path (relative to the working directory), if any.
-tool = find_file_reader(ctx, '.my-capability/notes.md', max_chars=50_000)
-
-# Answering: implement `file_read_tool(ctx, path, *, max_chars) -> str | None` on your capability.
-```
-
 ## Events
 
 `FileSystem` emits typed capability events in the `file_system` namespace so a
