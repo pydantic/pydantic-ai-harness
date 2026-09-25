@@ -319,7 +319,8 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         directory = absolute_path('cwd', cwd) if cwd is not None else self._working_dir
-        args = _with_env(command_argv(command, shell), {**self._env, **(env or {})})
+        marker = f'pydantic-ai-end-{uuid.uuid4().hex}'
+        args = _with_env(_ending_with(marker, command_argv(command, shell)), {**self._env, **(env or {})})
 
         # Acquiring the Sprite has its own bound; the deadline is the command's alone.
         sprite = await self.get_client()
@@ -333,8 +334,8 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
             if timeout is not None and deadline.cancelled_caught:
                 raise WorkspaceTimeoutError(
                     f'Command timed out after {timeout:g} seconds',
-                    stdout=_decode(exec_command.get_stdout()),
-                    stderr=_decode(exec_command.get_stderr()),
+                    stdout=_until_marker(exec_command.get_stdout(), marker),
+                    stderr=_until_marker(exec_command.get_stderr(), marker),
                     timeout=timeout,
                 )
         except BaseException as error:
@@ -345,8 +346,28 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
             raise
         await _close_command(exec_command)
         return CommandResult(
-            exit_code=code, stdout=_decode(exec_command.get_stdout()), stderr=_decode(exec_command.get_stderr())
+            exit_code=code,
+            stdout=_until_marker(exec_command.get_stdout(), marker),
+            stderr=_until_marker(exec_command.get_stderr(), marker),
         )
+
+
+def _ending_with(marker: str, args: list[str]) -> list[str]:
+    """`args` run under a `sh` that ends stdout and stderr with a `marker` line and keeps the exit status.
+
+    The live Sprite sends stderr a line at a time and delivers a last line without a newline on the
+    stdout stream, so `printf out; printf err >&2` came back as `outerr` on stdout (2026-09-25). The
+    marker line terminates whatever the command left unterminated; `_until_marker` removes it.
+    """
+    script = f'"$@"; status=$?; printf "\\n%s\\n" {marker}; printf "\\n%s\\n" {marker} >&2; exit "$status"'
+    return ['sh', '-c', script, 'sh', *args]
+
+
+def _until_marker(data: bytes, marker: str) -> str:
+    """The stream's output before the `marker` line; all of it when the command never reached the marker."""
+    output = _decode(data)
+    head, found, _ = output.rpartition(f'\n{marker}\n')
+    return head if found else output
 
 
 def _with_env(args: list[str], env: dict[str, str]) -> list[str]:
@@ -358,10 +379,6 @@ def _with_env(args: list[str], env: dict[str, str]) -> list[str]:
             raise ValueError(
                 f'illegal environment variable {key!r}: a name is non-empty without "=" or NUL, a value without NUL'
             )
-    if '=' in args[0]:
-        # `env` reads any operand containing `=` as an assignment, even after `--`, so no portable
-        # spelling runs this program with variables set.
-        raise ValueError(f'cannot run {args[0]!r} with env: a program name containing "=" is read as a variable')
     # `--` ends `env`'s options, so a name starting with `-` is not read as one.
     return ['env', '--', *(f'{key}={value}' for key, value in env.items()), *args]
 

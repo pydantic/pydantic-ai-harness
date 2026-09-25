@@ -383,7 +383,9 @@ class TestSpritesSandbox:
         result = await SpritesSandboxBackend(working_dir=str(transport.root)).run(['echo', 'a b'])
         assert (result.exit_code, result.stdout) == (0, 'a b\n')
         [socket] = transport.execs
-        assert socket.query['cmd'] == ['echo', 'a b']
+        # The command runs under a `sh` that ends both streams with a marker line; the fake conformance suite checks the streams stay apart.
+        assert socket.query['cmd'][:2] == ['sh', '-c']
+        assert socket.query['cmd'][3:] == ['sh', 'echo', 'a b']
         assert socket.query['dir'] == [str(transport.root)]
         # Without it a non-TTY command outlives a closed socket by 10 seconds.
         assert socket.query['max_run_after_disconnect'] == ['1s']
@@ -417,7 +419,6 @@ class TestSpritesSandbox:
             (['true'], {'A=B': 'x'}),
             (['true'], {'': 'x'}),
             (['true'], {'A': 'x\0'}),
-            (['A=B'], {'A': 'x'}),
         ],
     )
     async def test_env_that_env_cannot_express_is_rejected(

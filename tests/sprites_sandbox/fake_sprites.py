@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import subprocess
 import threading
 from pathlib import Path
@@ -62,6 +63,8 @@ class FakeExecSocket:
             cwd=self.query.get('dir', [str(sprites.root)])[0],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            # Its own process group, so closing the socket ends the command's children too.
+            start_new_session=True,
         )
         self.thread = threading.Thread(target=self._execute)
         self.thread.start()
@@ -86,8 +89,17 @@ class FakeExecSocket:
             self._send(bytes([_EXIT, exit_code % 256]))
 
     def _pump(self, source: IO[bytes], stream: int) -> None:
+        # Like the live Sprite: stderr goes out a line at a time, and a last line without a newline
+        # arrives on the stdout stream.
+        pending = b''
         while chunk := os.read(source.fileno(), 4096):
-            self._send(bytes([stream]) + chunk)
+            if stream == _STDOUT:
+                self._send(bytes([stream]) + chunk)
+                continue
+            lines, newline, pending = (pending + chunk).rpartition(b'\n')
+            self._send(bytes([stream]) + lines + newline)
+        # Empty when stderr ended with a newline, which the backend's end marker makes the usual case.
+        self._send(bytes([_STDOUT]) + pending)
         source.close()
 
     def _send(self, frame: bytes | None) -> None:
@@ -116,7 +128,7 @@ class FakeExecSocket:
             raise sprites.exec_close_error
         sprites.exec_closes += 1
         if self.process.poll() is None:
-            self.process.kill()
+            os.killpg(self.process.pid, signal.SIGKILL)
         self._frames.put_nowait(None)
 
 
