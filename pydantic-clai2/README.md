@@ -1184,8 +1184,10 @@ the host clock (through `datetime`), and no network. The model writes one snippe
 is still writing.
 
 The sandbox's `pathlib` only reaches what the file tools may reach. `pathlib`
-calls on a mount skip the `FileSystem` checks, so CLAI mounts the `FileSystem`
-working directory at its real path only when a mount can enforce the same limits:
+calls on a mount skip the `FileSystem` checks, so CLAI mounts the workspace's
+working directory at its real path only when a mount can enforce the same limits.
+A plugin that supplies a sandbox workspace gets no mount: the host directory is
+not the filesystem the file tools act on there.
 
 - **Read-write:** `read_file` and `write_file` registered, no patterns, and not
   `read_only`. This is the built-in `coder` plugin's default. `pathlib` can also
