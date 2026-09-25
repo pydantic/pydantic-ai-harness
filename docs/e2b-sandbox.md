@@ -32,7 +32,7 @@ result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summa
 
 `Coder`'s shell and file tools now run in the sandbox, not on your machine. The sandbox is created the first time a tool uses it, and it keeps running, and billing, after the run ends; see [Clean up](#clean-up).
 
-A sandbox lives for 24 hours, E2B's maximum, and is then paused; reattaching resumes it. To lower that, pass for example `E2BSandbox(sandbox_timeout=3600)`, the most E2B's Hobby plan allows.
+A sandbox lives for 1 hour by default. When that runs out it pauses, and the next run resumes it. On E2B's Pro plan you can pass up to `E2BSandbox(sandbox_timeout=86400)`.
 
 `Coder` searches with ripgrep (`rg`) when the sandbox has it and with its built-in search otherwise. For faster searches, pass an E2B [template](https://e2b.dev/docs/template/quickstart) with ripgrep installed as `E2BSandbox(template='<name>')`.
 
@@ -104,23 +104,46 @@ Already have an `e2b.AsyncSandbox`? Pass `workspace=E2BSandboxBackend(workspace=
 The sandbox keeps running, and billing, after the run ends. Pydantic AI never kills it. Kill it with the ref you stored:
 
 ```python {names="defined"}
+import e2b
 from pydantic_ai.workspaces import WorkspaceRef
-from pydantic_ai_harness.e2b_sandbox import E2BSandboxBackend
 
 
 async def kill_sandbox(ref: WorkspaceRef) -> None:
-    sandbox = await E2BSandboxBackend(ref=ref).get_client()
-    await sandbox.kill()
+    await e2b.AsyncSandbox.kill(ref.id)
 ```
 
-`get_client()` returns the `e2b.AsyncSandbox`. A sandbox you don't kill is paused when its `sandbox_timeout` runs out. See [E2B's sandbox lifecycle](https://docs.e2b.dev/sandbox).
+This kills a paused sandbox too, without resuming it. A sandbox you don't kill is paused when its `sandbox_timeout` runs out. See [E2B's sandbox lifecycle](https://docs.e2b.dev/sandbox).
+
+A failed run returns no result, so there is no ref to store. To terminate its sandbox, clean up in an `on_run_error` hook; `after_run` doesn't run when a run fails:
+
+```python
+from typing import Any
+
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import Hooks
+from pydantic_ai.run import AgentRunResult
+from pydantic_ai_harness.coder import Coder
+from pydantic_ai_harness.e2b_sandbox import E2BSandbox
+
+hooks = Hooks()
+
+
+@hooks.on.run_error
+async def terminate_failed_run(ctx: RunContext[None], *, error: BaseException) -> AgentRunResult[Any]:
+    if ctx.workspace.ref is not None:
+        await kill_sandbox(ctx.workspace.ref)
+    raise error
+
+
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[E2BSandbox(), Coder(), hooks])
+```
 
 ## Configuration
 
 | Option | What it does |
 | --- | --- |
 | `template` | E2B template name or ID for a new sandbox. Default: E2B's `base`. An unknown template fails on first use. |
-| `sandbox_timeout` | Seconds the sandbox lives before E2B pauses it, set on create and on reattach. Default: `86_400` (24 hours, E2B's maximum). |
+| `sandbox_timeout` | Seconds the sandbox lives before E2B pauses it, set on create and on reattach. Default: `3_600` (1 hour, the most E2B's Hobby plan allows). |
 | `allow_internet_access` | Whether a new sandbox can reach the internet. Default: `True`. |
 | `working_dir` | Absolute directory commands start in and relative paths resolve against. Default: the sandbox's own. |
 | `env` | Environment variables every command gets. Nothing from your machine's environment reaches the sandbox. |

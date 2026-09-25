@@ -66,8 +66,8 @@ _PATH_ERRORS: tuple[tuple[str, type[OSError]], ...] = (
     ('is a directory', IsADirectoryError),
 )
 
-# E2B's maximum sandbox lifetime (Pro plans); Hobby plans allow 3_600.
-DEFAULT_SANDBOX_TIMEOUT = 86_400
+# The most E2B's Hobby plan allows, so the default works on every plan; Pro plans allow 86_400.
+DEFAULT_SANDBOX_TIMEOUT = 3_600
 
 # Bound the sandbox-create call so a wedged control plane cannot hang acquisition.
 _CREATE_TIMEOUT = 120
@@ -129,9 +129,15 @@ def _unavailable_message(sandbox_id: str) -> str:
     )
 
 
-def _create_refused_message(error: e2b.SandboxException) -> str:
-    message = f'Could not start E2B sandbox: {error}'
-    if 'timeout' in str(error).lower():
+def _is_lifetime_refusal(error: e2b.SandboxException) -> bool:
+    """Whether E2B refused the requested `sandbox_timeout`, e.g. `400: Timeout cannot be greater than 1 hours`."""
+    status = error.status_code
+    return status is not None and 400 <= status < 500 and 'timeout' in str(error).lower()
+
+
+def _refused_message(context: str, error: e2b.SandboxException) -> str:
+    message = f'{context}: {error}'
+    if _is_lifetime_refusal(error):
         message += ' Hobby plans allow at most 3600 seconds; pass `E2BSandbox(sandbox_timeout=3600)`.'
     return message
 
@@ -166,7 +172,8 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             An unknown template raises `WorkspaceUnavailableError` on first use.
         sandbox_timeout: Total lifetime of the sandbox in seconds, applied when it is created and
             again when attaching to it. When it runs out, E2B pauses the sandbox rather than
-            killing it, and attaching resumes it. The default is E2B's maximum; Hobby plans allow 3600.
+            killing it, and attaching resumes it. The default, 3600, is the most E2B's Hobby plan
+            allows; Pro plans allow up to 86400.
         working_dir: Absolute directory commands start in and relative paths resolve against.
             E2B has no create-time working directory, so this is applied per command, including
             on an attached sandbox; `None` uses the sandbox's own default, discovered with
@@ -337,7 +344,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
                     refused = error.status_code is not None and 400 <= error.status_code < 500
                     if not refused or isinstance(error, e2b.RateLimitException):
                         raise
-                    raise WorkspaceUnavailableError(_create_refused_message(error)) from error
+                    raise WorkspaceUnavailableError(_refused_message('Could not start E2B sandbox', error)) from error
         # A transient failure like any unreachable service: it propagates for durable engines to
         # retry, with a message that says what did not answer.
         raise TimeoutError(
@@ -351,12 +358,19 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         E2B resumes a paused sandbox on connect, so attaching to one that was paused restarts
         it; a sandbox that is gone raises `WorkspaceUnavailableError` rather than resolving to
         a dead environment. Nothing is recreated in its place; a run that expected files there
-        must be told they are gone, not handed an empty workspace.
+        must be told they are gone, not handed an empty workspace. A lifetime over the plan's
+        limit is refused like on create, as `WorkspaceUnavailableError`.
         """
-        async with self._sdk_errors(id, f'Could not connect to E2B sandbox {id!r}'):
-            # Without `timeout`, a resumed sandbox gets E2B's 300 seconds; a running one keeps
-            # the longer of its current and the given lifetime.
-            return await e2b.AsyncSandbox.connect(id, timeout=self._sandbox_timeout)
+        context = f'Could not connect to E2B sandbox {id!r}'
+        async with self._sdk_errors(id, context):
+            try:
+                # Without `timeout`, a resumed sandbox gets E2B's 300 seconds; a running one keeps
+                # the longer of its current and the given lifetime.
+                return await e2b.AsyncSandbox.connect(id, timeout=self._sandbox_timeout)
+            except e2b.SandboxException as error:
+                if type(error) is not e2b.SandboxException or not _is_lifetime_refusal(error):
+                    raise
+                raise WorkspaceUnavailableError(_refused_message(context, error)) from error
 
     async def working_dir(self) -> str:
         """The sandbox's default working directory (absolute POSIX path)."""

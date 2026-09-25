@@ -349,6 +349,28 @@ class TestRealLifecycle:
             attached = E2BSandboxBackend(ref=owner.ref)
             assert await attached.read_bytes(marker) == b'before-pause'
 
+    async def test_the_default_lifetime_is_accepted(self) -> None:
+        """Validates the fake-encoded assumption that E2B accepts the default `sandbox_timeout`.
+
+        The fake takes any lifetime; E2B refuses one over the plan's limit, and the Hobby plan's is 3600.
+        """
+        async with _owned() as backend:
+            assert (await backend.run(['true'], timeout=30)).exit_code == 0
+
+    async def test_the_documented_cleanup_kills_a_paused_sandbox(self) -> None:
+        """Validates that the docs page's `kill_sandbox` kills a paused sandbox, which the fake cannot show.
+
+        Connecting to a paused sandbox would resume it, so the cleanup must kill it by id instead.
+        """
+        kill_sandbox = documented_cleanup(_DOCS_BLOCKS, 'kill_sandbox')
+        async with _owned(sandbox_timeout=120) as owner:
+            assert owner.ref is not None
+            await (await owner.get_client()).beta_pause()
+            await kill_sandbox(owner.ref)
+
+            with pytest.raises(WorkspaceUnavailableError):
+                await E2BSandboxBackend(ref=owner.ref).get_client()
+
 
 class TestCoder:
     """The model's tools running in a real sandbox."""

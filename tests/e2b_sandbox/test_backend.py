@@ -101,8 +101,8 @@ class TestCreate:
     async def test_defaults(self, fake_e2b: FakeE2B) -> None:
         await started()
         call = fake_e2b.create_calls[-1]
-        # E2B's maximum lifetime, pausing rather than killing at the end of it.
-        assert (call.template, call.timeout, call.envs, call.lifecycle) == (None, 86_400, None, {'on_timeout': 'pause'})
+        # The most E2B's Hobby plan allows, pausing rather than killing at the end of it.
+        assert (call.template, call.timeout, call.envs, call.lifecycle) == (None, 3_600, None, {'on_timeout': 'pause'})
         # Passed explicitly: it decides whether the sandbox is reachable without its token.
         assert (call.secure, call.allow_internet_access) == (True, True)
 
@@ -159,8 +159,18 @@ class TestConnect:
         # E2B resumes a paused sandbox on connect, so no separate liveness probe is needed:
         # a sandbox that is really gone raises instead of handing back a dead handle.
         backend = await started(ref=WorkspaceRef(provider='e2b', id='sbx-keep'))
-        assert fake_e2b.connect_calls == [('sbx-keep', 86_400)]
+        assert fake_e2b.connect_calls == [('sbx-keep', 3_600)]
         assert backend.ref == WorkspaceRef(provider='e2b', id='sbx-keep')
+
+    async def test_a_refused_lifetime_on_connect_is_unavailable(self, fake_e2b: FakeE2B) -> None:
+        # Attaching with a lifetime over the plan's limit fails the same way on every retry.
+        error = SandboxException('400: Timeout cannot be greater than 1 hours', status_code=400)
+        fake_e2b.connect_error = error
+        with pytest.raises(
+            WorkspaceUnavailableError, match=r"'sbx-keep'.*pass `E2BSandbox\(sandbox_timeout=3600\)`"
+        ) as exc:
+            await started(ref=WorkspaceRef(provider='e2b', id='sbx-keep'), sandbox_timeout=86_400)
+        assert exc.value.__cause__ is error
 
     async def test_connect_to_a_missing_sandbox_fails(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.connect_error = fake_e2b.sandbox_gone_type('not found')
