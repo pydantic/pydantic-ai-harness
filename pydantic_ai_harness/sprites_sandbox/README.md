@@ -1,8 +1,8 @@
-# Sprite Workspace
+# Sprites Sandbox
 
-Give an agent a persistent [Fly.io Sprite](https://sprites.dev) to work in. `SpriteWorkspace` supplies the Sprite as the run's `ctx.workspace`, so the commands and file edits of `Coder`, `Shell`, and `FileSystem` happen in the Sprite, not on your machine.
+Give an agent a persistent [Fly.io Sprite](https://sprites.dev) to work in. `SpritesSandbox` supplies the Sprite as the run's `ctx.workspace`, so the commands and file edits of `Coder`, `Shell`, and `FileSystem` happen in the Sprite, not on your machine.
 
-[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/sprites/)
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/sprites_sandbox/)
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://pydantic.dev/docs/ai/harness/#version-policy).
 
@@ -27,10 +27,10 @@ Set `SPRITE_TOKEN`, or pass `token=`. The integration uses sprites-py 0.7.x.
 ```python
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
-from pydantic_ai_harness.sprites import SpriteWorkspace
+from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
 
 # A new Sprite comes with git, Python, and Node.js installed.
-agent = Agent('anthropic:claude-sonnet-5', capabilities=[SpriteWorkspace(), Coder()])
+agent = Agent('anthropic:claude-sonnet-5', capabilities=[SpritesSandbox(), Coder()])
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
 print(result.output)
 ```
@@ -62,11 +62,11 @@ The follow-up run finds the Sprite's reference in the message history and reatta
 from pydantic_ai import Agent
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import Shell
-from pydantic_ai_harness.sprites import SpriteWorkspace
+from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
 
 agent = Agent(
     'anthropic:claude-sonnet-5',
-    capabilities=[SpriteWorkspace(), Shell(), FileSystem(read_only=True)],
+    capabilities=[SpritesSandbox(), Shell(), FileSystem(read_only=True)],
 )
 ```
 
@@ -80,9 +80,9 @@ Persist `result.workspace.ref` to come back to the Sprite outside message histor
 from pydantic_ai import Agent
 from pydantic_ai.workspaces import WorkspaceRef
 from pydantic_ai_harness.coder import Coder
-from pydantic_ai_harness.sprites import SpriteWorkspace
+from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
 
-agent = Agent('anthropic:claude-sonnet-5', capabilities=[SpriteWorkspace(), Coder()])
+agent = Agent('anthropic:claude-sonnet-5', capabilities=[SpritesSandbox(), Coder()])
 
 
 async def resume(ref: WorkspaceRef) -> str:
@@ -94,18 +94,18 @@ An explicit reference takes precedence over message history. Pass `workspace='ne
 
 ## Manage the Sprite yourself
 
-For Sprites SDK operations, hold a `SpriteWorkspaceBackend` and call `await backend.get_client()` for the typed `sprites.AsyncSprite`. The first call creates or attaches to the Sprite; later calls return the same object. `SpriteWorkspaceBackend(workspace=native)` wraps a Sprite handle you already have; pass either that or `ref=`, not both.
+For Sprites SDK operations, hold a `SpritesSandboxBackend` and call `await backend.get_client()` for the typed `sprites.AsyncSprite`. The first call creates or attaches to the Sprite; later calls return the same object. `SpritesSandboxBackend(workspace=native)` wraps a Sprite handle you already have; pass either that or `ref=`, not both.
 
 ```python
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
-from pydantic_ai_harness.sprites import SpriteWorkspaceBackend
+from pydantic_ai_harness.sprites_sandbox import SpritesSandboxBackend
 
 agent = Agent('anthropic:claude-sonnet-5', capabilities=[Coder()])
 
 
 async def run_and_clean_up(prompt: str) -> str:
-    backend = SpriteWorkspaceBackend()
+    backend = SpritesSandboxBackend()
     sprite = await backend.get_client()
     try:
         result = await agent.run(prompt, workspace=backend)
@@ -115,7 +115,7 @@ async def run_and_clean_up(prompt: str) -> str:
         await backend.aclose()
 ```
 
-A backend creates its own `AsyncSpritesClient` from `token=` (or `SPRITE_TOKEN`) on first use. `SpriteWorkspace` closes the client of the backend it supplied when the run ends; a backend you construct is yours to close with `aclose()`. Either reopens a client if it is used again, for example through `result.workspace`. Pass `client=` to `SpriteWorkspace` or the backend to share one client across runs; a client you pass is never closed for you, and must be used on the event loop it was created on.
+A backend creates its own `AsyncSpritesClient` from `token=` (or `SPRITE_TOKEN`) on first use. `SpritesSandbox` closes the client of the backend it supplied when the run ends; a backend you construct is yours to close with `aclose()`. Either reopens a client if it is used again, for example through `result.workspace`. Pass `client=` to `SpritesSandbox` or the backend to share one client across runs; a client you pass is never closed for you, and must be used on the event loop it was created on.
 
 To delete the Sprite an agent run created, take the backend from `result.workspace.backend`; check that its `ref` is not `None` first, since `get_client()` would otherwise create a Sprite.
 
@@ -131,6 +131,6 @@ The capability emits no telemetry spans of its own; core's agent and tool spans 
 
 ## API reference
 
-::: pydantic_ai_harness.sprites.SpriteWorkspace
+::: pydantic_ai_harness.sprites_sandbox.SpritesSandbox
 
-::: pydantic_ai_harness.sprites.SpriteWorkspaceBackend
+::: pydantic_ai_harness.sprites_sandbox.SpritesSandboxBackend

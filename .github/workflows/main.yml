@@ -129,7 +129,7 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: |
           if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
-            pydantic_ai_harness/sprites \
+            pydantic_ai_harness/sprites_sandbox \
             pydantic_ai_harness/__init__.py \
             pydantic_ai_harness/_workspace.py \
             pydantic_ai_harness/_workspace_provider.py \
@@ -137,10 +137,10 @@ jobs:
             'pydantic_ai_harness/coder/**' \
             'pydantic_ai_harness/shell/**' \
             'pydantic_ai_harness/filesystem/**' \
-            tests/sprites \
+            tests/sprites_sandbox \
             tests/conftest.py \
             tests/_workspace.py \
-            docs/sprite-workspace.md \
+            docs/sprites-sandbox.md \
             pyproject.toml \
             uv.lock \
             .github/workflows/main.yml
@@ -604,7 +604,7 @@ jobs:
 
       - run: uv sync --locked --group dev --extra sprites
 
-      - run: PYDANTIC_AI_HARNESS_SPRITES_LIVE=1 uv run --no-sync pytest -m sprites_live tests/sprites -q
+      - run: PYDANTIC_AI_HARNESS_SPRITES_LIVE=1 uv run --no-sync pytest -m sprites_live tests/sprites_sandbox -q
         env:
           # Scoped to this step so checkout and setup never see the secret.
           SPRITE_TOKEN: ${{ secrets.SPRITE_TOKEN }} # zizmor: ignore[secrets-outside-env]

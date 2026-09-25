@@ -11,7 +11,9 @@ import pytest
 
 _HAS_SPRITES = importlib.util.find_spec('sprites') is not None
 collect_ignore = (
-    [] if _HAS_SPRITES else ['fake_sprites.py', 'test_conformance.py', 'test_sprites.py', 'test_sprites_live.py']
+    []
+    if _HAS_SPRITES
+    else ['fake_sprites.py', 'test_conformance.py', 'test_sprites_sandbox.py', 'test_sprites_live.py']
 )
 
 if TYPE_CHECKING or _HAS_SPRITES:  # pragma: no branch - installed and slim jobs take opposite branches
@@ -53,9 +55,9 @@ if _HAS_SPRITES:  # pragma: no branch - the fixture requires the SDK-backed fake
     async def transport(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> AsyncIterator[SpriteTransport]:
         transport = SpriteTransport(tmp_path)
         monkeypatch.setenv('SPRITE_TOKEN', 'test-token')
-        monkeypatch.setattr('pydantic_ai_harness.sprites._backend.AsyncSpritesClient', transport.client)
+        monkeypatch.setattr('pydantic_ai_harness.sprites_sandbox._backend.AsyncSpritesClient', transport.client)
         FakeControlConnection.transport = transport
-        monkeypatch.setattr('pydantic_ai_harness.sprites._backend.ControlConnection', FakeControlConnection)
+        monkeypatch.setattr('pydantic_ai_harness.sprites_sandbox._backend.ControlConnection', FakeControlConnection)
 
         async def get(client: AsyncSpritesClient, name: str) -> AsyncSprite:
             return await transport.get(client, name)

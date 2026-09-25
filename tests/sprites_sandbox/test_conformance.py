@@ -1,7 +1,7 @@
-"""Pydantic AI's workspace backend conformance suite, run against `SpriteWorkspaceBackend`.
+"""Pydantic AI's workspace backend conformance suite, run against `SpritesSandboxBackend`.
 
-`TestFakeSpriteWorkspaceBackend` runs everywhere, over the fake Sprites SDK, whose commands run in
-local subprocesses under a temporary host directory. `TestLiveSpriteWorkspaceBackend` runs the same
+`TestFakeSpritesSandboxBackend` runs everywhere, over the fake Sprites SDK, whose commands run in
+local subprocesses under a temporary host directory. `TestLiveSpritesSandboxBackend` runs the same
 rules against a real Sprite and is gated like `test_sprites_live.py`.
 
 The backend implements `SupportsCommands` only; the suite derives the filesystem operations, and
@@ -16,26 +16,26 @@ import pytest
 from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 from pydantic_ai.workspaces.testing import WorkspaceBackendSuite
 
-from pydantic_ai_harness.sprites import SpriteWorkspaceBackend
+from pydantic_ai_harness.sprites_sandbox import SpritesSandboxBackend
 
 from .fake_sprites import SpriteTransport
 
 
 def _attach(ref: WorkspaceRef) -> WorkspaceBackend:
-    return SpriteWorkspaceBackend(ref=ref)
+    return SpritesSandboxBackend(ref=ref)
 
 
 async def _delete(backend: WorkspaceBackend) -> None:
-    assert isinstance(backend, SpriteWorkspaceBackend)
+    assert isinstance(backend, SpritesSandboxBackend)
     sprite = await backend.get_client()
     await sprite.delete()
 
 
-class TestFakeSpriteWorkspaceBackend(WorkspaceBackendSuite):
+class TestFakeSpritesSandboxBackend(WorkspaceBackendSuite):
     @pytest.fixture
-    def backend(self, transport: SpriteTransport) -> SpriteWorkspaceBackend:
+    def backend(self, transport: SpriteTransport) -> SpritesSandboxBackend:
         del transport
-        return SpriteWorkspaceBackend()
+        return SpritesSandboxBackend()
 
     @pytest.fixture
     def attach_backend(self) -> Callable[[WorkspaceRef], WorkspaceBackend]:
@@ -48,7 +48,7 @@ class TestFakeSpriteWorkspaceBackend(WorkspaceBackendSuite):
 
 @pytest.mark.sprites_live
 @pytest.mark.usefixtures('sprites_token')
-class TestLiveSpriteWorkspaceBackend(WorkspaceBackendSuite):  # pragma: no cover - live tier runs without coverage
+class TestLiveSpritesSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover - live tier runs without coverage
     # One event loop for the class: the backend's `AsyncSpritesClient` holds an `httpx.AsyncClient`
     # whose pooled connections are bound to the loop they were opened on. A class-scoped async
     # fixture is what holds that loop open between tests.
@@ -61,8 +61,8 @@ class TestLiveSpriteWorkspaceBackend(WorkspaceBackendSuite):  # pragma: no cover
     # destroy rule last.
     @pytest.fixture(scope='class')
     @classmethod
-    async def backend(cls, sprites_token: str) -> AsyncIterator[SpriteWorkspaceBackend]:
-        backend = SpriteWorkspaceBackend(token=sprites_token)
+    async def backend(cls, sprites_token: str) -> AsyncIterator[SpritesSandboxBackend]:
+        backend = SpritesSandboxBackend(token=sprites_token)
         yield backend
         if backend.ref is not None:
             from sprites.exceptions import NotFoundError  # noqa: PLC0415 - optional extra, absent on slim installs

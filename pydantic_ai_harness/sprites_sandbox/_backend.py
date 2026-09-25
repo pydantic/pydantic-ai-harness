@@ -48,7 +48,7 @@ from pydantic_ai.workspaces import (
 )
 
 from pydantic_ai_harness._workspace_provider import absolute_path, command_argv
-from pydantic_ai_harness.sprites._process import CANCEL, RUN, SPAWN_FAILED, SPAWN_FAILED_EXIT
+from pydantic_ai_harness.sprites_sandbox._process import CANCEL, RUN, SPAWN_FAILED, SPAWN_FAILED_EXIT
 
 try:
     from sprites import AsyncSprite, AsyncSpritesClient
@@ -57,7 +57,7 @@ try:
     from sprites.exceptions import TimeoutError as SpriteTimeoutError
     from websockets.exceptions import InvalidStatus
 except ImportError as exc:  # pragma: no cover - exercised by the isolated missing-extra test
-    raise ImportError('Install `pydantic-ai-harness[sprites]` to use SpriteWorkspace.') from exc
+    raise ImportError('Install `pydantic-ai-harness[sprites]` to use SpritesSandbox.') from exc
 
 logger = logging.getLogger(__name__)
 _T = TypeVar('_T')
@@ -143,7 +143,7 @@ def _map_error(error: Exception, name: str) -> WorkspaceError | None:
     return None
 
 
-class SpriteWorkspaceBackend(WorkspaceBackend, SupportsCommands):
+class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
     """A Fly.io Sprite behind the Pydantic AI `WorkspaceBackend` protocol.
 
     Construction does no I/O. The typed `sprites.AsyncSprite` is available through `get_client()`.
@@ -247,7 +247,7 @@ class SpriteWorkspaceBackend(WorkspaceBackend, SupportsCommands):
         """Close the `AsyncSpritesClient` this backend created, if it created one.
 
         The Sprite is untouched: the next operation opens a fresh client and reattaches by `ref`.
-        A caller-supplied `client=` or `workspace=` handle is never closed. `SpriteWorkspace`
+        A caller-supplied `client=` or `workspace=` handle is never closed. `SpritesSandbox`
         calls this for the backend it supplied when each run ends. A close that fails or times out
         is logged, not raised, and the client is kept so the next `aclose()` tries again.
         """

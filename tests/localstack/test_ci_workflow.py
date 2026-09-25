@@ -141,7 +141,7 @@ def test_sprites_live_is_scoped_to_sprites_changes() -> None:
     assert '      sprites: ${{ steps.detect-sprites.outputs.sprites }}' in changes_block
     assert detect_block[5:21] == [
         '          if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \\',
-        '            pydantic_ai_harness/sprites \\',
+        '            pydantic_ai_harness/sprites_sandbox \\',
         '            pydantic_ai_harness/__init__.py \\',
         '            pydantic_ai_harness/_workspace.py \\',
         '            pydantic_ai_harness/_workspace_provider.py \\',
@@ -149,10 +149,10 @@ def test_sprites_live_is_scoped_to_sprites_changes() -> None:
         "            'pydantic_ai_harness/coder/**' \\",
         "            'pydantic_ai_harness/shell/**' \\",
         "            'pydantic_ai_harness/filesystem/**' \\",
-        '            tests/sprites \\',
+        '            tests/sprites_sandbox \\',
         '            tests/conftest.py \\',
         '            tests/_workspace.py \\',
-        '            docs/sprite-workspace.md \\',
+        '            docs/sprites-sandbox.md \\',
         '            pyproject.toml \\',
         '            uv.lock \\',
         '            .github/workflows/main.yml',
@@ -180,7 +180,7 @@ def test_sprites_live_runs_the_live_tier_with_a_step_scoped_secret() -> None:
     lines = _workflow_lines()
 
     run_index = lines.index(
-        '      - run: PYDANTIC_AI_HARNESS_SPRITES_LIVE=1 uv run --no-sync pytest -m sprites_live tests/sprites -q'
+        '      - run: PYDANTIC_AI_HARNESS_SPRITES_LIVE=1 uv run --no-sync pytest -m sprites_live tests/sprites_sandbox -q'
     )
     step_block = lines[run_index : run_index + 4]
     assert '          SPRITE_TOKEN: ${{ secrets.SPRITE_TOKEN }} # zizmor: ignore[secrets-outside-env]' in step_block

@@ -17,7 +17,7 @@ Gating:
   * a module-scoped `anyio_backend` fixture keeps the shared Sprites client on one asyncio loop.
 
 Run locally:
-`PYDANTIC_AI_HARNESS_SPRITES_LIVE=1 uv run pytest -m sprites_live tests/sprites/test_sprites_live.py`
+`PYDANTIC_AI_HARNESS_SPRITES_LIVE=1 uv run pytest -m sprites_live tests/sprites_sandbox/test_sprites_live.py`
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from sprites import AsyncSpritesClient
 from sprites.exceptions import NotFoundError
 
 from pydantic_ai_harness.coder import Coder
-from pydantic_ai_harness.sprites import SpriteWorkspace, SpriteWorkspaceBackend
+from pydantic_ai_harness.sprites_sandbox import SpritesSandbox, SpritesSandboxBackend
 
 pytestmark = pytest.mark.sprites_live
 
@@ -58,9 +58,9 @@ async def client(sprites_token: str) -> AsyncIterator[AsyncSpritesClient]:
 
 
 @asynccontextmanager
-async def _owned(client: AsyncSpritesClient) -> AsyncGenerator[SpriteWorkspaceBackend]:
+async def _owned(client: AsyncSpritesClient) -> AsyncGenerator[SpritesSandboxBackend]:
     """Create a Sprite and delete it on the way out, even when the test deleted it already."""
-    backend = SpriteWorkspaceBackend(client=client, name=_unique('pydantic-ai-live'))
+    backend = SpritesSandboxBackend(client=client, name=_unique('pydantic-ai-live'))
     native = await backend.get_client()
     try:
         yield backend
@@ -87,7 +87,7 @@ async def test_reattach_by_ref_reads_a_file_the_first_backend_wrote(client: Asyn
         assert (await owner.run(['sh', '-c', 'printf shared > "$1"', 'sh', path], timeout=60)).exit_code == 0
         assert owner.ref is not None
 
-        attached = SpriteWorkspaceBackend(client=client, ref=owner.ref)
+        attached = SpritesSandboxBackend(client=client, ref=owner.ref)
         result = await attached.run(['cat', path], timeout=60)
 
         assert (result.exit_code, result.stdout) == (0, 'shared')
@@ -144,7 +144,7 @@ async def test_reattach_to_a_deleted_sprite_is_unavailable(client: AsyncSpritesC
         await (await owner.get_client()).delete()
 
         with pytest.raises(WorkspaceUnavailableError):
-            await SpriteWorkspaceBackend(client=client, ref=owner.ref).working_dir()
+            await SpritesSandboxBackend(client=client, ref=owner.ref).working_dir()
         with pytest.raises(WorkspaceUnavailableError):
             await owner.run(['true'], timeout=60)
         with pytest.raises(WorkspaceUnavailableError):
@@ -167,7 +167,7 @@ async def test_coder_shell_and_file_tools_run_in_the_sprite(client: AsyncSprites
             yield str(returns[-1].content)
 
     async with _owned(client) as backend:
-        agent = Agent(FunctionModel(stream_function=model), capabilities=[SpriteWorkspace(client=client), Coder()])
+        agent = Agent(FunctionModel(stream_function=model), capabilities=[SpritesSandbox(client=client), Coder()])
         result = await agent.run('go', workspace=backend.ref)
 
     assert 'git version' in result.output

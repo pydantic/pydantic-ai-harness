@@ -268,9 +268,6 @@ exclude = ['template', '**/.venv*', 'local-notes', 'mutants', '.agents', '.claud
 # helpers are registered via decorators and never referenced by name (matches pydantic-ai).
 executionEnvironments = [
     { root = 'pydantic-clai2', extraPaths = ['pydantic-clai2/src'] },
-    # `tests/sprites` is a package, so under the `tests` root it would shadow the `sprites` SDK;
-    # rooting it at itself keeps `import sprites` resolving to the installed SDK.
-    { root = 'tests/sprites', reportPrivateUsage = false, reportUnusedFunction = false },
     { root = 'tests', reportPrivateUsage = false, reportUnusedFunction = false },
     # `redis.asyncio.Redis` ships `py.typed` but leaves most of its command surface
     # partially unknown (`from_url`, `ping`, `scan_iter`, `ttl`). Only the live-Redis

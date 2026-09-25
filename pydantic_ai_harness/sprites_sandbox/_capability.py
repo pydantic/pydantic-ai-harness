@@ -1,4 +1,4 @@
-"""Capability that supplies a Fly.io Sprite workspace to an agent run."""
+"""Capability that supplies a Fly.io Sprite sandbox to an agent run."""
 
 from __future__ import annotations
 
@@ -14,19 +14,19 @@ from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 
 from pydantic_ai_harness._workspace import innermost_backend
 from pydantic_ai_harness._workspace_provider import check_working_dir
-from pydantic_ai_harness.sprites._backend import SpriteWorkspaceBackend
+from pydantic_ai_harness.sprites_sandbox._backend import SpritesSandboxBackend
 
 if TYPE_CHECKING:
     from pydantic_ai.agent import AgentRunResult
     from sprites import AsyncSpritesClient
 
 
-class _SuppliedBackend(SpriteWorkspaceBackend):
-    """The backend `SpriteWorkspace` built for one run; the capability closes its client when the run ends."""
+class _SuppliedBackend(SpritesSandboxBackend):
+    """The backend `SpritesSandbox` built for one run; the capability closes its client when the run ends."""
 
 
 @dataclass(kw_only=True)
-class SpriteWorkspace(AbstractCapability[AgentDepsT]):
+class SpritesSandbox(AbstractCapability[AgentDepsT]):
     """Supply a persistent [Fly.io Sprite](https://sprites.dev) workspace through `ctx.workspace`.
 
     A run with no reference creates a fresh Sprite. Pass a `WorkspaceRef` supplied by the
@@ -66,7 +66,7 @@ class SpriteWorkspace(AbstractCapability[AgentDepsT]):
         if self.defer_loading:
             # Core picks the run's workspace from the always-on capabilities only.
             raise UserError(
-                'defer_loading must be False for SpriteWorkspace: a deferred capability never supplies the workspace.'
+                'defer_loading must be False for SpritesSandbox: a deferred capability never supplies the workspace.'
             )
         # Checked here rather than at the first workspace operation, so a bad value fails where it is written.
         check_working_dir(self.working_dir)
