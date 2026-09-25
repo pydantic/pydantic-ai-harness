@@ -2,7 +2,7 @@
 
 from .config import PluginSettings
 
-# Coder, AskUser and RepoContext already have shell-integrated built-in entries.
+# Coder, AskUser, RepoContext and Notion already have shell-integrated built-in entries.
 _FACTORIES = (
     ('advisor', 'advisor:Advisor'),
     ('aws_lambda', 'aws_lambda:AWSLambdaDurability'),
@@ -38,7 +38,6 @@ _FACTORIES = (
     ('macroscope', 'macroscope:Macroscope'),
     ('memory', 'memory:Memory'),
     ('modal_sandbox', 'modal_sandbox:ModalSandbox'),
-    ('notion', 'notion:Notion'),
     ('ordinal', 'ordinal:Ordinal'),
     ('planning', 'planning:Planning'),
     ('playwright', 'playwright:PlaywrightBrowser'),
