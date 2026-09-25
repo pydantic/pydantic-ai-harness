@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -41,17 +40,8 @@ class SpritesSandbox(AbstractCapability[AgentDepsT]):
 
     client: AsyncSpritesClient | None = None
     """A caller-owned `sprites.AsyncSpritesClient`, which is never closed for you. When omitted,
-    each run's backend creates one on first use from `token` (or `SPRITE_TOKEN`) and closes it when
-    the run ends. Supply one to share its connections across runs, on one event loop."""
-
-    token: str | None = None
-    """API token for a backend-owned client; defaults to `SPRITE_TOKEN` on first use."""
-
-    base_url: str = 'https://api.sprites.dev'
-    """Sprites API endpoint for a backend-owned client."""
-
-    api_timeout: float = 30.0
-    """HTTP timeout in seconds for a backend-owned client; creation uses the SDK's own timeout."""
+    each run's backend creates one on first use from `SPRITE_TOKEN` and closes it when the run
+    ends. Supply one to share its connections across runs, on one event loop."""
 
     runtime: str | None = None
     """Runtime for a newly created Sprite."""
@@ -70,9 +60,6 @@ class SpritesSandbox(AbstractCapability[AgentDepsT]):
             )
         # Checked here rather than at the first workspace operation, so a bad value fails where it is written.
         check_working_dir(self.working_dir)
-        # `bool` is a number subclass but never a meant timeout.
-        if type(self.api_timeout) is bool or not math.isfinite(self.api_timeout) or self.api_timeout <= 0:
-            raise UserError(f'api_timeout must be a positive finite number, got {self.api_timeout!r}.')
 
     def get_workspace(self, ctx: RunContext[AgentDepsT], *, ref: WorkspaceRef | None) -> WorkspaceBackend | None:
         """Build the backend for this run. No I/O here: it attaches or creates on first use."""
@@ -82,9 +69,6 @@ class SpritesSandbox(AbstractCapability[AgentDepsT]):
         return _SuppliedBackend(
             client=self.client,
             ref=ref,
-            token=self.token,
-            base_url=self.base_url,
-            api_timeout=self.api_timeout,
             runtime=self.runtime,
             working_dir=self.working_dir,
             env=self.env,

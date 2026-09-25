@@ -17,7 +17,7 @@ Give an agent a persistent [Fly.io Sprite](https://sprites.dev) to work in. `Spr
 pip/uv-add "pydantic-ai-harness[sprites,anthropic]"
 ```
 
-Set `SPRITE_TOKEN`, or pass `token=`. The integration uses sprites-py 0.7.x.
+Set `SPRITE_TOKEN` to your Sprites API token; the capability reads it to create its client, since the SDK does not. The integration uses sprites-py 0.7.x.
 
 ## A coding agent in a Sprite
 
@@ -110,7 +110,7 @@ async def run_and_clean_up(prompt: str) -> str:
         await backend.aclose()
 ```
 
-A backend creates its own `AsyncSpritesClient` from `token=` (or `SPRITE_TOKEN`) on first use. `SpritesSandbox` closes the client of the backend it supplied when the run ends; a backend you construct is yours to close with `aclose()`. Either reopens a client if it is used again, for example through `result.workspace`. Pass `client=` to `SpritesSandbox` or the backend to share one client across runs; a client you pass is never closed for you, and must be used on the event loop it was created on.
+A backend creates its own `AsyncSpritesClient` from `SPRITE_TOKEN` on first use. `SpritesSandbox` closes the client of the backend it supplied when the run ends; a backend you construct is yours to close with `aclose()`. Either reopens a client if it is used again, for example through `result.workspace`. Pass `client=` to `SpritesSandbox` or the backend to share one client across runs, or to set its base URL or timeout; a client you pass is never closed for you, and must be used on the event loop it was created on.
 
 To delete the Sprite an agent run created, take the backend from `result.workspace.backend`; check that its `ref` is not `None` first, since `get_client()` would otherwise create a Sprite.
 
@@ -120,7 +120,7 @@ A Sprite persists after the agent run ends, with its files and installed package
 
 - Pass a finite `timeout` to bound a command. On a timeout or a cancelled call, the command is sent SIGKILL through the Sprites API, and `WorkspaceTimeoutError` carries the output produced so far. Background processes the command started, such as a `server &` or a `Shell` background job, may outlive it.
 - A deleted Sprite and rejected credentials raise `WorkspaceUnavailableError`, which ends the run. Network and connection errors propagate unchanged, so a durable execution engine can retry them.
-- The `WorkspaceRef` carries no credentials, so every worker that reattaches needs its own `SPRITE_TOKEN`. See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for how a run selects and restores its workspace.
+- The `WorkspaceRef` carries no credentials, so every worker that reattaches needs its own `SPRITE_TOKEN` or `client=`. See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for how a run selects and restores its workspace.
 
 The capability emits no telemetry spans of its own; core's agent and tool spans cover the calls made through tools.
 

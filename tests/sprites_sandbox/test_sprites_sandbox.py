@@ -57,9 +57,6 @@ class TestSpritesSandbox:
         'kwargs',
         [
             {'working_dir': 'relative'},
-            {'api_timeout': 0},
-            {'api_timeout': float('inf')},
-            {'api_timeout': True},
             {'defer_loading': True},
         ],
     )
@@ -141,7 +138,7 @@ class TestSpritesSandbox:
         assert transport.close_calls == 1
 
     async def test_run_end_leaves_caller_clients_and_backends_open(self, transport: SpriteTransport) -> None:
-        client = transport.client('test-token', 'https://api.sprites.dev', 30)
+        client = transport.client('test-token')
         agent = Agent(TestModel(), capabilities=[SpritesSandbox(client=client)])
 
         @agent.tool
@@ -260,15 +257,15 @@ class TestSpritesSandbox:
         assert (await backend.get_client()).name == 'remote'
         assert (len(transport.clients), transport.close_calls) == (1, 0)
 
-    async def test_connection_settings_reach_the_owned_client(self, transport: SpriteTransport) -> None:
-        backend = SpritesSandboxBackend(token='sentinel', base_url='https://example.invalid', api_timeout=7)
-        native = await backend.get_client()
+    async def test_owned_client_reads_sprite_token(
+        self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv('SPRITE_TOKEN', 'sentinel')
+        native = await SpritesSandboxBackend().get_client()
         assert native.client.token == 'sentinel'
-        assert native.client.base_url == 'https://example.invalid'
-        assert native.client.timeout == 7
 
     async def test_aclose_leaves_an_injected_client_open(self, transport: SpriteTransport) -> None:
-        injected = SpritesSandboxBackend(client=transport.client('test-token', 'https://api.sprites.dev', 30))
+        injected = SpritesSandboxBackend(client=transport.client('test-token'))
         await injected.get_client()
         await injected.aclose()
         assert transport.close_calls == 0

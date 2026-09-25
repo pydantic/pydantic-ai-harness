@@ -61,7 +61,7 @@ async def client(sprites_token: str) -> AsyncIterator[AsyncSpritesClient]:
 @asynccontextmanager
 async def _owned(client: AsyncSpritesClient) -> AsyncGenerator[SpritesSandboxBackend]:
     """Create a Sprite and delete it on the way out, even when the test deleted it already."""
-    backend = SpritesSandboxBackend(client=client, name=_unique('pydantic-ai-live'))
+    backend = SpritesSandboxBackend(client=client)
     native = await backend.get_client()
     try:
         yield backend

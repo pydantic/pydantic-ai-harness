@@ -175,8 +175,8 @@ class SpriteTransport:
         self.signals: list[str] = []
         self.signal_error: Exception | None = None
 
-    def client(self, token: str, base_url: str, timeout: float) -> AsyncSpritesClient:
-        client = AsyncSpritesClient(token=token, base_url=base_url, timeout=timeout)
+    def client(self, token: str) -> AsyncSpritesClient:
+        client = AsyncSpritesClient(token=token)
         self.clients.append(client)
         return client
 

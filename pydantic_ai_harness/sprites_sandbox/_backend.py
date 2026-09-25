@@ -3,8 +3,8 @@
 External assumptions last verified 2026-09-25 against sprites-py 0.7.0 source, the Sprites API
 docs, and (2026-09-15) a local WebSocket transport probe, with no live cloud calls:
 
-* `AsyncSpritesClient` accepts token, base URL, and HTTP timeout; sprite creation uses the SDK's
-  fixed 120-second request timeout, while `aclose` closes the local async HTTP client and control pools:
+* `AsyncSpritesClient` requires its token as an argument and reads no environment variable; sprite
+  creation uses the SDK's fixed 120-second request timeout, while `aclose` closes the local async HTTP client and control pools:
   https://github.com/superfly/sprites-py/blob/v0.7.0/src/sprites/async_client.py
 * `create_sprite` and `get_sprite` raise `AuthenticationError` (401), `NotFoundError` (404),
   `NetworkError` (transport), and a plain `SpriteError` for any other HTTP failure:
@@ -73,7 +73,9 @@ _T = TypeVar('_T')
 _CONTROL_TIMEOUT = 6.0
 # Above the SDK's fixed 120-second creation request timeout, so the SDK's own error wins when it fires.
 _ACQUIRE_TIMEOUT = 150.0
-_AUTH_MESSAGE = 'Sprites rejected the credentials. Set SPRITE_TOKEN or pass token= and try again.'
+_AUTH_MESSAGE = (
+    'Sprites rejected the credentials. Set SPRITE_TOKEN, or pass a configured `AsyncSpritesClient` as `client=`.'
+)
 
 
 async def _cleanup_call(call: Callable[[], Awaitable[object]], *, timeout: float) -> Exception | None:
@@ -166,6 +168,8 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
     """A Fly.io Sprite behind the Pydantic AI `WorkspaceBackend` protocol.
 
     Construction does no I/O. The typed `sprites.AsyncSprite` is available through `get_client()`.
+    Without `client=`, the backend creates an `AsyncSpritesClient` from `SPRITE_TOKEN` on first use
+    and closes it in `aclose()`.
     The backend does not delete the Sprite; that is the application's job, through the native
     handle. Commands run under `/bin/sh -c` with `shell=True`, in the Sprite's own environment
     plus `env`. Every command gets its own asyncio control connection, which is closed before the
@@ -178,10 +182,6 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
         workspace: AsyncSprite | None = None,
         client: AsyncSpritesClient | None = None,
         ref: WorkspaceRef | None = None,
-        name: str | None = None,
-        token: str | None = None,
-        base_url: str = 'https://api.sprites.dev',
-        api_timeout: float = 30.0,
         runtime: str | None = None,
         working_dir: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -192,10 +192,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
             raise ValueError('pass either `workspace` or `ref`, not both')
         self._workspace = workspace
         self._ref = ref if workspace is None else WorkspaceRef(provider='sprites', id=workspace.name)
-        self._name = name or f'pydantic-ai-{uuid.uuid4().hex}'
-        self._token = token
-        self._base_url = base_url
-        self._api_timeout = api_timeout
+        self._name = f'pydantic-ai-{uuid.uuid4().hex}'
         self._runtime = runtime
         self._working_dir = absolute_path('working_dir', working_dir)
         self._env = dict(env or {})
@@ -226,10 +223,11 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
 
             client = self._client
             if client is None:
-                token = self._token or os.getenv('SPRITE_TOKEN')
+                # The SDK reads no environment variable, so the token comes from `SPRITE_TOKEN` here.
+                token = os.getenv('SPRITE_TOKEN')
                 if not token:
                     raise WorkspaceUnavailableError(_AUTH_MESSAGE)
-                client = AsyncSpritesClient(token=token, base_url=self._base_url, timeout=self._api_timeout)
+                client = AsyncSpritesClient(token=token)
                 self._client = client
 
             ref = self._ref

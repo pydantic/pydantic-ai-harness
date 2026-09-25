@@ -61,8 +61,8 @@ class TestLiveSpritesSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover 
     # destroy rule last.
     @pytest.fixture(scope='class')
     @classmethod
-    async def backend(cls, sprites_token: str) -> AsyncIterator[SpritesSandboxBackend]:
-        backend = SpritesSandboxBackend(token=sprites_token)
+    async def backend(cls) -> AsyncIterator[SpritesSandboxBackend]:
+        backend = SpritesSandboxBackend()
         yield backend
         if backend.ref is not None:
             from sprites.exceptions import NotFoundError  # noqa: PLC0415 - optional extra, absent on slim installs
