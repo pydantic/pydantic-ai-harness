@@ -534,9 +534,11 @@ which are stored in plaintext:
 `/day_ai` shows which one is in use. `/day_ai connect` lets you pick a saved key
 from `/keys`, type a new one (masked, saved as `DAY_AI_ACCESS_TOKEN` after
 asking before replacing an existing value), or leave it empty for browser
-sign-in. It saves only the key's name as the plugin's `token` setting, for
-example `{"token": {"name": "WORK_DAY_AI"}}`; `/plugins reload day_ai` applies
-it. A `token` that names a missing key does not fall back to the browser.
+sign-in. It saves your choice as the plugin's `auth` setting, the same option
+harness `DayAI` takes: a key's name such as `{"auth": {"name": "WORK_DAY_AI"}}`,
+or `{"auth": "oauth"}` to keep using the browser even when
+`DAY_AI_ACCESS_TOKEN` is saved. `/plugins reload day_ai` applies it. An `auth`
+that names a missing key does not fall back to the browser.
 
 The server does not mark tools read-only, so, as with harness `DayAI`, there is
 no `read_only` option: the model gets every tool your tier and role allow,

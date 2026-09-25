@@ -1,8 +1,8 @@
 """The built-in `day_ai` plugin: harness `DayAI`, with a token from `/keys` or a browser sign-in.
 
-Settings hold at most the name of a `/keys` entry, never a token. Without one, the plugin uses the conventional
-`DAY_AI_ACCESS_TOKEN` entry when it exists, and otherwise signs in the way `/mcp` does for an OAuth server:
-FastMCP's browser flow, with tokens kept in the keyring under `mcp-day_ai`. `/mcp` server names cannot contain
+Settings hold at most the name of a `/keys` entry, never a token. Unset, the plugin uses the conventional
+`DAY_AI_ACCESS_TOKEN` entry when it exists, and otherwise (or with `'oauth'`) signs in the way `/mcp` does for an
+OAuth server: FastMCP's browser flow, with tokens kept in the keyring under `mcp-day_ai`. `/mcp` server names cannot contain
 underscores, so that credential never belongs to one of your servers. The environment is not read.
 """
 
@@ -42,9 +42,11 @@ class DayAISettings(BaseModel):
     """The JSON a `day_ai` declaration may carry. It names a token in `/keys`; it can never hold one."""
 
     model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
-    token: KeyReference | None = Field(
+    auth: KeyReference | Literal['oauth'] | None = Field(
         default=None,
-        description=f'The saved API key in /keys to connect with. Unset uses {KEY_NAME} when saved, else the browser.',
+        description=(
+            f"A saved API key in /keys, or 'oauth' for browser sign-in. Unset uses {KEY_NAME} when saved, else the browser."
+        ),
     )
 
 
@@ -52,14 +54,14 @@ def activate(host: PluginHost[DepsT]) -> None:
     """Add `DayAI` with a `/keys` token resolved on every run, or sign in through the browser before loading."""
     settings = host.settings(DayAISettings)
     saved = load_keys()
-    token = settings.token or (KeyReference(name=KEY_NAME) if KEY_NAME in saved else None)
-    _register_command(host, settings, token)
-    if token is not None:
-        host.add(DayAI[DepsT](auth=SavedKey(name=token.name, setup=SETUP)))
-        if token.name not in saved:
+    auth = settings.auth or (KeyReference(name=KEY_NAME) if KEY_NAME in saved else 'oauth')
+    _register_command(host, settings, auth)
+    if isinstance(auth, KeyReference):
+        host.add(DayAI[DepsT](auth=SavedKey(name=auth.name, setup=SETUP)))
+        if auth.name not in saved:
             # Loading anyway keeps `/day_ai connect` available; each run fails closed until the key is saved.
             host.console.print(
-                f'Day AI has no token: {token.name} is not in /keys. {SETUP}',
+                f'Day AI has no token: {auth.name} is not in /keys. {SETUP}',
                 style=theme.color(theme.WARNING),
                 markup=False,
             )
@@ -78,23 +80,22 @@ def activate(host: PluginHost[DepsT]) -> None:
             pass
 
 
-def _register_command(host: PluginHost[DepsT], settings: DayAISettings, token: KeyReference | None) -> None:
+def _register_command(host: PluginHost[DepsT], settings: DayAISettings, auth: KeyReference | Literal['oauth']) -> None:
     async def day_ai(args: list[str]) -> str:
         if args == ['connect']:
             choice = await _choose()
             if choice is None:
                 return 'Day AI connection unchanged.'
-            if choice == 'browser':
-                host.save_settings(settings.model_copy(update={'token': None}))
+            host.save_settings(settings.model_copy(update={'auth': choice}))
+            if choice == 'oauth':
                 return f'Day AI will sign in through the browser. {_RELOAD}'
-            host.save_settings(settings.model_copy(update={'token': choice}))
             return f'Day AI will use the saved key {choice.name}; manage it in /keys. {_RELOAD}'
         if args:
             raise ValueError(_USAGE)
-        if token is None:
+        if auth == 'oauth':
             return 'Day AI signs in through the browser. /day_ai connect chooses a token from /keys instead.'
-        saved = token.name in await asyncio.to_thread(load_keys)
-        return f'Day AI token: {token.name} in /keys ({"saved" if saved else "missing"}).'
+        saved = auth.name in await asyncio.to_thread(load_keys)
+        return f'Day AI token: {auth.name} in /keys ({"saved" if saved else "missing"}).'
 
     host.commands.register(
         Command(
@@ -106,7 +107,7 @@ def _register_command(host: PluginHost[DepsT], settings: DayAISettings, token: K
     )
 
 
-async def _choose() -> KeyReference | Literal['browser'] | None:
+async def _choose() -> KeyReference | Literal['oauth'] | None:
     """Pick a saved key, save a masked new value as `DAY_AI_ACCESS_TOKEN`, or choose the browser; `None` cancels."""
     prompt: PromptSession[str] = PromptSession()
     choice = await prompt_api_key(prompt=prompt, label=_LABEL, optional=True)
@@ -114,7 +115,7 @@ async def _choose() -> KeyReference | Literal['browser'] | None:
         return choice
     value = choice.strip()
     if not value:
-        return 'browser'
+        return 'oauth'
     if KEY_NAME in await asyncio.to_thread(load_keys):
         try:
             answer = await prompt.prompt_async(f'Replace {KEY_NAME} for every plugin that uses it? [y/N]: ')

@@ -95,6 +95,11 @@ class Shell:
     async def run(self, text: str) -> str:
         return await self.commands.execute_async(text)
 
+    async def reload(self) -> None:
+        """What `/plugins reload` does, minus re-importing, which would undo the `Client` stand-in."""
+        await self.loader.unload('day_ai')
+        await self.loader.load('day_ai')
+
 
 @pytest.fixture(autouse=True)
 def sign_in(monkeypatch: pytest.MonkeyPatch) -> type[SignIn]:
@@ -137,7 +142,7 @@ async def test_conventional_key_is_used_and_resolved_on_every_run(
 
 
 async def test_named_key_missing_still_loads_and_fails_closed(tmp_path: Path) -> None:
-    shell = Shell(tmp_path, terminal=False, settings={'token': {'name': 'WORK_DAY_AI'}})
+    shell = Shell(tmp_path, terminal=False, settings={'auth': {'name': 'WORK_DAY_AI'}})
     await shell.loader.enable('day_ai')
     assert shell.loader.capabilities() == with_key('WORK_DAY_AI')
     assert 'Day AI has no token: WORK_DAY_AI is not in /keys.' in shell.output.getvalue()
@@ -147,8 +152,8 @@ async def test_named_key_missing_still_loads_and_fails_closed(tmp_path: Path) ->
 
 
 async def test_settings_cannot_hold_a_token(tmp_path: Path) -> None:
-    shell = Shell(tmp_path, settings={'token': 'secret'})
-    with pytest.raises(PluginError, match='token'):
+    shell = Shell(tmp_path, settings={'auth': 'secret'})
+    with pytest.raises(PluginError, match='auth'):
         await shell.loader.enable('day_ai')
     assert shell.loader.capabilities() == []
 
@@ -217,9 +222,9 @@ async def test_connect_saves_a_new_token_in_keys_and_only_its_name_in_settings(
     ]
     assert api_keys.load_keys()['DAY_AI_ACCESS_TOKEN'].get_secret_value() == 'day-secret'
     [saved] = shell.store.plugins()
-    assert saved.enabled and saved.settings == {'token': {'name': 'DAY_AI_ACCESS_TOKEN'}}
+    assert saved.enabled and saved.settings == {'auth': {'name': 'DAY_AI_ACCESS_TOKEN'}}
     assert b'day-secret' not in shell.path.read_bytes()
-    await shell.loader.reload('day_ai')
+    await shell.reload()
     assert shell.loader.capabilities() == with_key()
     await shell.loader.close('exit')
 
@@ -232,15 +237,32 @@ async def test_connect_to_an_existing_key_then_back_to_the_browser(
     await shell.loader.enable('day_ai')
     Prompts(monkeypatch, KeyReference(name='WORK_DAY_AI'))
     await shell.run('/day_ai connect')
-    assert shell.store.plugins()[0].settings == {'token': {'name': 'WORK_DAY_AI'}}
+    assert shell.store.plugins()[0].settings == {'auth': {'name': 'WORK_DAY_AI'}}
     assert b'work-secret' not in shell.path.read_bytes()
-    await shell.loader.reload('day_ai')
+    await shell.reload()
     assert shell.loader.capabilities() == with_key('WORK_DAY_AI')
     Prompts(monkeypatch, '  ')
     assert await shell.run('/day_ai connect') == (
         'Day AI will sign in through the browser. Run /plugins reload day_ai to connect with it.'
     )
-    assert shell.store.plugins()[0].settings == {'token': None}
+    assert shell.store.plugins()[0].settings == {'auth': 'oauth'}
+    await shell.loader.close('exit')
+
+
+async def test_choosing_the_browser_sticks_even_with_the_conventional_key_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api_keys.save_key(name='DAY_AI_ACCESS_TOKEN', value='shared-with-another-tool')
+    shell = Shell(tmp_path)
+    await shell.loader.enable('day_ai')
+    assert shell.loader.capabilities() == with_key()
+    Prompts(monkeypatch, '')
+    await shell.run('/day_ai connect')
+    await shell.reload()
+    assert isinstance(browser_client(shell), StreamableHttpTransport)
+    assert await shell.run('/day_ai') == (
+        'Day AI signs in through the browser. /day_ai connect chooses a token from /keys instead.'
+    )
     await shell.loader.close('exit')
 
 
