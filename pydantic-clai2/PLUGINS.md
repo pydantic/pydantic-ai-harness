@@ -385,8 +385,8 @@ order plugin instructions, renderers, and status segments are consulted in.
 
 `/plugins` and `/plugins list` also include every other public harness capability,
 including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
-appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
+`Coder`, `AskUser`, `RepoContext`, and `PostHog` use the integrated entries
+(`posthog` is described below) instead of appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
 are not separate capabilities.
 
 Press Space to enable an entry. Its preview shows the import path and any load
@@ -506,6 +506,36 @@ The request and its response are also emitted as `AskUserRequestedEvent` and
 `AskUserAnsweredEvent`, so a plugin that only wants to watch (log the question,
 show a "waiting for you" state) registers `@host.on(EventClass)` or
 `@host.render(EventClass)` without being the answerer.
+
+### `posthog`: PostHog analytics, signed in for CLAI
+
+`posthog` (`pydantic_clai2.posthog`) connects the agent to PostHog's hosted MCP
+server through harness [`PostHog`](../docs/posthog.md). It starts disabled;
+`/plugins enable posthog` turns it on. It signs in with the first of:
+
+1. `POSTHOG_PERSONAL_API_KEY` in the environment,
+2. a key saved in `/keys` under the name `POSTHOG_PERSONAL_API_KEY`,
+3. a browser sign-in, opened by the first prompt that uses PostHog. Its tokens
+   go to the keyring (the `mcp-posthog_plugin` entry under `pydantic-clai2`), the
+   same storage `/mcp` uses for OAuth servers, so the sign-in lasts across turns
+   and launches.
+
+Create the key with PostHog's "MCP Server" preset. `/posthog` shows which
+credential is in use; `/posthog logout` forgets the browser sign-in. Settings:
+
+| Key | Default | Does |
+|---|---|---|
+| `read_only` | `true` | ask the server for read-only tools only; `false` also allows changes such as editing feature flags |
+| `auth` | unset | `"api_key"` requires the key and fails on enable without one; `"oauth"` always uses the browser sign-in |
+
+```text
+/plugins add posthog pydantic_clai2.posthog '{"read_only": false}'
+```
+
+The plugin builds the connection itself instead of passing `auth='oauth'` to
+`PostHog`, because harness `PostHog` connects once per run and would keep
+browser tokens only in memory, prompting on every turn. It does not offer
+`PostHog`'s `features` filter.
 
 ## Managing plugins
 

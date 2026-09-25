@@ -38,6 +38,7 @@ def test_catalog_covers_public_harness_capabilities() -> None:
         'pydantic_ai_harness.coder:Coder',
         'pydantic_ai_harness.ask_user:AskUser',
         'pydantic_ai_harness.repo_context:RepoContext',
+        'pydantic_ai_harness.posthog:PostHog',
     }
     assert {plugin.factory for plugin in HARNESS_PLUGINS} | integrated == expected
     assert all(not plugin.enabled for plugin in HARNESS_PLUGINS)
