@@ -121,13 +121,13 @@ async def terminate_sandbox(ref: WorkspaceRef) -> None:
 
 `get_client()` returns the `modal.Sandbox`. A sandbox you don't terminate ends when its `sandbox_timeout` runs out, or after `idle_timeout` seconds without activity if you set one. See [Modal's timeouts](https://modal.com/docs/guide/sandbox#timeouts).
 
-A failed run returns no result, so there is no ref to store. To terminate the sandbox when a run ends, including a failed one, do it in a `wrap_run` hook (`try`/`finally`), or in both `after_run` and `on_run_error`: `after_run` doesn't run when a run fails.
+A failed run returns no result, so there is no ref to store. To terminate its sandbox, clean up in an `on_run_error` hook; `after_run` doesn't run when a run fails:
 
 ```python
 from typing import Any
 
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.capabilities import Hooks, WrapRunHandler
+from pydantic_ai.capabilities import Hooks
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.modal_sandbox import ModalSandbox
@@ -135,13 +135,11 @@ from pydantic_ai_harness.modal_sandbox import ModalSandbox
 hooks = Hooks()
 
 
-@hooks.on.run
-async def terminate_after_run(ctx: RunContext[None], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
-    try:
-        return await handler()
-    finally:
-        if ctx.workspace.ref is not None:
-            await terminate_sandbox(ctx.workspace.ref)
+@hooks.on.run_error
+async def terminate_failed_run(ctx: RunContext[None], *, error: BaseException) -> AgentRunResult[Any]:
+    if ctx.workspace.ref is not None:
+        await terminate_sandbox(ctx.workspace.ref)
+    raise error
 
 
 agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(), Coder(), hooks])
