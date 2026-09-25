@@ -121,14 +121,14 @@ or allowlist commands.
 Results are bounded by `FileSystem`'s caps (2,000 lines or 60,000 characters per `read_file`, 1,000 lines or files per search or listing) and Coder's 64,000-character
 tool-output limit; a truncation marker means more output was omitted, so narrow the search rather than
 assuming it was complete. A `read_file` window stays under the output limit, so paging by `offset` never skips lines. Use `shell` for `mkdir`, `find`, process inspection, and `kill`. File writes
-keep the standalone filesystem's protected-path rules (`.git`, `.env`, keys, and secrets); shell can bypass
+keep the standalone filesystem's read-only path rules (`.git`, `.env`, keys, and secrets); shell can bypass
 these rules. Coder does not include planning, delegation, or the run-scoped `run_command` family.
 
 ## Filesystem scope
 
 File tools are scoped to the workspace's working directory by default. For trusted local use,
 `Coder(unrestricted_filesystem=True)` sets `FileSystem(root_dir='/',
-protected_patterns=[])`: relative paths still resolve from the working directory, and absolute paths anywhere in
+read_only_patterns=[])`: relative paths still resolve from the working directory, and absolute paths anywhere in
 the run's workspace are accepted, such as `/tmp/example.py`. OS permissions and file-change event listeners still apply. This permits
 modifying secrets and repository metadata: use it only when you trust the agent and its inputs. Shell commands
 were already unrestricted.

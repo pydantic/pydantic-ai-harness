@@ -272,9 +272,9 @@ class TestWorkspaceMount:
         'file_system',
         [
             FileSystem[None](),
-            FileSystem[None](protected_patterns=[], read_only=True),
-            FileSystem[None](protected_patterns=[], tools=['read_file', 'list_files']),
-            FileSystem[None](protected_patterns=[], tools=['read_file', 'edit_file']),
+            FileSystem[None](read_only_patterns=[], read_only=True),
+            FileSystem[None](read_only_patterns=[], tools=['read_file', 'list_files']),
+            FileSystem[None](read_only_patterns=[], tools=['read_file', 'edit_file']),
         ],
         ids=['protected', 'read_only', 'read_tools', 'no_write_file'],
     )
@@ -288,19 +288,19 @@ class TestWorkspaceMount:
         for granted in (
             [FileSystem[None](denied_patterns=['.env'])],
             [FileSystem[None](allowed_patterns=['src/*'])],
-            [FileSystem[None](protected_patterns=[], tools=['write_file'])],
+            [FileSystem[None](read_only_patterns=[], tools=['write_file'])],
             [FileSystem[None](tools=['file_info', 'list_directory'])],
             [customization_guide()],
             [FileSystem[None](), FileSystem[None](root_dir='/')],
-            [FileSystem[None](protected_patterns=[]), dynamic],
-            [FileSystem[None](protected_patterns=[]), DynamicCapability[None](dynamic)],
+            [FileSystem[None](read_only_patterns=[]), dynamic],
+            [FileSystem[None](read_only_patterns=[]), DynamicCapability[None](dynamic)],
         ):
             assert mount_mode(granted) is None
 
     @pytest.mark.parametrize(
         ('file_system', 'seen', 'kept'),
         [
-            (FileSystem(protected_patterns=[]), 'original', False),
+            (FileSystem(read_only_patterns=[]), 'original', False),
             (FileSystem(), 'original PermissionError', True),
             (FileSystem(denied_patterns=['.env']), 'FileNotFoundError FileNotFoundError', True),
         ],
@@ -346,7 +346,7 @@ class TestWorkspaceMount:
             )
             return ModelResponse(parts=[next(calls, TextPart('done'))])
 
-        file_system = FileSystem(protected_patterns=[])
+        file_system = FileSystem(read_only_patterns=[])
         sandbox = speculative_capabilities(SpeculationCounters(), (file_system,))
         capabilities: list[AbstractCapability[object]] = [
             SandboxPlugin(tmp_path),

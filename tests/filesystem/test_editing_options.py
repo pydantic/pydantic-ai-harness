@@ -237,7 +237,7 @@ class TestRootAboveTheWorkingDirectory:
             tools=FILE_SYSTEM_TOOL_NAMES,
             allowed_patterns=['project/*.txt'],
             denied_patterns=['project/denied.txt'],
-            protected_patterns=['project/allowed.txt'],
+            read_only_patterns=['project/allowed.txt'],
         )
         workspace = local_workspace(project)
 

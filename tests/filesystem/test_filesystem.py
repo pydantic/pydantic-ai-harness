@@ -28,6 +28,7 @@ from pydantic_ai.workspaces import (
     WorkspaceRef,
 )
 
+from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness._workspace import READ_ONLY_FAILURE
 from pydantic_ai_harness.filesystem import (
     FILE_SYSTEM_TOOL_NAMES,
@@ -260,7 +261,7 @@ def toolset(fs_root: Path) -> FileSystemToolset[None]:
         root_dir=fs_root,
         allowed_patterns=[],
         denied_patterns=[],
-        protected_patterns=['.git/*', '.env', '.env.*'],
+        read_only_patterns=['.git/*', '.env', '.env.*'],
         max_read_lines=2000,
         max_list_results=1000,
         max_search_results=1000,
@@ -327,7 +328,7 @@ class TestPathSecurity:
         assert (fs_root / 'token.secret').read_text() == 'original\n'
 
     async def test_root_at_the_filesystem_root_without_patterns_resolves_no_symlinks(self, fs_root: Path) -> None:
-        toolset = FileSystem[None](root_dir='/', protected_patterns=[]).get_toolset()
+        toolset = FileSystem[None](root_dir='/', read_only_patterns=[]).get_toolset()
         assert isinstance(toolset, FileSystemToolset)
         workspace = CountingWorkspace(fs_root)
         await toolset.write_file('new.txt', 'x\n', workspace=workspace)
@@ -427,7 +428,7 @@ class TestAccessPatterns:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=['*.secret'],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -441,7 +442,7 @@ class TestAccessPatterns:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=['*.secret'],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -455,7 +456,7 @@ class TestAccessPatterns:
             root_dir=fs_root,
             allowed_patterns=['*.py'],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -469,7 +470,7 @@ class TestAccessPatterns:
             root_dir=fs_root,
             allowed_patterns=['*.py'],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -499,7 +500,7 @@ class TestAccessPatterns:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -513,7 +514,7 @@ class TestAccessPatterns:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -528,7 +529,7 @@ class TestAccessPatterns:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=['*.pem'],
+            read_only_patterns=['*.pem'],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -544,7 +545,7 @@ class TestAccessPatterns:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=['*.secret'],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -560,7 +561,7 @@ class TestAccessPatterns:
             root_dir=fs_root,
             allowed_patterns=['*.py'],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -850,7 +851,7 @@ class TestListDirectory:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=['*'],
+            read_only_patterns=['*'],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -868,7 +869,7 @@ class TestListDirectory:
             root_dir=fs_root,
             allowed_patterns=['*.py'],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -885,7 +886,7 @@ class TestListDirectory:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=['*.secret'],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -902,7 +903,7 @@ class TestListDirectory:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=5,
             max_search_results=1000,
@@ -920,7 +921,7 @@ class TestListDirectory:
             root_dir=tmp_path,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=3,
             max_search_results=1000,
@@ -977,7 +978,7 @@ class TestSearchFiles:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=50,
@@ -992,7 +993,7 @@ class TestSearchFiles:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=['*'],
+            read_only_patterns=['*'],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -1008,7 +1009,7 @@ class TestSearchFiles:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=['*.secret'],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -1027,7 +1028,7 @@ class TestSearchFiles:
             root_dir=fs_root,
             allowed_patterns=['*.py'],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -1043,7 +1044,7 @@ class TestSearchFiles:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=5,
@@ -1060,7 +1061,7 @@ class TestSearchFiles:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=2,
@@ -1078,7 +1079,7 @@ class TestSearchFiles:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=2,
@@ -1094,7 +1095,7 @@ class TestSearchFiles:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=0,
@@ -1160,7 +1161,7 @@ class TestFindFiles:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -1188,7 +1189,7 @@ class TestFindFiles:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -1203,7 +1204,7 @@ class TestFindFiles:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=['*'],
+            read_only_patterns=['*'],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -1219,7 +1220,7 @@ class TestFindFiles:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=['*.secret'],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -1238,7 +1239,7 @@ class TestFindFiles:
             root_dir=fs_root,
             allowed_patterns=['*.py'],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -1348,7 +1349,7 @@ class TestWalkerEntryResolution:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=['*.secret'],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -1370,7 +1371,7 @@ class TestWalkerEntryResolution:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=['*.secret'],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -1563,7 +1564,7 @@ class TestMutationKillers:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=5,
@@ -1584,7 +1585,7 @@ class TestMutationKillers:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -1940,10 +1941,22 @@ class TestFileSystemCapability:
             '</returns>'
         )
 
-    def test_protected_defaults(self) -> None:
+    def test_read_only_defaults(self) -> None:
         fs = FileSystem()
-        assert '.git/*' in fs.protected_patterns
-        assert '.env' in fs.protected_patterns
+        assert '.git/*' in fs.read_only_patterns
+        assert '.env' in fs.read_only_patterns
+
+    def test_protected_patterns_is_a_deprecated_alias(self) -> None:
+        with pytest.warns(
+            HarnessDeprecationWarning, match=r'`FileSystem\(protected_patterns=\.\.\.\)` has been renamed'
+        ):
+            fs = FileSystem(protected_patterns=['*.lock'])
+        assert fs.read_only_patterns == ['*.lock']
+        assert replace(fs, read_only_patterns=[]).read_only_patterns == []
+
+    def test_protected_patterns_with_read_only_patterns_rejected(self) -> None:
+        with pytest.raises(TypeError, match='`protected_patterns` is its deprecated name'):
+            FileSystem(read_only_patterns=['*.lock'], protected_patterns=['*.lock'])
 
     def test_non_positive_max_read_lines_rejected(self) -> None:
         with pytest.raises(ValueError, match='max_read_lines must be a positive integer'):
@@ -1991,7 +2004,7 @@ class TestPatternCanonicalization:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=['config/secret.txt'],
-            protected_patterns=[],
+            read_only_patterns=[],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,
@@ -2009,7 +2022,7 @@ class TestPatternCanonicalization:
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=['**/secrets*'],
+            read_only_patterns=['**/secrets*'],
             max_read_lines=2000,
             max_list_results=1000,
             max_search_results=1000,

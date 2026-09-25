@@ -186,7 +186,7 @@ def mount_mode(granted: Sequence[AgentCapability[AgentDepsT]]) -> MountMode | No
     caller had restricted (Veria, #1078). The mount is the workspace's working directory, which
     `root_dir` always contains, and only when the file system registers `read_file`, since
     `pathlib` reads any file's content. It is writable only when it may also write every file there: `write_file` registered, not `read_only`, and no
-    `protected_patterns`. A mount cannot express `allowed_patterns` or `denied_patterns`, so either one
+    `read_only_patterns`. A mount cannot express `allowed_patterns` or `denied_patterns`, so either one
     leaves the sandbox unmounted, as do zero or several file systems and any capability function
     or `DynamicCapability`, which may only resolve to a file system at run time.
     """
@@ -202,7 +202,7 @@ def mount_mode(granted: Sequence[AgentCapability[AgentDepsT]]) -> MountMode | No
     tools = set(file_system.tools)
     if file_system.allowed_patterns or file_system.denied_patterns or 'read_file' not in tools:
         return None
-    writable = 'write_file' in tools and not file_system.read_only and not file_system.protected_patterns
+    writable = 'write_file' in tools and not file_system.read_only and not file_system.read_only_patterns
     return 'read-write' if writable else 'read-only'
 
 
