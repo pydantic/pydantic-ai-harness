@@ -6,8 +6,9 @@ name: Sandbox live nightly
 # every provider daily against `main` to catch that, and opens an issue when a run fails.
 #
 # A manual run tests any providers on any ref. To run the live tests for a fork's pull
-# request, read its diff first, then pass `refs/pull/<number>/head`: this workflow's
-# definition still comes from `main`, and the secrets it hands out are sandbox tokens.
+# request, read its diff first, then pass `refs/pull/<number>/head` and leave "Use workflow
+# from" on `main`: the workflow definition then comes from `main`, and only the tested code
+# comes from the fork.
 
 on:
   schedule:
