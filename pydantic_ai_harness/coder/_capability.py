@@ -6,10 +6,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability
-from pydantic_ai.tools import AgentDepsT, RunContext
+from pydantic_ai.tools import AgentDepsT
 
 from pydantic_ai_harness._warn import warn_argument_ignored
-from pydantic_ai_harness._workspace import require_workspace
+from pydantic_ai_harness._workspace import RequireWorkspace
 from pydantic_ai_harness.coder._instructions import INSTRUCTIONS
 from pydantic_ai_harness.compaction import ClearToolResults, WarnNearLimits
 from pydantic_ai_harness.filesystem import FileSystem
@@ -20,17 +20,6 @@ from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Trunc
 
 FILE_TOOL_NAMES: tuple[str, ...] = ('read_file', 'write_file', 'edit_file', 'list_files', 'grep')
 """The `FileSystem` tools `Coder` registers; `shell` covers directory creation, file metadata, and the rest."""
-
-
-class _RequireWorkspace(AbstractCapability[AgentDepsT]):
-    """Fails a run without a workspace before any bundled capability does, so the message names `Coder`.
-
-    A combined capability's hooks are flattened into the agent's, so this is a member rather than
-    an override of `Coder.before_run`, and it comes first.
-    """
-
-    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
-        require_workspace(ctx.workspace, 'Coder')
 
 
 class _BoundToolOutputs(ToolOutputLimits[AgentDepsT]):
@@ -87,7 +76,7 @@ class Coder(CombinedCapability[AgentDepsT]):
                 stacklevel=3,
             )
         capabilities: list[AbstractCapability[AgentDepsT]] = [
-            _RequireWorkspace[AgentDepsT](),
+            RequireWorkspace[AgentDepsT]('Coder'),
             Capability[AgentDepsT](instructions=INSTRUCTIONS + ('\n' + instructions if instructions else '')),
             _file_system(unrestricted=unrestricted_filesystem),
             Shell[AgentDepsT](

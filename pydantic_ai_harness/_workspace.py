@@ -1,11 +1,13 @@
 """Private helpers for capabilities adopting the run sandbox."""
 
 import posixpath
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ToolFailed, UserError
+from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.workspaces import (
     SupportsCommands,
     Workspace,
@@ -84,6 +86,21 @@ def require_workspace(workspace: Workspace, owner: str) -> None:
             "to the agent's capabilities, or pass `workspace=` to the run. "
             'See https://pydantic.dev/docs/ai/workspace/'
         )
+
+
+@dataclass
+class RequireWorkspace(AbstractCapability[AgentDepsT]):
+    """Fails a run without a workspace at its start, naming `owner`.
+
+    A member of a combined capability, placed first: a combined capability's hooks are flattened
+    into the agent's, so this runs before any bundled capability's own check and the message names
+    the harness the developer added.
+    """
+
+    owner: str
+
+    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
+        require_workspace(ctx.workspace, self.owner)
 
 
 def secondary_workspace(value: WorkspaceBackend | None, owner: str) -> Workspace | None:
