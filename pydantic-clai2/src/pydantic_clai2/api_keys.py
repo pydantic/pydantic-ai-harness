@@ -25,7 +25,7 @@ class KeyReference(BaseModel):
     name: str = Field(min_length=1)
 
 
-KEY_CONSUMERS = {'vllm': '/add_model', 'openrouter': '/add_model', 'slack': '/slack'}
+KEY_CONSUMERS = {'vllm': '/add_model', 'openrouter': '/add_model', 'slack': '/plugins configure slack'}
 """Credential-store accounts that may reference a named key, and the command that reconfigures each."""
 
 
@@ -95,16 +95,14 @@ def _load_keys() -> dict[str, SecretStr]:
         raise UserError('Stored API keys are invalid. Repair the api-keys credential bundle.') from None
 
 
-def save_key(*, name: str, value: str, replace: bool = True) -> str:
-    """Save one key without touching unrelated credentials or SQLite; `replace=False` refuses an existing name."""
+def save_key(*, name: str, value: str) -> str:
+    """Save one key without touching unrelated credentials or SQLite."""
     name = normalize_name(name=name)
     value = value.strip()
     if not value:
         raise ValueError('An API key is required.')
     with key_transaction():
         keys = _load_keys()
-        if not replace and name in keys:
-            raise ValueError(f'{name} already exists in /keys. Choose it from the list, or replace its value in /keys.')
         keys[name] = SecretStr(value)
         _save_keys(keys=keys)
     path = credentials_path(account='api-keys')
