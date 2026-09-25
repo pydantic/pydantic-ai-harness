@@ -562,13 +562,6 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Whether a path a walk reached still leads inside the root once symlinks are resolved."""
         return not scope.checks_realpath or _contains(scope.root, await scope.workspace.realpath(path))
 
-    async def _entry_inside(self, scope: _Scope, entry: WorkspaceFileEntry) -> bool:
-        """Whether a listed entry leads inside the root, resolving only an entry that is or may be a symlink.
-
-        Walks list only directories inside the root, so an entry that is not a symlink is inside too.
-        """
-        return entry.is_symlink is False or await self._real_path_inside(scope, entry.path)
-
     def _check_access(self, path: str, *, write: bool = False, check_allowed: bool = True) -> None:
         """Validate path against allow/deny/read-only patterns.
 
@@ -666,7 +659,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Entries below `directory`, walked iteratively with `list_dir`, and whether the walk was cut short.
 
         Hidden directories are not descended into, since everything under them
-        is hidden, nor is a symlinked directory that leads outside the root, and a
+        is hidden, nor is a directory whose real path is outside the root, and a
         subdirectory that cannot be listed (removed mid-walk, unreadable, a symlink
         loop the backend reports) is skipped. `max_depth` bounds how many levels
         below `directory` are listed. The walk stops at `_MAX_WALK_DIRECTORIES`
@@ -692,7 +685,11 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             entries.extend(children)
             if max_depth is None or depth < max_depth:
                 for child in children:
-                    if child.is_dir and not child.name.startswith('.') and await self._entry_inside(scope, child):
+                    if (
+                        child.is_dir
+                        and not child.name.startswith('.')
+                        and await self._real_path_inside(scope, child.path)
+                    ):
                         pending.append((child.path, depth + 1))
         return entries, False
 
@@ -1068,7 +1065,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         for entry in sorted(children, key=lambda child: child.name):
             # Skip dotfiles and dot-directories, matching search_files and
             # find_files so the three walkers agree on what exists.
-            if self._walk_entry(scope, entry.path) is None or not await self._entry_inside(scope, entry):
+            if self._walk_entry(scope, entry.path) is None:
                 continue
             rel = posixpath.relpath(entry.path, scope.cwd)
             if entry.is_dir:
@@ -1243,7 +1240,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         matches: list[str] = []
         capped = False
         for match in sorted(found, key=lambda child: _sort_key(child.path)):
-            if self._walk_entry(scope, match.path) is None or not await self._entry_inside(scope, match):
+            if self._walk_entry(scope, match.path) is None:
                 continue
             if not match.is_dir and match.size is None and not await scope.workspace.exists(match.path):
                 # A dangling symlink is inside the root but names nothing.

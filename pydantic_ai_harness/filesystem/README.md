@@ -220,12 +220,15 @@ applies the same rule to absolute symlink targets.
 
 ## Security model
 
-- **Containment.** A path that resolves outside `root_dir`, through `..`, an
-  absolute path, or a symlink, is rejected, and the directory walkers skip such
-  links. Patterns match the path relative to `root_dir`; `read_only_patterns`
-  and `denied_patterns` also match a symlink's target, so a link to `.env` is
+- **Containment.** Every tool call resolves its path, symlinks included, and
+  rejects one that leads outside `root_dir`, through `..`, an absolute path, or
+  a symlink. Listings may name a link that leads outside, but reading or
+  writing it is rejected, and the directory walkers don't descend into it.
+  Patterns match the path relative to `root_dir`; `read_only_patterns` and
+  `denied_patterns` also match a symlink's target, so a link to `.env` is
   read-only like `.env` itself. `root_dir='/'` turns containment off; the
-  patterns still apply.
+  patterns still apply, and with no patterns set as well the boundary check is
+  off entirely.
 - **A guardrail, not isolation.** The checks run before each operation, so a
   symlink swapped in between the check and the use is not caught, and `Shell`
   commands ignore `root_dir` entirely. Use a sandbox workspace when the agent or

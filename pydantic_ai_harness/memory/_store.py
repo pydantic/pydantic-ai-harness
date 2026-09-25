@@ -668,7 +668,7 @@ class FileStore:
         if limit <= 0:
             raise ValueError('limit must be positive')
         workspace = self._workspace()
-        root = await self._root(workspace)
+        root = await workspace.realpath(await self._root(workspace))
         start = posixpath.join(root, prefix.removesuffix('/')) if prefix.endswith('/') else root
         paths: list[str] = []
         pending = [start]
@@ -679,10 +679,11 @@ class FileStore:
             except (FileNotFoundError, NotADirectoryError):
                 continue
             for entry in entries:
-                if entry.is_symlink:
-                    continue
                 if entry.is_dir:
-                    pending.append(entry.path)
+                    # Walking from the real root, a directory whose real path differs is a symlink:
+                    # following it could list another scope's files or leave the store.
+                    if await workspace.realpath(entry.path) == entry.path:
+                        pending.append(entry.path)
                     continue
                 relative = posixpath.relpath(entry.path, root)
                 if relative.startswith(prefix) and not entry.name.startswith(_HIDDEN_PREFIXES):
@@ -707,7 +708,12 @@ class FileStore:
         files: list[tuple[str, str]] = []
         content_truncated = False
         for path in paths[:max_files]:
-            content = await self._content(workspace, self._target(root, path))
+            try:
+                target = await self._confine(workspace, root, self._target(root, path), path)
+            except ValueError:
+                # A listed file that links outside the store directory is not read.
+                continue
+            content = await self._content(workspace, target)
             if content is None:
                 content_truncated = True
                 continue
