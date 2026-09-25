@@ -26,16 +26,15 @@ class _SuppliedBackend(SpritesSandboxBackend):
 
 @dataclass(kw_only=True)
 class SpritesSandbox(AbstractCapability[AgentDepsT]):
-    """Supply a persistent [Fly.io Sprite](https://sprites.dev) workspace through `ctx.workspace`.
+    """Run the agent's workspace in a persistent [Fly.io Sprite](https://sprites.dev).
 
-    A run with no reference creates a fresh Sprite. Pass a `WorkspaceRef` supplied by the
-    application to attach to a Sprite managed elsewhere. Acquisition is lazy, and ending a run
-    does not delete the Sprite. Commands run under `sh -c` in the Sprite's own shell environment.
+    A run with no reference creates a fresh Sprite on first use; pass a `WorkspaceRef` to attach
+    to an existing one. Ending a run does not delete the Sprite: it sleeps when idle and persists
+    until you delete it. Commands run under `sh -c` in the Sprite's own shell environment.
 
-    This capability supplies execution only. Compose it with tools or
-    capabilities that consume
-    [`RunContext.workspace`][pydantic_ai.tools.RunContext.workspace], such as `Coder`, `Shell`,
-    and `FileSystem`.
+    This capability supplies the workspace only. Compose it with capabilities that use it, such
+    as `Coder`, `Shell`, and `FileSystem`. See
+    [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for more.
     """
 
     client: AsyncSpritesClient | None = None
@@ -44,7 +43,7 @@ class SpritesSandbox(AbstractCapability[AgentDepsT]):
     ends. Supply one to share its connections across runs, on one event loop."""
 
     runtime: str | None = None
-    """Runtime for a newly created Sprite."""
+    """Runtime for a newly created Sprite; an unknown runtime fails on first use."""
 
     working_dir: str | None = None
     """Absolute directory commands start in and relative paths resolve against; `None` uses the Sprite's default."""
