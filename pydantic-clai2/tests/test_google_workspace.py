@@ -9,7 +9,7 @@ from pathlib import Path
 import keyring
 import pytest
 from menu_script import Script, pick
-from pydantic import JsonValue, ValidationError
+from pydantic import JsonValue, SecretStr, ValidationError
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from pydantic_ai.exceptions import UserError
@@ -369,3 +369,13 @@ def test_a_former_declaration_with_its_own_settings_is_kept(tmp_path: Path) -> N
     [entry] = [entry for entry in loader(store).entries() if entry.name == 'google_workspace']
     assert entry.declaration == custom
     assert not entry.builtin
+
+
+def test_an_unreadable_key_store_still_loads_the_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unreadable() -> dict[str, SecretStr]:
+        raise UserError('Stored API keys are invalid.')
+
+    monkeypatch.setattr(google_workspace, 'load_keys', unreadable)
+    plugin = host()
+    assert 'Stored API keys are invalid.' in activate_quietly(plugin)
+    assert [command.name for command in plugin.commands] == ['google_workspace']

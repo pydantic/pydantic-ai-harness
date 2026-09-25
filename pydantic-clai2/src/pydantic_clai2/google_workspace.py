@@ -87,10 +87,11 @@ def setup_problem(settings: GoogleWorkspaceSettings) -> str | None:
     """What stops the next turn, checked without network access; `None` when nothing is known to."""
     try:
         choice = load_connection()
+        if isinstance(choice, Connection):
+            return None if choice.token.name in load_keys() else missing(choice.token.name)
     except UserError as exc:
+        # An unreadable store must not stop the plugin loading: `/google_workspace` is how to repair it.
         return str(exc)
-    if isinstance(choice, Connection):
-        return None if choice.token.name in load_keys() else missing(choice.token.name)
     return choice.problem(client_id=settings.client_id, services=settings.services)
 
 
