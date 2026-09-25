@@ -413,21 +413,12 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         merged = {**self._env, **(env or {})}
         variables: dict[str, str | None] | None = dict(merged) if merged else None
-        call_started_at = time.monotonic()
-        workspace: modal.Sandbox | None = None
-        # `move_on_after` rather than `fail_after`, so only this deadline becomes the command's
-        # timeout, not a `TimeoutError` raised while acquiring the sandbox.
-        with anyio.move_on_after(timeout):
-            workspace = await self.get_client()
-        # A shielded sandbox creation can finish after the deadline without being interrupted.
-        remaining = None if timeout is None else timeout - (time.monotonic() - call_started_at)
-        if workspace is None or (remaining is not None and remaining <= 0):
-            raise WorkspaceTimeoutError('Timed out before the command could start.', timeout=timeout)
-
-        deadline = None if remaining is None else max(1, math.ceil(remaining))
+        # Acquiring the sandbox has its own bound; the timeout is the command's alone.
+        workspace = await self.get_client()
+        deadline = None if timeout is None else max(1, math.ceil(timeout))
         server_started_at = time.monotonic()
         try:
-            with anyio.fail_after(remaining):
+            with anyio.fail_after(timeout):
                 async with self._mapped_errors('Command could not run in the workspace'):
                     process = await workspace.exec.aio(
                         *argv, timeout=deadline, workdir=workdir, env=variables, text=False

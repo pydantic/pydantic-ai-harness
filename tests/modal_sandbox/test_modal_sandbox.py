@@ -130,41 +130,21 @@ async def test_an_sdk_timeout_during_create_propagates_unchanged(fake_modal: Fak
     assert exc_info.value is error
 
 
-async def test_command_timeout_bounds_waiting_for_another_acquisition(fake_modal: FakeModal) -> None:
-    fake_modal.create_gate = anyio.Event()
-    backend = ModalSandboxBackend()
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(backend.get_client)
-        while not fake_modal.create_started:
-            await anyio.sleep(0)
-        with pytest.raises(WorkspaceTimeoutError, match='before the command could start') as exc_info:
-            await backend.run(['echo', 'hello'], timeout=0.01)
-        assert exc_info.value.timeout == 0.01
-        fake_modal.create_gate.set()
-    assert fake_modal.sandboxes[0].exec_calls == []
-
-
-async def test_command_deadline_counts_the_sandbox_creation(fake_modal: FakeModal) -> None:
-    # The creation is shielded, so it finishes past the deadline; the command is then not started,
-    # and the sandbox it made is kept for the next command.
+async def test_command_timeout_starts_once_the_sandbox_is_acquired(fake_modal: FakeModal) -> None:
     fake_modal.create_gate = anyio.Event()
     backend = ModalSandboxBackend()
     async with anyio.create_task_group() as tg:
 
         async def release() -> None:
-            while not fake_modal.create_started:
-                await anyio.sleep(0)
-            await anyio.sleep(0.05)
+            # Creating the sandbox outlasts the timeout; the command itself fits in it comfortably.
+            await anyio.sleep(1.1)
             assert fake_modal.create_gate is not None
             fake_modal.create_gate.set()
 
         tg.start_soon(release)
-        with pytest.raises(WorkspaceTimeoutError, match='before the command could start'):
-            await backend.run(['echo', 'hello'], timeout=0.01)
-    assert backend.ref == WorkspaceRef(provider='modal', id='sb-owned')
-    assert fake_modal.sandboxes[0].exec_calls == []
-    await backend.run(['true'])
-    assert fake_modal.owned_creates == 1
+        result = await backend.run(['echo', 'hello'], timeout=1)
+        assert result.stdout == 'echo hello\n'
+    assert fake_modal.sandboxes[0].exec_calls[0].timeout == 1
 
 
 async def test_command_timeout_keeps_captured_output(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
