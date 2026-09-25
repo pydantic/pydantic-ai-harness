@@ -38,10 +38,14 @@ The `macroscope` CLI must be installed and authenticated on the host first:
 1. Install: `curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash`
 2. Sign in and pick a workspace by running `macroscope` once.
 
-The capability cannot install or authenticate on your behalf. If the binary is
-missing, the tool returns the install command; if a review never starts
-(usually because you are not signed in), the tool tells the agent to run
-`macroscope` to finish setup.
+The capability cannot install or authenticate on your behalf. The model cannot
+fix these setup problems either, so the tool raises `UserError` and the run
+stops rather than spending tool retries on them. A missing binary reports the
+install command, a binary that cannot be launched reports the OS error, and a
+review that never starts (usually because you are not signed in) tells you to
+run `macroscope` to finish setup. The exception is a review that fails to start
+with a `base` the model passed: that is reported to the model as a retry so it
+can drop or change the ref.
 
 The tool invokes `macroscope codereview --raw` for machine-readable streaming
 output, which needs a recent CLI build. The installer fetches the latest and the

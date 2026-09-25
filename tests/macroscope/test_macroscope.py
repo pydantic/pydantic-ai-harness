@@ -11,7 +11,7 @@ from pathlib import Path
 import anyio
 import pytest
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import ToolReturnPart
 from pydantic_ai.models.test import TestModel
 
@@ -136,15 +136,24 @@ class TestRunReview:
         await _toolset(command, tmp_path, base='develop').run_macroscope_review(base='release')
         assert _recorded_args(command) == ['codereview', '--raw', '--base', 'release']
 
-    async def test_missing_binary_raises_model_retry(self, tmp_path: Path) -> None:
+    async def test_missing_binary_raises_user_error(self, tmp_path: Path) -> None:
+        # The model cannot install the CLI, so this is a setup error for the operator, not a retry.
         toolset = _toolset('pai-harness-macroscope-absent', tmp_path)
-        with pytest.raises(ModelRetry, match='not found'):
+        with pytest.raises(UserError, match='not found'):
             await toolset.run_macroscope_review()
 
-    async def test_no_review_id_raises_model_retry(self, tmp_path: Path) -> None:
+    async def test_no_review_id_raises_user_error(self, tmp_path: Path) -> None:
+        # With no model-chosen `base`, a review that never starts is a sign-in/setup problem.
         command = _fake_cli(tmp_path, ['issue_status=failed'])
-        with pytest.raises(ModelRetry, match='did not start'):
+        with pytest.raises(UserError, match='did not start'):
             await _toolset(command, tmp_path).run_macroscope_review()
+
+    async def test_no_review_id_with_model_base_raises_model_retry(self, tmp_path: Path) -> None:
+        # A `base` the model passed may be the cause (e.g. a ref that does not exist), so the
+        # model gets a retry to drop or change it; a retry without it then surfaces setup errors.
+        command = _fake_cli(tmp_path, ['issue_status=failed'])
+        with pytest.raises(ModelRetry, match="base='no-such-ref'"):
+            await _toolset(command, tmp_path).run_macroscope_review(base='no-such-ref')
 
     async def test_failed_status_with_review_id_is_returned_not_raised(self, tmp_path: Path) -> None:
         # A review that started (has a review_id) but ended `failed` is a real outcome the
@@ -171,7 +180,7 @@ class TestRunReview:
         await _toolset(command, tmp_path, base=None).run_macroscope_review()
         assert _recorded_args(command) == ['codereview', '--raw']
 
-    async def test_spawn_failure_raises_model_retry(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_spawn_failure_raises_user_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # Binary passes the `which` check but fails to exec (lost +x, bad interpreter, TOCTOU).
         command = _fake_cli(tmp_path, ['review_id=rev-6', 'issue_status=completed'])
 
@@ -179,7 +188,7 @@ class TestRunReview:
             raise PermissionError('exec denied')
 
         monkeypatch.setattr(anyio, 'open_process', _boom)
-        with pytest.raises(ModelRetry, match='Failed to launch'):
+        with pytest.raises(UserError, match='Failed to launch'):
             await _toolset(command, tmp_path).run_macroscope_review()
 
 
@@ -224,3 +233,19 @@ class TestCapability:
         assert isinstance(review, MacroscopeReview)
         assert review.review_id == 'rev-9'
         assert [i.issue_id for i in review.issues] == ['i1']
+
+    async def test_missing_binary_surfaces_from_run_without_retries(self, tmp_path: Path) -> None:
+        # Through a real run, the setup error ends the run on the first call instead of being
+        # fed back to the model until tool retries are exhausted.
+        agent = Agent(
+            TestModel(),
+            capabilities=[Macroscope(command='pai-harness-macroscope-absent', cwd=tmp_path, base='main')],
+        )
+        with pytest.raises(UserError, match='not found on PATH'):
+            await agent.run('review please')
+
+    async def test_not_signed_in_surfaces_from_run_without_retries(self, tmp_path: Path) -> None:
+        command = _fake_cli(tmp_path, ['error: not signed in'])
+        agent = Agent(TestModel(), capabilities=[Macroscope(command=command, cwd=tmp_path, base='main')])
+        with pytest.raises(UserError, match='not signed in'):
+            await agent.run('review please')

@@ -36,8 +36,8 @@ class Macroscope(AbstractCapability[AgentDepsT]):
     ```
 
     The `macroscope` CLI must be installed and authenticated on the host first (see the
-    package README). This capability cannot sign in on the user's behalf; if a review
-    never starts, the tool reports that the user needs to run `macroscope` once.
+    package README). This capability cannot sign in on the user's behalf; a missing
+    binary or a review that never starts raises `UserError` telling the user what to fix.
     """
 
     base: str | None = None
