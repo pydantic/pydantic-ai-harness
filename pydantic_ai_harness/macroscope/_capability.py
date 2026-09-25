@@ -32,10 +32,19 @@ class Macroscope(AbstractCapability[AgentDepsT]):
     tools -- this capability does not edit files, create worktrees, or commit.
 
     ```python
+    import os
+
     from pydantic_ai import Agent
+    from pydantic_ai.capabilities import LocalWorkspace
     from pydantic_ai_harness.macroscope import Macroscope
 
-    agent = Agent('anthropic:claude-sonnet-5', capabilities=[Macroscope()])
+    agent = Agent(
+        'anthropic:claude-sonnet-5',
+        capabilities=[
+            LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}),
+            Macroscope(),
+        ],
+    )
     ```
 
     The `macroscope` CLI must be installed and authenticated in the workspace first (see

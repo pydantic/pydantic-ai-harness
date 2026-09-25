@@ -53,12 +53,14 @@ that fits wins; anything below the smallest threshold passes through.
 
 ```python
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import ToolOutputLimits
 from pydantic_ai_harness.tool_output_limits import Band, Spill, Summarize, Truncate
 
 agent = Agent(
     'anthropic:claude-sonnet-5',
     capabilities=[
+        LocalWorkspace('.'),
         ToolOutputLimits(
             bands=[
                 Band(over=100_000, action=Spill()),       # huge: keep losslessly, read back on demand
@@ -91,12 +93,14 @@ payload, a `Summarize` whose model call raises. `then` chains, so
 
 ```python
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import ToolOutputLimits
 from pydantic_ai_harness.tool_output_limits import Band, Truncate, TruncationStrategy
 
 agent = Agent(
     'anthropic:claude-sonnet-5',
     capabilities=[
+        LocalWorkspace('.'),
         ToolOutputLimits(
             per_tool={
                 'read_file': [Band(over=8_000, action=Truncate(strategy=TruncationStrategy.head))],
@@ -260,10 +264,10 @@ used in-process only: a durable engine does not route it through its workflow.
 
 Spilled files are kept for the life of the workspace; they are not pruned by this capability.
 
-When a band can spill and the run has no workspace for the store to write to, the run fails at
-its start. For runs without a workspace, use `LocalFileStore`, which writes to the host's temp
-directory. A read-only workspace cannot take spills: the spill warns and falls back to its `then`
-action (a bounded truncation by default).:
+A read-only workspace cannot take spills: the spill warns and falls back to its `then` action (a
+bounded truncation by default). When a band can spill and the run has no workspace for the store
+to write to, the run fails at its start. For runs without a workspace, use `LocalFileStore`, which
+writes to the host's temp directory:
 
 ```python
 from datetime import timedelta

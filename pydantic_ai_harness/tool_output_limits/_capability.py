@@ -112,6 +112,7 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         from pydantic_ai import Agent
         from pydantic_ai_harness.tool_output_limits import (
             Band,
+            LocalFileStore,
             ToolOutputLimits,
             Spill,
             Summarize,
@@ -127,6 +128,7 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
                         Band(over=20_000, action=Summarize()),
                         Band(over=5_000, action=Truncate()),
                     ],
+                    store=LocalFileStore(),
                 )
             ],
         )
