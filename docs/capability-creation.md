@@ -87,7 +87,7 @@ Capability names must be lowercase letters, digits, and underscores, starting wi
 
 `CapabilityCreation` imports model-written Python into the agent's own process, on this
 machine. A run therefore refuses to start unless its
-[workspace](https://pydantic.dev/docs/ai/workspace/) is a writable `LocalWorkspace`: next to a
+[workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/) is a writable `LocalWorkspace`: next to a
 sandbox the model's code would run outside the sandbox, and a read-only workspace promises the
 model that it changes nothing.
 

@@ -400,6 +400,22 @@ async def test_file_store_refuses_to_read_through_a_symlink_escape(tmp_path: Pat
         await FileStore('.', workspace=LocalWorkspaceBackend(root)).read('scope/MEMORY.md', max_chars=100)
 
 
+async def test_file_store_search_does_not_read_through_a_symlink_escape(tmp_path: Path) -> None:
+    root = tmp_path / 'root'
+    root.mkdir()
+    (tmp_path / 'secret.md').write_text('alpha secret')
+    (tmp_path / 'outside').mkdir()
+    (tmp_path / 'outside' / 'other.md').write_text('alpha outside')
+    os.symlink(tmp_path / 'secret.md', root / 'leak.md')
+    os.symlink(tmp_path / 'outside', root / 'linked')
+    store = FileStore('.', workspace=LocalWorkspaceBackend(root))
+    await store.write('kept.md', 'alpha kept', expected_version=None)
+
+    result = await store.search('', 'alpha', limit=10, max_files=10, max_chars=1000, max_file_chars=1000)
+
+    assert [match.path for match in result.matches] == ['kept.md']
+
+
 async def test_file_store_needs_a_workspace(tmp_path: Path) -> None:
     with pytest.raises(UserError, match='`FileStore` has no workspace'):
         await FileStore('memory').read('main.md', max_chars=10)

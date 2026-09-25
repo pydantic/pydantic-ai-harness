@@ -38,6 +38,10 @@ _MISSING = 127
 _T = TypeVar('_T')
 
 
+class RipgrepMissing(Exception):
+    """`rg` is not on the workspace's PATH; the caller serves the request without it."""
+
+
 @dataclass(kw_only=True, frozen=True)
 class Record:
     """One line of ripgrep output: the file it refers to, and the rest of the line."""
@@ -61,9 +65,9 @@ async def run_ripgrep(
 
     `accept` maps a record to what the caller keeps, or `None` to drop it; only
     kept records count towards `limit`. `listing` reads `--files` output, where
-    each record is a bare path. Raises `ModelRetry` when `rg` is not on the
-    workspace's PATH or reports an error (an invalid pattern, say), so the model
-    can correct the call or use another tool.
+    each record is a bare path. Raises `RipgrepMissing` when `rg` is not on the
+    workspace's PATH, and `ModelRetry` when it reports an error (an invalid
+    pattern, say), so the model can correct the call.
     """
     command = shlex.join(['rg', '--null', '--color=never', *arguments])
     script = (
@@ -76,10 +80,7 @@ async def run_ripgrep(
     detail = '\n'.join(stderr_lines[:-1]).strip()
     if result.exit_code == _MISSING or not status_line.startswith(_STATUS_PREFIX):
         if result.exit_code == _MISSING or 'not found' in result.stderr:
-            raise ModelRetry(
-                "ripgrep (rg) was not found on the workspace's PATH. Install rg in the workspace, or use "
-                '`search_files` and `find_files` instead.'
-            )
+            raise RipgrepMissing
         raise ModelRetry(f'ripgrep failed: {result.stderr.strip() or f"exit code {result.exit_code}"}')
     status = status_line.removeprefix(_STATUS_PREFIX)
 

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import fnmatch
-import logging
 import os
 import posixpath
+import re
 import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -27,13 +27,11 @@ from pydantic_ai_harness.shell._limits import file_limit_status, limited_script,
 from pydantic_ai_harness.shell._persistent import MAX_FOREGROUND_WAIT, CommandMode, run_persistent_command
 from pydantic_ai_harness.shell._policy import is_interactive_command, recoverable
 
-_logger = logging.getLogger(__name__)
-
 RUN_SCOPED_TOOL_NAMES: tuple[str, ...] = ('run_command', 'start_command', 'check_command', 'stop_command')
-"""The default tools. Their commands are killed when the agent run ends."""
+"""The default tools. Background commands keep running until they exit, `stop_command` stops them, or the workspace ends."""
 
 PERSISTENT_TOOL_NAME = 'shell'
-"""The opt-in tool whose commands outlive the agent run."""
+"""The opt-in tool whose commands return handles to their log and status files."""
 
 SHELL_TOOL_NAMES: tuple[str, ...] = (*RUN_SCOPED_TOOL_NAMES, PERSISTENT_TOOL_NAME)
 """Every tool `Shell` can register, in registration order."""
@@ -42,21 +40,8 @@ _OUTPUT_BYTES_PER_CHAR = 4
 """UTF-8 bytes per character at most: reading `4 * max_output_chars` bytes of a log keeps every character the cap keeps."""
 
 
-class _BackgroundProcess:
-    """State for a run-scoped background command: its job and, once seen, how it ended."""
-
-    __slots__ = ('job', 'finished', 'exit_code')
-
-    def __init__(self, job: Job) -> None:
-        self.job = job
-        self.finished = False
-        self.exit_code: int | None = None
-
-    async def refresh(self) -> None:
-        if not self.finished:
-            running, exit_code = await self.job.status()
-            self.finished = not running
-            self.exit_code = exit_code
+_COMMAND_ID = re.compile(r'[0-9a-f]{32}')
+"""A background command's ID: the name of its job directory."""
 
 
 class ShellToolset(FunctionToolset[AgentDepsT]):
@@ -65,9 +50,11 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
     Supports synchronous execution (run_command) and background processes
     (start_command / check_command / stop_command). Output is truncated to fit
     model context and labelled with stdout/stderr/exit code. The opt-in `shell`
-    tool instead starts commands that outlive the run and returns handles to
-    their output and exit status. Every command, file, and signal goes through
-    `ctx.workspace`.
+    tool instead returns handles to its commands' output and exit status. Every
+    command, file, and signal goes through `ctx.workspace`.
+
+    Background commands are not tied to the run: a later run on the same
+    workspace can check or stop them by ID.
 
     Optionally tracks the working directory across calls so `cd` persists.
     """
@@ -109,7 +96,6 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         self._env = dict(env) if env is not None else None
         self._denied_env_patterns = list(denied_env_patterns)
         self._tools = tuple(tools)
-        self._background: dict[str, _BackgroundProcess] = {}
         self._jobs_dir: str | None = None
 
         if self._allowed_commands and self._denied_commands:
@@ -138,13 +124,12 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                 self.add_function(registrations[name], name=name, metadata=metadata)
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
-        """Return a fresh instance per run so cwd and background processes are isolated.
+        """Return a fresh instance per run so the tracked cwd is isolated.
 
         `get_toolset` builds one shared instance at agent construction (see
         `AbstractToolset.for_run`, which defaults to returning `self`). This
-        toolset holds mutable per-run state (`_cwd`, `_background`), so without
-        an override two concurrent runs would corrupt each other's cwd and kill
-        each other's background processes.
+        toolset holds mutable per-run state (`_cwd`), so without an override two
+        concurrent runs would corrupt each other's cwd.
         """
         return ShellToolset(
             allowed_commands=self._allowed_commands,
@@ -204,7 +189,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         }
 
     async def _cwd_for(self, ctx: RunContext[AgentDepsT]) -> str:
-        """The absolute workspace directory the next run-scoped command starts in."""
+        """The absolute workspace directory the next `run_command` or `start_command` command starts in."""
         return self._cwd if self._cwd is not None else await ctx.workspace.working_dir()
 
     async def _jobs_base(self, ctx: RunContext[AgentDepsT]) -> str:
@@ -213,24 +198,11 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             self._jobs_dir = await metadata_dir(ctx.workspace, 'shell')
         return self._jobs_dir
 
-    async def __aexit__(self, *args: Any) -> None:
-        """Terminate all remaining background processes and remove their files from the workspace.
-
-        Cleanup is best-effort and shielded: the run may be ending because it was cancelled or
-        because the workspace became unusable, and neither should leave the exit stack half-run.
-        Any error cleaning up one job is logged at debug level and the next job is tried; a durable
-        workspace may refuse calls outside an activity with errors that are not `WorkspaceError`.
-        """
-        with anyio.move_on_after(CONTROL_TIMEOUT * 2, shield=True):
-            for bg in self._background.values():
-                try:
-                    await bg.refresh()
-                    if not bg.finished:
-                        await bg.job.kill()
-                    await bg.job.cleanup()
-                except Exception:
-                    _logger.debug('Could not clean up background job %s', bg.job.directory, exc_info=True)
-        self._background.clear()
+    async def _job(self, ctx: RunContext[AgentDepsT], command_id: str) -> Job | None:
+        """The background command `command_id` names in the workspace, started by this run or an earlier one."""
+        if not _COMMAND_ID.fullmatch(command_id):
+            return None
+        return await Job.attach(ctx.workspace, posixpath.join(await self._jobs_base(ctx), command_id), combined=False)
 
     def _first_denied_operator(self, command: str) -> str | None:
         """Return the first denied operator found in command, or None."""
@@ -406,8 +378,9 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
     async def start_command(self, ctx: RunContext[AgentDepsT], command: str) -> str:
         """Start a long-running command in the background (e.g. a server or watcher).
 
-        Callers MUST call `stop_command(command_id)` when done to terminate the
-        process and clean up temporary output files.
+        The command keeps running, after this run too, until it exits or
+        `stop_command(command_id)` stops it; call `stop_command` when done to
+        also remove its output files.
 
         Args:
             ctx: The current agent run context.
@@ -417,7 +390,6 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             A message containing the unique command ID for later check/stop calls.
         """
         self._check_command(command)
-        command_id = uuid.uuid4().hex[:12]
         job = await Job.launch(
             ctx.workspace,
             command,
@@ -427,14 +399,13 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             combined=False,
             file_limit=self._max_file_bytes,
         )
-        self._background[command_id] = _BackgroundProcess(job)
-        return f'Started background command: {command!r}\nID: {command_id}'
+        return f'Started background command: {command!r}\nID: {posixpath.basename(job.directory)}'
 
-    async def _read_bg_output(self, bg: _BackgroundProcess) -> tuple[str, str]:
+    async def _read_bg_output(self, job: Job) -> tuple[str, str]:
         """The retained tail of a background command's stdout and stderr logs."""
         limit = self._max_output_chars * _OUTPUT_BYTES_PER_CHAR
-        stdout = await bg.job.tail(bg.job.output_path, limit)
-        stderr = await bg.job.tail(bg.job.stderr_path, limit)
+        stdout = await job.tail(job.output_path, limit)
+        stderr = await job.tail(job.stderr_path, limit)
         return stdout.decode('utf-8', errors='replace'), stderr.decode('utf-8', errors='replace')
 
     @recoverable
@@ -448,17 +419,19 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         Returns:
             Status and recent output of the background command.
         """
-        bg = self._background.get(command_id)
-        if bg is None:
+        job = await self._job(ctx, command_id)
+        if job is None:
             return f'[Error: unknown command ID {command_id!r}]'
 
-        await bg.refresh()
-        stdout, stderr = await self._read_bg_output(bg)
+        running, exit_code = await job.status()
+        stdout, stderr = await self._read_bg_output(job)
 
-        status = 'finished' if bg.finished else 'running'
-        parts = [_labelled(stdout, stderr, empty='(no output yet)'), f'[status: {status}]']
-        if bg.finished and bg.exit_code is not None:
-            parts.append(f'[exit code: {bg.exit_code}]' + file_limit_status(bg.exit_code, self._max_file_bytes))
+        parts = [
+            _labelled(stdout, stderr, empty='(no output yet)'),
+            f'[status: {"running" if running else "finished"}]',
+        ]
+        if exit_code is not None:
+            parts.append(f'[exit code: {exit_code}]' + file_limit_status(exit_code, self._max_file_bytes))
         return '\n'.join(parts)
 
     @recoverable
@@ -472,27 +445,24 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         Returns:
             Final output and exit status of the stopped command.
         """
-        bg = self._background.get(command_id)
-        if bg is None:
+        job = await self._job(ctx, command_id)
+        if job is None:
             return f'[Error: unknown command ID {command_id!r}]'
 
-        await bg.refresh()
-        if not bg.finished:
+        running, exit_code = await job.status()
+        if running:
             with anyio.CancelScope(shield=True):
-                await bg.job.kill()
+                await job.kill()
                 # A group that ignored SIGTERM is killed with SIGKILL, which its wrapper cannot
                 # outlive to publish a status: the command is stopped, with no exit code to report.
-                await bg.refresh()
-            bg.finished = True
+                _, exit_code = await job.status()
 
-        stdout, stderr = await self._read_bg_output(bg)
-
-        await bg.job.cleanup()
-        del self._background[command_id]
+        stdout, stderr = await self._read_bg_output(job)
+        await job.cleanup()
 
         parts = [_labelled(stdout, stderr, empty='(no output)'), '[stopped]']
-        if bg.exit_code is not None:
-            parts.append(f'[exit code: {bg.exit_code}]' + file_limit_status(bg.exit_code, self._max_file_bytes))
+        if exit_code is not None:
+            parts.append(f'[exit code: {exit_code}]' + file_limit_status(exit_code, self._max_file_bytes))
         return '\n'.join(parts)
 
 
