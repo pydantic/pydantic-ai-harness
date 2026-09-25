@@ -236,14 +236,12 @@ async def _configure(source: GitHubSource[DepsT]) -> str:
         # The key picker is async, so the menu's thread hands it back to the event loop. Its widgets
         # watch their own stop signal, so cancelling this worker must cancel the picker explicitly.
         picking = asyncio.run_coroutine_threadsafe(_choose_key(source.settings.token.name), loop)
-        while True:
-            try:
-                reference = picking.result(timeout=0.05)
-                break
-            except concurrent.futures.TimeoutError:
-                if worker_stopping():
-                    picking.cancel()
-                    return []
+        while not (picking.done() or worker_stopping()):
+            concurrent.futures.wait([picking], timeout=0.05)
+        if not picking.done():
+            picking.cancel()
+            return []
+        reference = picking.result()
         if reference is None:
             return []
         source.save(source.settings.model_copy(update={'token': reference}))
