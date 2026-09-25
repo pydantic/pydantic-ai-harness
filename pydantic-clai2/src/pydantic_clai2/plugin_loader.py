@@ -306,8 +306,10 @@ class PluginLoader(Generic[DepsT]):
                 self._console.print(str(PluginError(name, exc)), style=theme.color(theme.ERROR), markup=False)
 
     def _save_settings(self, name: str, settings: dict[str, JsonValue]) -> None:
-        declaration = self._entry(name).declaration
-        self._store.save_plugin(declaration.model_copy(update={'settings': settings}))
+        # Update the live entry in place: rebuilding entries mid-`load` would detach the host being activated.
+        entry = self._entries[name]
+        entry.declaration = entry.declaration.model_copy(update={'settings': settings})
+        self._store.save_plugin(entry.declaration)
 
     async def enable(self, name: str) -> None:
         """Remember the plugin as enabled and load it now."""

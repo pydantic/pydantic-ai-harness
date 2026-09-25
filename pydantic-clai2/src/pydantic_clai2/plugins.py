@@ -5,7 +5,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Generic, Literal, Protocol, TypeVar, get_args, overload
 
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, JsonValue, RootModel
 from pydantic_ai import AgentRunResult, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability, Hooks
@@ -297,7 +297,13 @@ class PluginHost(Generic[DepsT]):
         The loaded plugin is not reloaded, so apply the change yourself. Settings are plaintext SQLite:
         keep secrets in `/keys` and save only their names.
         """
-        data: dict[str, JsonValue] = settings.model_dump(mode='json', exclude_defaults=True)
+        model = type(settings)
+        if issubclass(model, RootModel):
+            raise TypeError(f'{model.__name__} must dump to a JSON object to be saved as plugin settings.')
+        computed = set(model.model_computed_fields)
+        data: dict[str, JsonValue] = settings.model_dump(
+            mode='json', by_alias=True, exclude_defaults=True, exclude=computed
+        )
         if self._persist is not None:
             self._persist(data)
         self._settings = data
