@@ -59,6 +59,25 @@ async def editor(*, output: io.StringIO | None = None) -> AsyncGenerator[tuple[L
         assert output.getvalue().endswith('\x1b[?25h\x1b[?2026l')
 
 
+async def test_long_paste_submission_and_history() -> None:
+    async with editor() as (live, pipe, _):
+        text = '\n'.join(f'line {index}' for index in range(5))
+        live.feed('paste', text)
+        frame = Text.from_ansi('\n'.join(live.frame())).plain
+        assert '[paste 5 lines]' in frame
+        assert 'line 4' not in frame
+        pipe.send_text('\n')
+        assert await live.read() == text
+        assert live.history.get_strings() == [text]
+        assert live.buffer.display() == ('', 0)
+        live.feed('up')
+        assert live.buffer.text == text
+        live.feed('ctrl-c')
+        with pytest.raises(KeyboardInterrupt):
+            await live.read()
+        assert live.buffer.display() == ('', 0)
+
+
 async def test_input_queue_and_controls() -> None:
     async with editor() as (live, pipe, _):
         pipe.send_text('  \nfirst\nsecond\n')
@@ -235,7 +254,7 @@ async def test_completion_acceptance_and_cycling() -> None:
         pipe.send_text('\t\t\n\n')
         assert await live.read() == '/hello'
         ready = anyio.Event()
-        pipe.send_text('/hell')
+        pipe.send_text('/ell')
         await ready.wait()
         pipe.send_text('\t\n')
         assert await live.read() == '/hello'
@@ -264,7 +283,7 @@ async def test_history_search_and_multiline_submission() -> None:
         assert await live.read() == 'history entry'
         pipe.send_text('\x12history\n\n')
         assert await live.read() == 'history entry'
-        pipe.send_text('first\x1b\rsecond\n')
+        pipe.send_text('first\x1b[13;2usecond\n')
         assert await live.read() == 'first\nsecond'
 
 
@@ -277,7 +296,7 @@ async def test_footer_warning_and_control_bytes_are_safe() -> None:
         assert r'\x1b[2J' in footer
 
 
-@pytest.mark.parametrize('sequence', ['\x1b[13;2u', '\x1b[27;2;13~', '\x1b\r'])
+@pytest.mark.parametrize('sequence', ['\x1b[13;2u', '\x1b[27;2;13~'])
 async def test_shift_enter_inserts_newline_and_plain_enter_submits(sequence: str) -> None:
     async with editor() as (live, pipe, _):
         pipe.send_text(f'first{sequence}second\r')

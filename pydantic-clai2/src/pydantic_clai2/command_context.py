@@ -8,8 +8,7 @@ from pydantic import JsonValue, TypeAdapter
 from pydantic_ai.settings import ModelSettings
 
 from .commands import Command
-from .config import SETTING_FIELDS, Settings
-from .model_settings import model_settings_from_json
+from .config import SETTING_FIELDS, STRING_SETTINGS, Settings
 from .project_settings import ProjectSettings
 from .settings_store import SettingsStore
 
@@ -60,7 +59,7 @@ class CommandContext:
         adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
         value: JsonValue = (
             raw
-            if key in ('model', 'display.theme') or (key == 'sessions.naming_model' and raw != 'null')
+            if key in STRING_SETTINGS or (key == 'sessions.naming_model' and raw != 'null')
             else adapter.validate_json(raw)
         )
         updated = self.settings.model_dump()
@@ -69,6 +68,8 @@ class CommandContext:
 
     def model_settings(self, model: str) -> ModelSettings | None:
         """Family defaults plus saved overrides, ready for `agent.run`."""
+        from .model_settings import model_settings_from_json  # noqa: PLC0415
+
         return model_settings_from_json(self.store.model_settings(model), model=model).to_model_settings()
 
     def reset_setting(self, key: str) -> str:

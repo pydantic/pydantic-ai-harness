@@ -36,7 +36,12 @@ def theme_preview(name: str, *, width: int) -> str:
                 renderer.render(event)
         palette = theme.current()
         console.print(
-            Syntax('return "ready"', 'python', theme='monokai', background_color=palette.bg if palette else 'default')
+            Syntax(
+                'return "ready"',
+                'python',
+                theme=theme.syntax_theme(),
+                background_color=palette.bg if palette else 'default',
+            )
         )
         console.print('Warning: output truncated', style=theme.color(theme.WARNING))
         console.print('Error: example.py not found', style=theme.color(theme.ERROR))
@@ -81,6 +86,7 @@ async def theme_command(context: CommandContext, args: list[str], *, runners: Ru
     else:
         result = await run_worker(lambda: runners.run_list(build_theme_picker(context)))
         if result.cancelled or result.item is None or not isinstance(result.item.value, str):
-            return 'No changes.'
+            return ''
         name = result.item.value
-    return context.set_setting(['display.theme', name])
+    context.set_setting(['display.theme', name])
+    return ''

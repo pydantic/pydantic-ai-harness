@@ -12,6 +12,9 @@ contract; this guide is shipped with the package for use without a checkout.
 - Add slash commands or a custom menu: host.commands.register(Command(...)).
 - Change tool output: host.render(EventClass), returning a Rich renderable.
 - Add a fragment to the status row: host.status_segment(fn), where fn returns a short string.
+- Add a working animation: host.spinner(name, frames, interval=..., description=...)
+  from a plugin, or an entry in spinners.json next to CLAI's settings (/spinner
+  init writes a starter). /spinner picks one; the choice persists as display.spinner.
 - React to prompts or session lifecycle: host.on with a typed handler.
 - Configure a plugin: host.settings with a Pydantic settings model.
 - Use a custom model/provider: supply a Pydantic AI Agent to chat from a Python
@@ -110,12 +113,21 @@ clai2 plugins add NAME module[:attr] [JSON] saves for the next startup.
 delete its source file yourself to remove it from disk.
 
 The second built-in is ask_user (pydantic_clai2.ask_user_menu:activate): the
-harness AskUser capability with a full-screen terminal menu as its answerer, so
+harness AskUser capability with an inline numbered picker as its answerer, so
 the model can ask the user multiple-choice questions mid-run through
-ask_user_question. /plugins disable ask_user removes the tool. To answer the
+ask_user_question. The conversation remains visible. Enter or a number selects;
+for multiple selections it toggles, then Done submits. /plugins disable ask_user removes the tool. To answer the
 questions somewhere other than the terminal, declare ask_user again with a
 module whose activate(host) calls host.add(AskUser(answerer=...)) with your own
 async answerer; see PLUGINS.md.
+
+The inline `ask_user_question` picker also offers `Other (type answer)`.
+Choose it to type your own answer instead of the suggested options, including for
+multi-select questions. Enter submits nonblank text. Esc returns to the choices
+and keeps your draft; Ctrl-C declines the whole request. Backspace and arrow keys
+edit the text. Multiline paste is inserted as text and waits for Enter; it does
+not submit an answer or select choices. The conversation stays visible while you type. Custom answers
+appear in the transcript and reach the model as a one-item list under the question's header.
 
 The built-in logfire plugin (pydantic_clai2.logfire) is enabled by default in the
 stock CLI. It contributes core's Instrumentation capability using an isolated
@@ -283,8 +295,8 @@ returns the selected TerminalPalette or None for default. Starting and exiting
 in default leaves terminal colours untouched. For bundled palettes, Termflow
 applies foreground, background, and ANSI slots via OSC; returning to default or
 exiting resets terminal colours. Redirected output receives no palette changes.
-The early splash keeps brand colours and syntax keeps Monokai. Default diffs stay
-unchanged; bundled palettes use Termflow's diff defaults. StreamRenderer owns text and
+The early splash keeps brand colours. Code uses the terminal foreground and ANSI
+syntax colours. Default diffs stay unchanged; bundled palettes use Termflow's diff defaults. StreamRenderer owns text and
 thinking, not tool-specific rendering.
 
 Add a fragment to the status row with host.status_segment:
@@ -307,6 +319,20 @@ awaits, no printing. Return an empty string to contribute nothing that frame.
 Fragments are truncated from the right on narrow terminals and cannot set their
 own colours. host.status_segment adds to the row; replacing the row, prompt
 editor, splash, or adding custom palettes is still a CLAI source change.
+
+Offer a working animation with host.spinner; the user selects it with /spinner:
+
+```python
+from pydantic_clai2.plugins import PluginHost
+
+
+def activate(host: PluginHost[None]) -> None:
+    host.spinner('wave', ['~   ', ' ~  ', '  ~ ', '   ~'], interval=0.1, description='a small wave')
+```
+
+Frames are padded to one width and interval is clamped to 0.02-1 seconds. The
+user's spinners.json replaces a plugin spinner of the same name, and an entry
+without frames only retunes an existing spinner's interval or description.
 
 ## Custom TUI menus
 
@@ -351,6 +377,11 @@ close normally. menu_key and run_worker cooperate on cancellation, keeping the
 terminal owned until the worker restores its screen. Do not fire-and-forget a
 thread that is still reading input. If a menu key needs an async action, follow
 plugin_menu.py's bridge back to the main event loop.
+
+Pass during_turn=True to Command when the menu is safe to open mid-turn, so the
+bare command opens at once instead of queueing behind the running turn. While
+run_worker runs, CLAI holds the turn's output and prints it in order afterwards.
+Only opt in when the running turn cannot observe what the menu changes.
 
 For named validated fields, reuse FieldSource, FieldMenu and run_flow in
 field_menu.py rather than write another editor. SettingsSource in set_menu.py
@@ -407,6 +438,16 @@ one. /model or /set model changes subsequent turns to the selected core model
 identifier, not an alias for your custom instance. Noninteractive Session exposes
 resolve_model for translating overrides; chat currently configures its own
 resolver for Codex authentication, not a plugin provider registry.
+
+For `openai-codex` models, open `/model_settings openai-codex:gpt-6-astra`
+(or your saved Codex model), then **Service Tier / Fast Mode**. Choose
+**Fast (priority)** to request fast processing, or **Standard (default)** to
+turn it off. [Codex fast mode](https://developers.openai.com/codex/speed)
+uses more ChatGPT credits and depends on model and account availability. It does
+not lower reasoning effort. Reset restores the existing model default; it does
+not enable fast mode. The stored values remain `service_tier=priority` and
+`service_tier=default`, so older CLAI versions can read them. A custom
+`service_tier` body parameter still takes precedence.
 
 To extend the built-in picker in a CLAI source change, add a source returning
 CatalogModel values in model_catalog.py and merge it in catalog(). Adding a

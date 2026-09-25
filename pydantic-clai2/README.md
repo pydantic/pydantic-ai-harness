@@ -12,7 +12,21 @@ Context management is the built-in `compaction` plugin,
 The `/plugins` menu also lists every other harness capability, disabled by
 default. Press Space to enable one. Some need optional packages, credentials,
 or constructor settings first; see [optional harness capabilities](PLUGINS.md#optional-harness-capabilities).
-Python 3.11+ is required by Termflow. Tracking issue: https://github.com/pydantic/pydantic-ai-harness/issues/875.
+`/mcp` manages MCP servers the way Code Puppy's `/mcp` does. Bare `/mcp` shows a
+status dashboard. `/mcp install` opens a form where you name the server, pick
+`stdio`, `http`, or `sse`, type its URL or command, edit the rest of its JSON
+configuration in your editor, and switch on OAuth sign-in for remote servers.
+`/mcp edit NAME` reopens the same form. `/mcp start NAME`, `stop NAME`,
+`restart NAME`, `status NAME`, `logs NAME [LINES]`, `auth NAME [logout]`,
+`remove NAME`, and `trust [status|accept|revoke]` manage servers, and `/mcp help`
+lists them all. Saved servers are available to the agent from the next prompt,
+with tool names prefixed by the server name. A server connects on the first
+prompt that needs it (or `/mcp start`) and stays connected; one that cannot
+connect is marked `error` and left out rather than failing the prompt. See
+[Connect MCP servers](PLUGINS.md#connect-mcp-servers) for storage, secrets, OAuth,
+and project trust. `/plugins disable mcp` removes the command and tools.
+
+Python 3.10+ is required.
 
 CLAI file tools can access paths outside the workspace, including `/tmp`, and do
 not protect secret files or repository metadata. OS permissions still apply.
@@ -28,6 +42,39 @@ Use `/set display.tool_output true` to show detailed output again, or
 `display.shell_lines` and `display.grep_lines` limit previews to 20 lines by
 default. Plugin-provided rendering, including interactive questions, is unchanged.
 
+## Startup
+
+`clai2 --help` parses arguments without loading the agent or plugins. Interactive
+startup defers model menus and provider integrations until you open those menus,
+log in, or run a prompt. Once the prompt is ready, a background thread imports
+them, so the first prompt usually finds them loaded; if it arrives sooner, it waits
+for the rest of those imports. Enabled plugins still load before the first prompt;
+their initialization contributes to startup time.
+`/login` offers both Codex and GitHub Copilot without loading their integrations for
+completion. Copilot requests use your saved login through the lazy provider resolver.
+
+## Desktop notifications
+
+The built-in `notifications` plugin is enabled by default. Interactive sessions
+send a desktop notification when a turn finishes or fails, and when the model
+asks a question through `ask_user`. Cancelled turns do not notify. Messages use
+the title `CLAI2` and generic status text, not prompts, answers, paths, or errors.
+
+macOS uses the system `osascript` notification service. Allow notifications for
+Script Editor in System Settings > Notifications; Focus modes can suppress them.
+Linux uses `/usr/bin/notify-send` when installed and a desktop notification service is
+available. Windows, redirected output, headless mode, and SSH sessions do not
+send notifications. These are local OS notifications, not terminal escape
+sequences, so local tmux sessions need no passthrough configuration. CLAI does
+not detect terminal focus; notifications are submitted even while you are
+looking at the terminal. Delivery and presentation depend on OS settings.
+
+Use `/plugins disable notifications` to persistently turn them off and
+`/plugins enable notifications` to restore them. `/plugins remove notifications`
+resets the built-in default. Missing services, nonzero exits, and a two-second
+submission timeout do not fail the turn. No notification-specific telemetry is
+emitted.
+
 ## Code highlighting
 
 Fenced code uses the fence's language for syntax highlighting. CLAI renders a
@@ -35,7 +82,9 @@ block when its closing fence arrives, or when the text part ends if the fence
 is unfinished. This keeps multiline strings and comments correctly colored.
 Prose outside fences still streams line by line. Unlabelled and Markdown fences
 stay literal, including indentation and blank lines; unknown languages use plain
-text. Long code lines wrap to the terminal width.
+text. Long code lines wrap to the terminal width. Response and reasoning code
+blocks use the terminal foreground and ANSI syntax colours, rather than pale
+text intended for a dark background. Bundled themes supply their own ANSI colours.
 
 ## Word deletion
 
@@ -63,6 +112,32 @@ interrupted turns are closed out by core on the next prompt, without replaying
 those tools. External application cancellation still propagates, and completed
 tool side effects cannot be undone.
 
+## Shell commands with `!`
+
+A line that starts with `!`, after trimming surrounding whitespace, runs in the
+system shell instead of starting an agent turn:
+
+```text
+> !git status
+$ git status
+Shell passthrough, not sent to the agent
+...
+Done (0.1s)
+```
+
+The command runs through the system shell (`/bin/sh -c` on POSIX, `cmd.exe` on
+Windows), not your login shell, so zsh or fish syntax and shell aliases are not
+available. It runs in CLAI's working directory, with the terminal's input and output, so interactive programs and pagers work. CLAI
+reports `Done` or the exit code with the elapsed time. Ctrl-C interrupts the
+command and returns to the prompt. The command shares CLAI's process group, so
+every process it started receives the Ctrl-C from the terminal. If the shell
+itself has not exited 0.25 seconds later it is killed, as `subprocess.run`
+does. A program started by a compound command (`a; b`) that ignores Ctrl-C can
+outlive that shell. As at other times, a second Ctrl-C within two seconds exits
+CLAI. Neither the command nor its output is added to the conversation, and a
+bare `!` is sent to the agent as an ordinary prompt. Queued `!` lines run in
+order with other queued input. `/help` lists the syntax.
+
 ## Prompt area
 
 ```text
@@ -77,7 +152,11 @@ model | context: ... | running: shell
 ```
 
 The prompt sits above the footer with one editable line when empty. It grows
-for wrapped or pasted text, not to fill the terminal. Completion suggestions
+for wrapped or pasted text, not to fill the terminal. Text pastes of five or more
+lines, or at least 1,000 characters, display as `[paste N lines]`. The full text
+is still submitted and saved in input history. Move the cursor inside a folded
+paste to reveal it for editing; recalled history shows the full text.
+Completion suggestions
 appear below the draft, between the top and bottom rules. The rows carry no
 side borders and no prompt marker, so they cannot drift out of alignment.
 History search stays compact too. The bordered prompt area stays visible below
@@ -98,7 +177,8 @@ the number waiting. This is a read-only preview, not a queue editor. Control byt
 text are escaped in previews and prompt echoes; the submitted text is unchanged.
 
 Messages and slash commands run in submission order, after the current turn and its cleanup
-finish. They do not interrupt or steer the active turn. An unsubmitted draft stays
+finish. They do not interrupt or steer the active turn. Bare settings menus such as
+`/set` are the exception: they open during the turn (see "Settings and commands"). An unsubmitted draft stays
 in the editor as turns finish. Queued messages are not saved as conversation turns
 until execution starts, and are discarded on exit or `/reload`.
 
@@ -149,11 +229,11 @@ to `config.db`: `$XDG_CONFIG_HOME/pydantic-clai2/input-history`, or
 to its owner (mode 0600). Avoid entering secrets in the prompt: input history is
 not encrypted. Delete this file while CLAI is closed to clear saved input.
 `/new` starts a new saved conversation, without deleting the previous one or
-input recall. Model responses and tool results are not saved to this file.
+input recall. `/clear`, or bare `clear`, is an alias of `/new`. Model responses and tool results are not saved to this file.
 
 ## CI coverage
 
-The `CLAI coverage` check combines branch coverage from Python 3.11 and 3.14
+The `CLAI coverage` check combines branch coverage from Python 3.10 and 3.14
 and requires 100% for `src/pydantic_clai2`. It is separate from Harness coverage;
 passing CLAI test jobs alone does not mean either coverage gate has passed.
 Tracked under [#875](https://github.com/pydantic/pydantic-ai-harness/issues/875).
@@ -226,10 +306,17 @@ a relative `--database` path still refers to the directory you launched from.
 CLAI prints the new path and branch. Existing branches and non-empty directories
 are rejected. If checkout fails, CLAI tries to remove only the branch it just
 created, without forcing deletion. If cleanup or the ignore edit fails, the error
-names the retained branch or checkout for recovery. The worktree and branch
-remain after exit, including startup
-errors after creation, so CLAI does not delete your work. Enter that directory
-and run `clai2 --resume` to continue a saved session. `--worktree` cannot be
+names the retained branch or checkout for recovery.
+
+On normal interactive exit from a linked worktree, CLAI asks whether to remove
+its checkout. Enter, Ctrl-C, or EOF keeps it; only `y` or `yes` confirms removal.
+This also applies when launching inside an existing linked worktree. Git removal
+runs without `--force`, so dirty or locked worktrees are kept with an explanation.
+The branch is kept even when removal succeeds. The main checkout is not offered
+for removal. Headless runs, piped input, and startup errors keep the worktree
+without prompting. `/new`, `/resume`, and `/reload` do not remove the checkout:
+they leave the shell using the same working directory.
+Enter a retained directory and run `clai2 --resume` to continue a saved session. `--worktree` cannot be
 combined with `--resume`, `config`, or `plugins`.
 
 When you no longer need the checkout, use Git's own cleanup commands from your
@@ -245,6 +332,9 @@ still access files outside it. Creation runs before the agent starts and emits
 no agent telemetry spans.
 
 ## Codex authentication
+
+The built-in model catalog and `/set model` completions include
+`openai-codex:gpt-6-sol` and `openai-codex:gpt-6-luna`.
 
 `/login openai-codex` opens the browser and uses core's `OpenAICodexOAuthFlow`:
 authorization code with PKCE, state validation, and a callback at
@@ -266,11 +356,16 @@ Installing or selecting a plaintext backend can store tokens in plaintext. Core 
 token refresh through CLAI's `OpenAICodexCredentialSource`. Tests mock keyring,
 the browser, and OAuth exchange and do not access real credentials.
 
+If Codex cannot refresh your login, CLAI tells you to run `/login openai-codex`
+in an interactive session, then retry your message. This replaces the generic
+connection error that can hide an expired login. Headless runs show the same
+advice on stderr and exit with code 1. CLAI does not retry the turn automatically.
+
 When no keyring backend exists at all (keyring raises `NoKeyringError` or
 `InitError`, typical on a headless Linux box or over SSH), credentials go to a
 `0600` file in `$XDG_CONFIG_HOME/pydantic-clai2/` (`~/.config/pydantic-clai2/` by
 default) instead, named for the account: Codex uses `credentials-openai-codex.json`,
-and the vllm and openrouter connections use their own files. Like keyring entries,
+and the GitHub Copilot, vllm and openrouter connections use their own files. Like keyring entries,
 these files are per user, so `--database PATH` does not move them. `/login` says so in its confirmation. A locked keyring is not treated as
 missing; unlock it instead. Once a keyring becomes available, the next login or
 token refresh moves the credentials there and deletes the file.
@@ -284,6 +379,48 @@ The requested default does not guarantee model availability for a subscription.
 Custom agents supplied to `chat` retain their model unless settings explicitly
 select an override. `/login` is async, and plugin command handlers may also return
 an awaitable string.
+
+## GitHub Copilot subscriptions
+
+```bash
+uv run clai2
+```
+
+In CLAI, run `/login github-copilot`, then open `/add_model` and choose
+`github-copilot`. The provider menu also starts login when no credentials exist.
+You do not need to register an OAuth application or configure a client ID.
+CLAI supplies the same [public Copilot OAuth client ID as Pi](https://github.com/earendil-works/pi/blob/fde38ed7c2f64434beffc6c0ec3b9994cb89ae23/packages/ai/src/auth/oauth/github-copilot.ts#L10-L11)
+and requests `read:user` access to your GitHub profile. This identifies the existing
+Copilot OAuth application, not a separately registered CLAI application.
+`GITHUB_COPILOT_CLIENT_ID` remains an optional override for your own device-enabled
+OAuth application; unset or blank uses the bundled default.
+The workspace temporarily pins the merged Pydantic AI device-flow implementation
+until it is released.
+
+Login prints a code and `https://github.com/login/device`, then starts polling.
+Open that link on this or another device and approve only the code shown by your
+own CLAI session. CLAI does not launch a browser, so a text browser cannot block
+login or take over your SSH terminal. Ctrl-C stops polling; GitHub controls the
+code's expiry. No localhost callback or pasted token is needed.
+
+GitHub authorization alone does not establish Copilot access. The model menu
+queries your account's catalog and lists only picker-enabled models with
+`/chat/completions` support. The shared model menu includes details and `Ctrl+S`
+settings. Your subscription and organization policy still control inference access.
+You can also select a known ID with `/add_model github-copilot:claude-haiku-4.5`.
+
+Credentials use the existing keyring backend under the `github-copilot` account,
+separate from Codex and API keys. Without a keyring, CLAI reports the plaintext
+`credentials-github-copilot.json` fallback file, created with mode `0600`.
+Tokens and their issuance time stay out of settings, history, and login output.
+Expiring tokens require `/login github-copilot` again; CLAI does not refresh them.
+A failed or cancelled authorization leaves the previous login unchanged.
+
+Without a saved login, CLAI accepts `GITHUB_COPILOT_API_KEY`,
+`GITHUB_COPILOT_API_TOKEN`, or `COPILOT_GITHUB_TOKEN`, in that order.
+It does not read `GH_TOKEN`, `GITHUB_TOKEN`, or another application's token files.
+Core owns inference and its telemetry; CLAI adds no login-specific spans.
+`/login` without a provider continues to sign in to Codex.
 
 ## Settings and commands
 
@@ -316,6 +453,13 @@ anything not listed), everything else a typed input that validates as you go.
 An empty value resets. `R` resets the highlighted setting. Esc closes. Every
 edit saves and applies immediately, the same as `/set KEY VALUE`.
 
+While a turn is running, `/set`, `/model`, `/add_model`, `/model_settings`,
+`/theme`, and `/spinner` typed without arguments open their menu right away
+instead of queueing. The turn keeps running: its output is held while the menu is open
+and printed in order when the menu closes. A question from the agent waits for
+the menu to close. Model and run settings saved in the menu apply once the
+running turn ends. With arguments, these commands queue like any other.
+
 `run.tool_retries` sets the default retry budget per tool call, starting at `3`.
 Use a non-negative integer; `0` disables retries. Changes apply to the next turn.
 Explicit per-tool or per-toolset retry limits take precedence. This setting does
@@ -323,9 +467,11 @@ not change output-validation or HTTP transport retries.
 
 ## Models and their settings
 
-`/model` selects from models you have already added. Its flat, searchable picker
-and Tab completion use only that saved list. `/model NAME` switches directly to
-an added model. The currently configured model is kept in the list when upgrading.
+`/model` selects from models you have already added. Choose **Add a model...**
+to browse providers and select a new model without leaving the command. This
+option is available even when no models have been added. Tab completion uses
+only the saved list. `/model NAME` switches directly to an added model.
+The currently configured model is kept in the list when upgrading.
 
 `/add_model` opens a searchable provider list, then a model picker for that provider.
 Esc from the model list returns to providers. Providers are unique prefixes from
@@ -352,6 +498,16 @@ Tab completes added models.
 `Ctrl+S` in `/add_model` opens the same editor. Edits save immediately and apply
 on the next prompt. `r` resets a field; Esc or Ctrl-C goes back. Fixed choices
 open a picker; numeric fields accept typed values, and empty input resets.
+
+First add `openai-codex:gpt-6-astra` with `/add_model`, then open `/model_settings openai-codex:gpt-6-astra`
+(or your saved Codex model), then **Service Tier / Fast Mode**. Choose
+**Fast (priority)** to request fast processing, or **Standard (default)** to
+turn it off. [Codex fast mode](https://developers.openai.com/codex/speed)
+uses more ChatGPT credits and depends on model and account availability. It does
+not lower reasoning effort. Reset restores the existing model default; it does
+not enable fast mode. The stored values remain `service_tier=priority` and
+`service_tier=default`, so older CLAI versions can read them. A custom
+`service_tier` body parameter still takes precedence.
 
 Model preferences are shared across checkouts. Reading saved preferences ignores
 unknown fields, so newer settings do not break an older reader with this
@@ -514,10 +670,12 @@ the project file. `/plugins disable repo_context` turns it off, for this and
 every later session; `/plugins enable repo_context` brings it back. See
 [PLUGINS.md](PLUGINS.md#the-built-in-plugins) for its settings.
 
-Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/add_model`, `/model_settings`, `/help`, `/new`, `/resume`, `/exit`, `/config`,
-`/plugins`, `/reload`, `/usage`, `/cost`, and `/compact` from the built-in `compaction` plugin.
+Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/add_model`, `/model_settings`, `/help`, `/new`, `/clear`, `/resume`, `/exit`, `/config`,
+`/plugins`, `/reload`, `/usage`, `/cost`, `/fork`, `/forks`, and `/compact` from the built-in `compaction` plugin.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
-and paths after `@`. Path completion inserts a path; it does not attach file contents.
+and paths after `@`. Suggestions match any substring, case-sensitively. For paths,
+matching applies to the filename within the typed directory. Path completion inserts
+a path; it does not attach file contents.
 Unknown command-shaped input such as `/missing` still reports an error instead
 of reaching the model. Absolute paths such as `/Users/me/Desktop/Screenshot.png`
 are prompts, not commands: a slash, dot, or backslash in the first token after
@@ -531,8 +689,15 @@ paste of existing image paths creates attachments as described in
 [Pasting images](#pasting-images).
 
 Up/down move through multiline drafts, then recall saved prompt history.
-Shift-Enter inserts a newline; Enter submits. Alt-Enter also works as a fallback
-for terminals that do not report Shift-Enter separately. CLAI requests modified
+Enter submits a prompt when idle and queues a separate follow-up turn when busy.
+To steer instead, first queue the message with Enter, then press Alt+Enter
+(Option+Enter). This sends the oldest queued follow-up to the active run at its
+next opportunity without cancelling in-flight tools or changing your draft.
+Each Alt+Enter sends one message. If the run is no longer accepting steering,
+the message stays queued. Slash commands, `!` shell commands, and exit signals
+are not steered or skipped over. With no queued message, Alt+Enter does nothing.
+While running, the input box shows both shortcuts.
+Shift-Enter inserts a newline. CLAI requests modified
 key reporting while the editor is active and releases it for menus and on exit.
 Ctrl-R searches history; Enter accepts a search
 result without submitting it. Ctrl-D exits when the draft is empty. Ctrl-C at
@@ -573,6 +738,44 @@ loaded dynamically rather than declared by module-scope imports. `/reload` does 
 rerun the CLI or recursively reload third-party packages. Import-time side effects
 still cannot be undone. Use `/plugins reload NAME` when you only want to reload one
 plugin.
+
+## Background forks: `/fork`
+
+`/fork` runs a copy of the current conversation in the background, so you can
+keep working while it answers. It follows Code Puppy's `/fork`.
+
+```text
+/fork write tests for the parser        fork with the current model
+/fork @openai:gpt-5 review this         fork with another model
+/fork cancel 2                          stop fork #2
+/forks                                  list this session's forks
+```
+
+The fork copies the retained history at the moment `/fork` runs and continues
+from that copy as its own saved session. Later turns in the foreground do not
+reach it, and it does not change the foreground history. With no history yet, or
+if the copy fails, the fork starts with a fresh context and says so. It uses the
+current model, plugins, and model settings unless `@model` names another model.
+CLAI has one agent, so unlike Code Puppy there is no `@agent` argument.
+
+While forks run, the editor shows one row per fork above the prompt, like Code
+Puppy's sub-agent panel: the fork number, its model, your `/spinner`, the elapsed
+time, and what it is doing (`thinking`, `tool: NAME`, `responding`). A fork that
+finished while a turn or command was running shows as done until its output prints.
+
+When a fork finishes, CLAI prints a `FORK #N RESPONSE` banner with the model, the response as
+Markdown, the elapsed time, and the saved session id. `/resume SESSION-ID`
+switches the foreground to that fork's conversation. Output waits while a turn or
+command is running, then prints before the next prompt. Commands run between
+turns, so a `/fork` typed during a turn is queued like any other command.
+
+Cancelling a turn with Esc or Ctrl-C also cancels running forks. `/exit` and
+`/reload` cancel them too.
+
+A fork is a turn for plugins: `turn_start` runs before it starts and can rewrite
+or cancel its prompt, which refuses the fork, and `turn_end` reports its outcome
+when it finishes. Forks share the foreground's plugin instances, so a tool that
+asks you a question can open its picker from a fork.
 
 ## Saved sessions and `/resume`
 
@@ -736,9 +939,10 @@ refresh with the next request; `/compact` alone does not change them.
 
 Ask, for example, "Create a plugin with a custom menu" or "Use my model provider".
 The default agent has a `read_clai_customization_guide` tool and a short instruction
-to read it before advising on CLAI customization. The guide is bundled with the
-installed package and loaded only when the tool is called, not included in every
-prompt. No network access or source checkout is needed to read it.
+to read it before advising on CLAI customization. That hint is placed after the coding
+guidance the plugins contribute and before the repository instruction file. The guide
+is bundled with the installed package and loaded only when the tool is called, not
+included in every prompt. No network access or source checkout is needed to read it.
 This tool needs no arguments and ignores extra arguments supplied by a model.
 Other tools keep their existing validation.
 
@@ -782,6 +986,8 @@ only. Structured outputs are supported and displayed after completion.
 /theme default
 ```
 
+Theme selection and cancellation are silent.
+
 `/theme` opens a searchable picker. Its preview shows a sample conversation with
 Markdown, thinking, a tool call, syntax highlighting, warnings, errors, and the
 input/status area. Each bundled palette paints the sample's foreground and
@@ -809,9 +1015,56 @@ and cancellation. Unsupported terminals may ignore these changes. Redirected
 output receives no palette-changing sequences. Your terminal configuration file
 is not modified.
 
-The early splash retains its brand colours. Syntax highlighting keeps Monokai;
-bundled palettes use Termflow's default diff colours. Theme selection adds no
+The early splash retains its brand colours. Code uses the terminal foreground
+and ANSI syntax colours; bundled palettes use Termflow's default diff colours. Theme selection adds no
 model requests or telemetry.
+
+### Spinners
+
+```text
+/spinner
+/spinner puppy
+/spinner zoomies 0.1
+/spinner init
+/set display.spinner dots
+```
+
+The spinner is the animation in the `Working` title above the prompt while a turn
+runs. `working`, the braille CLAI has always shown, is the default. The catalogue
+also carries every Code Puppy builtin: `puppy`, `bone`, `zoomies`, `paws`, `dots`,
+`dotsWide`, `dots8Bit`, `dotsCircle`, `sand`, `growVertical`, `growHorizontal`,
+`noise`, `binary`, `chevrons`, `bouncingBar`, `bouncingBall`, `pong`, `fistBump`,
+and `aesthetic`.
+
+`/spinner` opens a searchable picker with an animated preview. `-`/`+` (or
+Left/Right) make the highlighted spinner slower or faster in steps of 0.02 seconds;
+Enter applies it, Esc keeps your current choice. `/spinner NAME [SECONDS]` applies
+by name, ignoring case, and Tab completes the names. The choice is saved as
+`display.spinner` and shows on the next frame, with no restart.
+
+A changed speed, from the picker or `SECONDS`, is saved as that spinner's
+`interval` in `spinners.json` next to CLAI's settings
+(`~/.config/pydantic-clai2/spinners.json`). The file is also where you add your
+own; `/spinner init` writes a starter:
+
+```json
+{
+  "sniffer": {
+    "frames": ["( .    ) ", "(  .   ) ", "(   .  ) ", "(    . ) "],
+    "interval": 0.1,
+    "description": "a very minimalist puppy"
+  },
+  "zoomies": {"interval": 0.2}
+}
+```
+
+An entry with `frames` defines a spinner; one without `frames` that names an
+existing spinner changes only its `interval` or `description`. Entries in the file
+replace builtins and plugin spinners of the same name. Intervals are clamped to
+0.02-1 seconds and frames to 40 characters, padded to one width so the title does
+not shift. Edits apply on the next frame. `/spinner` lists any entry it skipped
+and why. A saved name that no longer exists, such as a removed plugin's, shows
+`working`. Plugins add spinners with `host.spinner` (see `PLUGINS.md`).
 
 ### Streaming
 
@@ -847,6 +1100,13 @@ still wait for a newline or part boundary, as in Code Puppy's Markdown path.
 Tool calls print once with a filled-circle marker and the tool name, followed by one blank line. Long names
 are truncated to one terminal row. Completion activity remains in the footer
 rather than adding a separate `Finished:` line to the transcript.
+
+Markdown link labels are clickable in terminals that support OSC 8 hyperlinks.
+The URL stays visible beside the label for other terminals and redirected output.
+URLs longer than 2,048 characters are shown without clickable metadata to limit
+streaming output size.
+Links survive viewport resizing; following one uses your terminal's usual click
+modifier (often Cmd-click or Ctrl-click).
 
 ## Grep previews
 
@@ -889,7 +1149,8 @@ Native capability events drive specialized output: `FileEditedEvent` renders its
 bounded unified diff using Termflow `DiffRenderer`, the same renderer Code Puppy
 uses. The default appearance keeps CLAI's existing addition and deletion
 backgrounds; bundled palettes use Termflow's defaults. Both use brighter markers.
-Code syntax colours retain the Monokai default. Successful file writes also show the proposed diff from their matching
+Code uses the terminal foreground and ANSI syntax colours on the terminal
+background. Successful file writes also show the proposed diff from their matching
 `FileChangeRequestEvent`: new files show additions, overwrites show before/after
 changes. Without a matching request event, only the written path is shown. Failed
 or cancelled writes do not display a success diff. Large diffs retain the
@@ -903,6 +1164,81 @@ Shell output permits ANSI SGR color/style sequences, decoded into Rich text rath
 than passed directly to the terminal. Styles persist across chunks and lines per
 command; cursor movement, clipboard commands, and other controls remain escaped.
 Plain shell output stays dim. ANSI generated by Termflow itself is retained.
+
+## Speculative execution
+
+Press **Ctrl+X Ctrl+S** to switch speculative execution on or off, the same chord
+as Code Puppy. It is off by default and saved as `run.speculative_code_mode`, so
+`/set run.speculative_code_mode true` does the same. The next turn uses the new
+value; a turn already running keeps the tools it started with.
+
+While it is on, every tool except `write_file` and `edit_file` becomes a
+function inside one harness `CodeMode` `run_code` tool, `shell` included. Other
+tools that run a program passed as a string, such as a workflow plugin, stay
+native as `CodeMode` keeps them by default.
+
+`run_code` is a persistent Python sandbox with isolated environment variables,
+the host clock (through `datetime`), and no network. The model writes one snippet that calls many tools, and CLAI runs it while the model
+is still writing.
+
+The sandbox's `pathlib` only reaches what the file tools may reach. `pathlib`
+calls on a mount skip the `FileSystem` checks, so CLAI mounts the `FileSystem`
+working directory at its real path only when a mount can enforce the same limits:
+
+- **Read-write:** `read_file` and `write_file` registered, no patterns, and not
+  `read_only`. This is the built-in `coder` plugin's default. `pathlib` can also
+  delete and rename files there, which `write_file` cannot do but could already
+  replace the content of.
+- **Read-only:** `read_file` registered but `write_file` missing, `read_only`, or
+  `protected_patterns` set.
+- **Not mounted:** no `read_file`, `allowed_patterns` or `denied_patterns`, no
+  `FileSystem`, more than one, or a plugin that adds a capability function or
+  `DynamicCapability` (which could supply one at run time). File access then
+  goes through the file tools only.
+
+While the model writes:
+
+- **Eager execution** runs each complete statement as soon as it has streamed,
+  so a slow `shell` build or test starts before the snippet is finished.
+- **Speculation** starts `list_files`, `read_file`, `grep`, and
+  `read_clai_customization_guide` calls whose arguments are all literals the
+  moment their line has streamed. Only these
+  read-only tools speculate, because an early call may belong to a branch the
+  snippet never takes. They must come from CLAI's own file tools and guide: a
+  plugin or MCP tool with the same name, or one that declares itself read-only,
+  waits like any other call. Writes and shell commands never start speculatively.
+
+The model gets instructions for writing snippets that benefit. On Anthropic
+models CLAI also sets `anthropic_eager_input_streaming`, since Anthropic
+otherwise sends tool arguments in one burst at the end, which leaves no time to
+run anything early.
+
+Tools called from inside `run_code` show the same headers, previews, and shell
+output as direct calls, listed under their `run_code` header in the order they
+ran. A speculative call is shown only once the snippet uses its result, so a
+launch for a branch the snippet never took does not appear.
+
+A pinned row above the footer shows the session's totals while the switch is on:
+
+```text
+Speculative Execution  29 hits · 0 misses · 0 wasted    saved ≥ 7.0s
+```
+
+- **hits:** sandbox calls that adopted a speculative launch.
+- **misses:** speculation-eligible calls that ran without a matching launch.
+- **wasted:** launches discarded without being used.
+- **saved ≥:** the summed durations of speculative calls that had finished
+  before the snippet asked for them, plus the time sandbox calls spent running
+  while the `run_code` arguments were still streaming. Calls still running when
+  claimed count as hits but add no time; restarted, rejected, or cancelled
+  snippets add nothing. It is a lower bound on hidden tool latency, not
+  wall-clock speedup, since concurrent calls can overlap.
+
+Counts are coloured only when non-zero, using `/theme` colours. Switching off
+hides the row; switching back on shows the same session totals. Headless runs
+and redirected output use the same tools but show no row. Speculative execution
+needs `pydantic-monty` (`pip install "pydantic-ai-harness[code-mode]"`); without
+it, CLAI prints a warning and runs tools natively.
 
 ## Status line
 
@@ -990,13 +1326,21 @@ plugin list. Use `/plugins list` to print it. Plugins are trusted code running a
 ## Questions from the model
 
 When the task is ambiguous, the model can call `ask_user_question` instead of
-guessing. Each question opens a full-screen menu: options as rows, the question
-and the highlighted option's description alongside, `question 2 of 3` in the
-title when there are several. Enter picks one; on multi-select questions Space
-toggles and Enter confirms (with nothing toggled, Enter picks the highlighted
-option); Esc or Ctrl-C declines, which the model is told so it can make a
-stated choice and carry on. Your picks are printed to the
-transcript afterwards.
+guessing. Questions appear inline, with the conversation still visible above a
+compact numbered picker. Use Up/Down and Enter, or press an option's number to
+select it. For multiple selections, Enter or a number toggles a choice; select
+`Done` to submit. At least one choice is required. Esc or Ctrl-C declines the
+whole request, which the model is told so it can make a stated choice and carry
+on. Several questions show progress in the title. The editor's draft is
+preserved, and your picks are printed to the transcript afterwards.
+
+The inline `ask_user_question` picker also offers `Other (type answer)`.
+Choose it to type your own answer instead of the suggested options, including for
+multi-select questions. Enter submits nonblank text. Esc returns to the choices
+and keeps your draft; Ctrl-C declines the whole request. Backspace and arrow keys
+edit the text. Multiline paste is inserted as text and waits for Enter; it does
+not submit an answer or select choices. The conversation stays visible while you type. Custom answers
+appear in the transcript and reach the model as a one-item list under the question's header.
 
 The menu is the built-in `ask_user` plugin around the harness's
 [`AskUser`](../docs/ask-user.md) capability. The capability only knows an

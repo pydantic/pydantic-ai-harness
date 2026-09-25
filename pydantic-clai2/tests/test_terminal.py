@@ -204,9 +204,15 @@ def test_set_autocomplete() -> None:
     models = list(commands.get_completions(Document('/set model anthropic:'), CompleteEvent()))
     assert models
     codex = list(commands.get_completions(Document('/set model openai-codex'), CompleteEvent()))
-    assert [item.text for item in codex] == ['openai-codex:', 'openai-codex:gpt-6-astra']
+    assert {item.text for item in codex} >= {
+        'openai-codex:',
+        'openai-codex:gpt-6-astra',
+        'openai-codex:gpt-6-sol',
+        'openai-codex:gpt-6-luna',
+    }
+    assert len(codex) == len({item.text for item in codex})
     assert codex[0].start_position == -len('openai-codex')
-    assert all(c.text.startswith('anthropic:') for c in models)
+    assert all('anthropic:' in c.text for c in models)
 
 
 @pytest.mark.parametrize('height', [24, 45])
@@ -381,7 +387,7 @@ def test_file_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     (tmp_path / 'example.py').touch()
     monkeypatch.chdir(tmp_path)
     completions = list(Commands().get_completions(Document('read @exam'), CompleteEvent()))
-    assert any('ple.py' in completion.text for completion in completions)
+    assert [(item.text, item.start_position) for item in completions] == [('example.py', -4)]
 
 
 def test_splash_restores_streams(monkeypatch: pytest.MonkeyPatch) -> None:

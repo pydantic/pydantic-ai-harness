@@ -71,9 +71,16 @@ Plugins load and unload while CLAI runs. The rules that make that safe:
 - **`reload` is unload, re-import, load.** Drop-in entry modules use fresh source.
   Installed modules use `importlib.reload`, which retains globals absent from the
   new source. Plugins must explicitly initialize their state on activation.
+- **Instruction order is capability order.** Placement is a core
+  `CapabilityOrdering` (`position`, `wraps`, `wrapped_by`), not a CLAI list.
 - **Registration is idempotent per name.** A capability is bound per run
   (`agent.run(capabilities=...)`), so "active for the next prompt" is the
   natural unit; nothing rebuilds the agent.
+- **Shipped plugins register first, in declared order.** The menu's alphabetical
+  order is for scanning only. Registration order is the order instructions,
+  renderers, and status segments are consulted in, so `coder`'s guidance leads
+  the prompt. `customization_guide()` orders itself after the guidance plugins
+  contribute and before harness `RepoContext`, so the CLAI hint never leads.
 - **Built-ins are declarations, not code paths.** `DEFAULT_PLUGINS` in
   `_app.py` lists what CLAI ships enabled (`coder`, `ask_user`, `repo_context`,
   `compaction`, `persistence`, `logfire`). The loader treats them like drop-ins with the lowest
@@ -127,7 +134,7 @@ actions, `.footer_hint` for the key legend, `markdown_style()` for colours.
 - Nothing prints to the console while the menu is open; the alternate screen
   would hide it. Show empty states and errors inside the menu as disabled rows.
 - Esc and Ctrl-C close cleanly. They are not errors.
-- A menu opened mid-run (the `ask_user` question menu) goes inside
+- A widget opened mid-run (including the inline `ask_user` picker) goes inside
   `async with host.full_screen()`, which flushes streamed text and suspends the
   editor's input reader first, preserving its draft. Slash-command handlers
   already run with the editor suspended. Do not start a second input reader
@@ -168,8 +175,10 @@ palette or `None` for the original appearance. Termflow owns palette application
 and reset; `theme.use(...)` leaves the terminal untouched in the default session.
 Markdown keeps its original style by default and uses `to_render_style()` for a
 selected palette. The preview renders a sample without OSC changes or persistence.
-Heavy imports in `theme.py` stay lazy for the splash. Syntax keeps Monokai;
-default diff colours stay unchanged, while bundled palettes use Termflow defaults.
+Heavy imports in `theme.py` stay lazy for the splash. Code uses the terminal
+foreground and ANSI syntax colours through `theme.syntax_theme()`, shared by
+streamed fences and theme previews. Default diff colours stay unchanged, while
+bundled palettes use Termflow defaults.
 
 ## File map
 
@@ -179,6 +188,7 @@ default diff colours stay unchanged, while bundled palettes use Termflow default
 | `_app.py` | the prompt loop and built-in `/commands` |
 | `_session.py` | conversation state, revision-checked saves, restore-only resume, per-run plugins |
 | `sessions.py` | resume command and background namer ownership; built-in step capture |
+| `forks.py` | `/fork` and `/forks`: history snapshot, background child sessions, deferred fork output |
 | `session_browser.py` | project/session browser using Termflow layout and terminal primitives |
 | `_rendering.py` | streaming Markdown and thinking |
 | `plugins.py` | `PluginHost`, hook names, event dataclasses |
@@ -208,8 +218,15 @@ default diff colours stay unchanged, while bundled palettes use Termflow default
 | `settings_store.py` | the SQLite store under `$XDG_CONFIG_HOME/pydantic-clai2/` |
 | `project_settings.py` | `.clai/settings.json`: the walk-up to the git root, validation, `ProjectSettings` |
 | `repo_context.py` | the built-in `repo_context` plugin over harness `RepoContext` |
+| `speculation.py` | the `run.speculative_code_mode` switch, `Ctrl+X Ctrl+S` toggle, session counters and pinned row |
+| `speculative_mode.py` | harness `CodeMode` wiring (native writes, read-only speculation allowlist, guidance), imported only while on |
+| `eager_timing.py` | eager `run_code` latency measurement and the nested-call id pattern |
+| `sandbox_calls.py` | events and ordering that render calls from inside `run_code` like direct calls; no harness imports |
 | `theme.py` | Existing brand roles, opt-in Termflow palette scope, `color()`, `sgr()` |
 | `theme_picker.py` | `/theme` picker over Termflow's bundled palettes |
+| `spinners.py` | the working-animation catalogue: builtins, plugin `host.spinner`, the user's `spinners.json`, `Spinners` |
+| `spinner_frames.py` | frame data for the Code Puppy cli-spinners pack |
+| `spinner_picker.py` | `/spinner`: animated picker, by-name selection with speed, `init` |
 
 Keep files concise - we don't need any 10,000 line files. Single responsibility.
 
@@ -288,3 +305,8 @@ coordinates or cursor reports. Never send erase-scrollback (CSI 3 J). Keep edito
 height changes separate from physical resize, preserve the draft, and close the
 resize output spool on both normal handoff and failure. `SIGWINCH` only marks the
 resize and schedules a paint; the signal handler must not perform terminal IO.
+
+The `ask_user` picker is an inline exception to the full-screen menu convention.
+It borrows the released `PromptSurface` while the editor is suspended, retaining
+the shared transcript for resize replay. Keep its numbered choices and Enter
+toggles; do not reintroduce alternate-screen switching or Space-to-toggle.

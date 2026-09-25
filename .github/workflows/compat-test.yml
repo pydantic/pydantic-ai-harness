@@ -96,6 +96,28 @@ jobs:
           pydantic-graph = { path = "${RUNNER_TEMP}/pydantic-ai/pydantic_graph", editable = true }
           EOF
 
+      # A workspace member's own `[tool.uv.sources]` entry overrides the root's, so a member
+      # that pins either package (say to a git commit awaiting release) would conflict with
+      # the checkout above. Drop those entries so the checkout is the only source.
+      - name: Let the checkout outrank workspace members' own sources
+        run: |
+          uv run --no-project --with tomlkit python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          import tomlkit
+
+          members = tomllib.loads(Path('pyproject.toml').read_text())['tool']['uv']['workspace']['members']
+          for member in (path for pattern in members for path in Path().glob(pattern)):
+              pyproject = member / 'pyproject.toml'
+              doc = tomlkit.parse(pyproject.read_text())
+              sources = doc.get('tool', {}).get('uv', {}).get('sources', {})
+              for name in ('pydantic-ai-slim', 'pydantic-graph'):
+                  if name in sources:
+                      print(f'{pyproject}: dropping {name} = {sources.pop(name).as_string()}')
+              pyproject.write_text(tomlkit.dumps(doc))
+          PY
+
       # `override-dependencies` *replaces* what any dependent declares for the packages it
       # names — it exists because `browser-use` pins provider SDKs to exact versions. Its
       # upper bounds describe what the *released* pydantic-ai supports, so leaving them in

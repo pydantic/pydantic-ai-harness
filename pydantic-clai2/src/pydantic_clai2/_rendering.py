@@ -1,7 +1,10 @@
 """Incremental Markdown rendering for native Pydantic AI events."""
 
 import asyncio
+import io
+import re
 from collections.abc import Callable, Sequence
+from typing import IO
 
 from pydantic_ai import (
     AgentStreamEvent,
@@ -17,6 +20,7 @@ from pydantic_ai import (
     ThinkingPartDelta,
 )
 from rich.console import Console, RenderableType
+from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
 from termflow import Parser, Renderer  # pyright: ignore[reportMissingTypeStubs]
@@ -32,6 +36,7 @@ from termflow.syntax import LANGUAGE_ALIASES  # pyright: ignore[reportMissingTyp
 
 from . import theme
 from .grep_output import GrepOutput
+from .sandbox_calls import SandboxCallOrder
 from .tool_output import ToolOutput, print_tool_header, terminal_text
 
 
@@ -53,6 +58,34 @@ def markdown_style() -> RenderStyle:
     )
 
 
+class LinkOutput(io.StringIO):
+    """Scope streamed hyperlinks to each write so editor paints and aborts stay unlinked."""
+
+    def __init__(self, *, output: IO[str]) -> None:
+        """Wrap one part's output without closing the underlying destination."""
+        super().__init__()
+        self.output = output
+        self._link = ''
+
+    def write(self, text: str) -> int:
+        """SmoothWriter supplies whole ANSI tokens, but can split a link's label."""
+        length = len(text)
+        prefix = self._link
+        text = re.sub(r'\x1b\]8;;([^\x1b]*)\x1b\\', self._track_link, text)
+        self.output.write(prefix + text + ('\x1b]8;;\x1b\\' if self._link else ''))
+        return length
+
+    def _track_link(self, match: re.Match[str]) -> str:
+        # Smoothing repeats metadata per chunk. Cap the destination so large
+        # model-generated URLs cannot amplify terminal output without bound.
+        self._link = match[0] if 0 < len(match[1]) <= 2048 else ''
+        return self._link or '\x1b]8;;\x1b\\'
+
+    def flush(self) -> None:
+        """Forward flushes without taking ownership of the terminal."""
+        self.output.flush()
+
+
 class StreamRenderer:
     """Stream text and dimmed reasoning through the same Markdown pipeline."""
 
@@ -70,6 +103,7 @@ class StreamRenderer:
     ) -> None:
         self.console = console
         self._renderers = tuple(renderers)
+        self._sandbox_calls = SandboxCallOrder()
         self.show_tool_output = show_tool_output
         self._tool_output = ToolOutput(console, shell_lines=shell_lines, show_output=show_tool_output)
         self._grep_output = GrepOutput(console, lines=grep_lines, show_output=show_tool_output)
@@ -89,6 +123,8 @@ class StreamRenderer:
 
     async def on_stream_event(self, event: AgentStreamEvent) -> None:
         """Bind this callback to `Session.on_stream_event`."""
+        if await self._render_sandbox_call(event):
+            return
         if await self._render_with_plugins(event):
             if isinstance(event, PartStartEvent) and isinstance(event.part, (TextPart, ThinkingPart)):
                 self._thinking = isinstance(event.part, ThinkingPart)
@@ -121,9 +157,22 @@ class StreamRenderer:
         elif isinstance(event, PartStartEvent) or isinstance(event, PartEndEvent) and event.index == self._index:
             await self.finish()
         elif isinstance(event, (FunctionToolCallEvent, FunctionToolResultEvent)):
-            await self.finish()
-            self.stop_loading()
-            self._render_tool_event(event)
+            await self._render_tool(event)
+
+    async def _render_sandbox_call(self, event: AgentStreamEvent) -> bool:
+        """Render a call from inside `run_code` like a direct one, under its `run_code` header."""
+        tool_events = self._sandbox_calls.tool_events(event)
+        if tool_events is None:
+            return False
+        for tool_event in tool_events:
+            if not await self._render_with_plugins(tool_event):
+                await self._render_tool(tool_event)
+        return True
+
+    async def _render_tool(self, event: FunctionToolCallEvent | FunctionToolResultEvent) -> None:
+        await self.finish()
+        self.stop_loading()
+        self._render_tool_event(event)
 
     def _render_tool_event(self, event: FunctionToolCallEvent | FunctionToolResultEvent) -> None:
         if isinstance(event, FunctionToolResultEvent):
@@ -154,17 +203,16 @@ class StreamRenderer:
             output=self._writer or self.console.file,  # pyright: ignore[reportArgumentType]
             width=self.console.width,
             style=markdown_style(),
-            features=RenderFeatures(clipboard=False, hyperlinks=False, images=False),
+            features=RenderFeatures(clipboard=False, hyperlinks=self.console.is_terminal, images=False),
             dim=self._thinking,
         )
 
     def _make_writer(self) -> SmoothWriter:
         """Reasoning keeps Code Puppy's slower thinking pace; responses use the configured catch-up."""
+        output = LinkOutput(output=self.console.file)
         if self._thinking:
-            return SmoothWriter(self.console.file, tick_interval=0.02, catch_up_seconds=0.4, min_chars_per_tick=2)
-        return SmoothWriter(
-            self.console.file, tick_interval=0.012, catch_up_seconds=self.smooth_seconds, min_chars_per_tick=1
-        )
+            return SmoothWriter(output, tick_interval=0.02, catch_up_seconds=0.4, min_chars_per_tick=2)
+        return SmoothWriter(output, tick_interval=0.012, catch_up_seconds=self.smooth_seconds, min_chars_per_tick=1)
 
     def _feed(self, content: str) -> None:
         content = terminal_text(content)
@@ -185,10 +233,7 @@ class StreamRenderer:
     def _render_events(self, events: list[ParseEvent]) -> None:
         assert self._renderer is not None
         for event in events:
-            if self._thinking:
-                # Termflow's dim renderer paints the whole block, fences included.
-                self._renderer.render(event)
-            elif isinstance(event, CodeBlockStartEvent):
+            if isinstance(event, CodeBlockStartEvent):
                 self._code_language = (event.language or 'text').split()[0]
                 self._code_lines = []
             elif isinstance(event, CodeBlockLineEvent):
@@ -201,10 +246,11 @@ class StreamRenderer:
                         Syntax(
                             '\n'.join(self._code_lines),
                             LANGUAGE_ALIASES.get(self._code_language.lower(), self._code_language.lower()),
-                            theme='monokai',
+                            theme=theme.syntax_theme(),
                             background_color='default',
                             word_wrap=True,
-                        )
+                        ),
+                        style=Style(dim=self._thinking),
                     )
                     self.console.rule(style=theme.color(theme.MUTED))
                 (self._writer or self.console.file).write(capture.get())

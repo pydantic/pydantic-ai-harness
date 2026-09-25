@@ -1,20 +1,21 @@
 """The `/add_model` menu: pick the model for the next prompt, or edit one model's settings."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Literal, get_args, get_origin
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
+from rich.console import Console
 from termflow.tui import MenuBuilder, MenuItem  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.menu import Menu, MenuResult  # pyright: ignore[reportMissingTypeStubs]
 
-from . import openrouter, vllm
+from . import github_copilot, openrouter, vllm
 from ._rendering import markdown_style
 from .command_context import CommandContext
 from .custom_params import CustomParamsMenu
 from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run_flow, shown
 from .menu_worker import menu_key, run_worker
-from .model_catalog import CatalogModel, catalog
+from .model_catalog import CatalogModel, catalog, github_copilot_models
 from .model_options import model_options, validate_model_options
 from .model_settings import ModelSettingsForm, model_defaults
 from .settings_store import SettingsStore
@@ -51,12 +52,25 @@ class ModelSettingsSource:
         for key, info in ModelSettingsForm.model_fields.items():
             if key not in options and key not in saved:
                 continue
+            codex_tier = key == 'service_tier' and self.model.startswith('openai-codex:')
             rows.append(
                 FieldRow(
                     key=key,
-                    label=_setting_label(key),
+                    label='Service Tier / Fast Mode' if codex_tier else _setting_label(key),
                     allow_custom=False,
-                    description=info.description or '',
+                    description=(
+                        'Fast mode uses more ChatGPT credits.\n'
+                        'Requests priority processing on supported Codex models.\n'
+                        'Availability depends on your model and account.\n'
+                        'Standard turns fast mode off.\n'
+                        'Reasoning effort is unchanged.\n'
+                        'Custom service_tier parameters override this setting.'
+                        if codex_tier
+                        else info.description or ''
+                    ),
+                    choice_labels={'priority': 'Fast (priority)', 'default': 'Standard (default)'}
+                    if codex_tier
+                    else {},
                     default=shown(model_defaults(model=self.model).get(key)),
                     choices=options.get(key, ()) or _choices(info.annotation),
                 )
@@ -148,12 +162,15 @@ def _choices(annotation: object) -> tuple[str, ...]:
 class ModelMenu:
     """The model list with a details pane; Enter picks, `Ctrl+S` opens that model's settings."""
 
-    def __init__(self, context: CommandContext, *, provider: str | None = None) -> None:
-        """The current model is always listed, even when no source knows it."""
+    def __init__(
+        self, context: CommandContext, *, provider: str | None = None, discovered: Iterable[CatalogModel] = ()
+    ) -> None:
+        """Keep the current model unless authenticated discovery excludes it."""
         self._context = context
+        self._discovered = tuple(discovered)
         self.models = [
             model
-            for model in catalog(include=[context.settings.model or ''])
+            for model in catalog(include=[context.settings.model or ''], discovered=self._discovered)
             if provider is None or model.name.partition(':')[0] == provider
         ]
 
@@ -221,7 +238,9 @@ class ModelMenu:
 
     def providers(self) -> list[str]:
         """Unique provider prefixes from the merged catalog."""
-        return sorted({model.name.partition(':')[0] for model in self.models} | {'openrouter', 'vllm'})
+        return sorted(
+            {model.name.partition(':')[0] for model in self.models} | {'github-copilot', 'openrouter', 'vllm'}
+        )
 
     def build_providers(self) -> Menu:
         """Choose a provider before browsing its models."""
@@ -240,7 +259,7 @@ class ModelMenu:
 
     def for_provider(self, provider: str) -> 'ModelMenu':
         """Browse one provider without changing the active model."""
-        return ModelMenu(self._context, provider=provider)
+        return ModelMenu(self._context, provider=provider, discovered=self._discovered)
 
     def edit_settings(self, *, name: str, runners: Runners) -> list[str]:
         """Run the same settings flow as the direct slash command."""
@@ -258,7 +277,7 @@ def run_model_flow(menu: ModelMenu, runners: Runners = TERMINAL, *, connect_prov
         selection = runners.run_list(menu.build_providers())
         if selection.cancelled or selection.item is None or not isinstance(selection.item.value, str):
             return messages
-        if selection.item.value in ('openrouter', 'vllm') and connect_provider:
+        if selection.item.value in ('github-copilot', 'openrouter', 'vllm') and connect_provider:
             raise _ConnectProvider(messages, provider=selection.item.value)
         provider_menu = menu.for_provider(selection.item.value)
         if _run_provider(provider_menu, runners, messages):
@@ -281,11 +300,13 @@ def _run_provider(menu: ModelMenu, runners: Runners, messages: list[str]) -> boo
         return True
 
 
-async def open_add_model_menu(context: CommandContext, *, run: Callable[[ModelMenu], list[str]] | None = None) -> str:
+async def open_add_model_menu(
+    context: CommandContext, *, run: Callable[[ModelMenu], list[str]] | None = None, runners: Runners = TERMINAL
+) -> str:
     """Show the menu in a thread; the pick and any settings edits apply to the next prompt."""
 
     def flow(menu: ModelMenu) -> list[str]:
-        return run_model_flow(menu, connect_provider=True)
+        return run_model_flow(menu, runners, connect_provider=True)
 
     accumulated: list[str] = []
     while True:
@@ -293,6 +314,13 @@ async def open_add_model_menu(context: CommandContext, *, run: Callable[[ModelMe
             messages = await run_worker(lambda: (run or flow)(ModelMenu(context)))
         except _ConnectProvider as request:
             accumulated.extend(request.messages)
+            if request.provider == 'github-copilot':
+                await github_copilot.ensure_login(console=Console())
+                models = await github_copilot_models()
+                provider_menu = ModelMenu(context, provider='github-copilot', discovered=models)
+                if await run_worker(lambda: _run_provider(provider_menu, runners, accumulated)):
+                    return '\n'.join(accumulated) or 'No changes.'
+                continue
             connector = openrouter.connect if request.provider == 'openrouter' else vllm.connect
             result = await connector(context, [])
             if result == 'Connection cancelled.':
