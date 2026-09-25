@@ -55,22 +55,22 @@ class LogfireMCPSettings(BaseModel):
 
 
 def activate(host: PluginHost[None]) -> None:
-    """Add `LogfireMCP` and the settings menu; with no usable credential, warn and fail each run closed."""
+    """Offer the settings menu now; connect at session start, off the event loop."""
     settings = host.settings(LogfireMCPSettings)
-    capability, needed = _capability(settings=settings)
-    host.add(capability)
 
     @host.configure
     async def configure() -> str:  # pyright: ignore[reportUnusedFunction]
         return await _configure(LogfireMCPSource(host))
 
     @host.on('session_start')
-    async def warn(event: SessionStart) -> None:  # pyright: ignore[reportUnusedFunction]
-        # Loading anyway keeps the settings menu available. A worker thread, because the `/keys` lock
-        # can wait for another CLAI process.
-        if needed is not None and needed.name not in await asyncio.to_thread(load_keys):
+    async def connect(event: SessionStart) -> None:  # pyright: ignore[reportUnusedFunction]
+        # A worker thread: `/keys` takes a lock another CLAI process can hold, and the keyring can block.
+        capability, missing = await asyncio.to_thread(_capability, settings=settings)
+        host.add(capability)
+        if missing is not None:
+            # Loading anyway keeps the settings menu available; each run fails closed until the key is saved.
             host.console.print(
-                f'Logfire MCP has no credential: {needed.name} is not in /keys. {SETUP}',
+                f'Logfire MCP has no credential: {missing} is not in /keys. {SETUP}',
                 style=theme.color(theme.WARNING),
                 markup=False,
             )
@@ -85,11 +85,10 @@ def activate(host: PluginHost[None]) -> None:
     )
 
 
-def _capability(*, settings: LogfireMCPSettings) -> tuple[LogfireMCP[None], KeyReference | None]:
+def _capability(*, settings: LogfireMCPSettings) -> tuple[LogfireMCP[None], str | None]:
     """The first of: chosen key, `LOGFIRE_API_KEY` env, `/keys` `LOGFIRE_API_KEY`, then browser sign-in.
 
-    Returns the key the capability depends on, if any. `/keys` takes a cross-process lock, so it is read
-    only when browser sign-in would otherwise be used.
+    Blocking; returns the name of the `/keys` entry the capability needs when it is missing.
     """
 
     def build(
@@ -103,15 +102,15 @@ def _capability(*, settings: LogfireMCPSettings) -> tuple[LogfireMCP[None], KeyR
             include_instructions=settings.include_instructions,
         )
 
-    if settings.key is not None:
-        return build(auth=SavedKey(name=settings.key.name, setup=SETUP)), settings.key
-    if os.environ.get(KEY_NAME):
+    if settings.key is None and os.environ.get(KEY_NAME):
         return build(), None
-    oauth = settings.oauth and (TokenStore(TOKEN_ACCOUNT).signed_in() or _has_browser())
-    if oauth and KEY_NAME not in load_keys():
-        return build(client=_oauth_client(url=settings.url)), None
-    # Read on every run, so saving LOGFIRE_API_KEY in /keys connects without a reload.
-    return build(auth=SavedKey(name=KEY_NAME, setup=SETUP)), KeyReference(name=KEY_NAME)
+    saved = load_keys()
+    if settings.key is None and KEY_NAME not in saved and settings.oauth:
+        if TokenStore(TOKEN_ACCOUNT).signed_in() or _has_browser():
+            return build(client=_oauth_client(url=settings.url)), None
+    # Resolved on every run, so saving the key in /keys connects without a reload.
+    name = settings.key.name if settings.key is not None else KEY_NAME
+    return build(auth=SavedKey(name=name, setup=SETUP)), None if name in saved else name
 
 
 def _has_browser() -> bool:

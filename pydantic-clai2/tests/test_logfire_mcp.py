@@ -1,6 +1,7 @@
 """The `logfire_mcp` built-in: its settings menu, keys kept in `/keys`, credential order, and OAuth."""
 
 import io
+import threading
 import webbrowser
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import anyio
 import pytest
 from fastmcp import Client
 from menu_script import Script, pick, typed
-from pydantic import JsonValue
+from pydantic import JsonValue, SecretStr
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.test import TestModel
@@ -23,7 +24,7 @@ from pydantic_clai2 import DEFAULT_PLUGINS, api_keys
 from pydantic_clai2.api_keys import KeyReference, SavedKey
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.field_menu import CUSTOM
-from pydantic_clai2.logfire_mcp import SETUP, TOKEN_ACCOUNT, LogfireMCPSource, command
+from pydantic_clai2.logfire_mcp import SETUP, TOKEN_ACCOUNT, LogfireMCPSource, activate, command
 from pydantic_clai2.mcp import TokenStore
 from pydantic_clai2.plugin_loader import PluginError, PluginLoader
 from pydantic_clai2.plugin_menu import PluginMenu, open_plugins_menu
@@ -431,3 +432,23 @@ async def test_cancelling_configure_waits_for_the_key_picker_to_clean_up(
 class Redraw:
     def replace_items(self, items: object) -> None:
         pass
+
+
+async def test_keys_are_read_at_session_start_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    threads: list[int] = []
+
+    def load_keys() -> dict[str, SecretStr]:
+        threads.append(threading.get_ident())
+        return {}
+
+    monkeypatch.setattr('pydantic_clai2.logfire_mcp.load_keys', load_keys)
+    host = PluginHost[None](name='logfire_mcp', console=Console(file=io.StringIO()), settings={})
+    activate(host)
+    assert (host.capabilities, threads) == ([], [])
+    shell = Shell(tmp_path)
+    await shell.loader.enable('logfire_mcp')
+    assert len(threads) == 1
+    assert threads[0] != threading.get_ident()
+    assert shell.capability().auth == SavedKey(name='LOGFIRE_API_KEY', setup=SETUP)
