@@ -76,7 +76,7 @@ def test_launches_in_new_worktree(repository: Path, args: list[str]) -> None:
         else workspace.name == 'feature'
     )
     assert (
-        f'Worktree: {workspace} (branch: clai/{workspace.name}). Kept unless removal is confirmed on exit.'
+        f'Worktree: {workspace} (branch: clai/{workspace.name}). Removed on interactive exit if unchanged'
         in result.stdout
     )
     assert git(workspace, 'branch', '--show-current') == f'clai/{workspace.name}'
@@ -159,7 +159,7 @@ def test_startup_error_keeps_created_worktree(repository: Path) -> None:
     assert result.returncode == 2
     workspace = repository / '.worktrees/retained'
     assert f'Worktree: {workspace}' in result.stdout
-    assert 'Kept unless removal is confirmed on exit.' in result.stdout
+    assert 'otherwise kept unless removal is confirmed.' in result.stdout
     assert (workspace / 'tracked.txt').read_text() == 'committed'
     assert git(workspace, 'branch', '--show-current') == 'clai/retained'
 

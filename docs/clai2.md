@@ -89,10 +89,25 @@ a relative `--database` path still refers to the directory you launched from.
 CLAI prints the new path and branch. Existing branches and non-empty directories
 are rejected. If checkout fails, CLAI tries to remove only the branch it just
 created, without forcing deletion. If cleanup or the ignore edit fails, the error
-names the retained branch or checkout for recovery. The worktree and branch
-remain after exit, including startup
-errors after creation, so CLAI does not delete your work. Enter that directory
-and run `clai2 --resume` to continue a saved session. `--worktree` cannot be
+names the retained branch or checkout for recovery.
+
+On normal interactive exit, CLAI removes a worktree that the same run created
+with `--worktree` if it was left unchanged, and deletes its branch too. Unchanged
+means no staged, modified, untracked, or ignored files (such as a `.env`; the
+checkout starts without any), `clai/NAME` still checked out rather than a paused
+rebase or bisect, and every commit on the branch still reachable from another
+branch, tag, or remote branch. CLAI prints what it removed, without asking.
+
+Any other linked worktree, including one with changes or new commits, prompts
+instead. Enter, Ctrl-C, or EOF keeps it; only `y` or `yes` confirms removal.
+This also applies when launching inside an existing linked worktree. Git removal
+runs without `--force`, so dirty or locked worktrees are kept with an explanation.
+After a confirmed removal the branch is kept. The main checkout is not offered
+for removal. Headless runs, piped input, and startup errors keep the worktree
+without prompting. `/new`, `/resume`, and `/reload` do not remove the checkout:
+they leave the shell using the same working directory.
+
+Enter a retained directory and run `clai2 --resume` to continue a saved session. `--worktree` cannot be
 combined with `--resume`, `config`, or `plugins`.
 
 When you no longer need the checkout, use Git's own cleanup commands from your

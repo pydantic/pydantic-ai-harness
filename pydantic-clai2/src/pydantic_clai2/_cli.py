@@ -53,10 +53,12 @@ def run(*, splash: Splash | None = None) -> None:
             handler = config_command if args.command == 'config' else plugins_command
             print(handler(store, args.arguments))
             return
+        workspace = None
         if args.worktree is not None:
             workspace = create_worktree(name=args.worktree)
             print(
-                f'Worktree: {workspace} (branch: clai/{workspace.name}). Kept unless removal is confirmed on exit.',
+                f'Worktree: {workspace} (branch: clai/{workspace.name}). '
+                'Removed on interactive exit if unchanged; otherwise kept unless removal is confirmed.',
                 file=sys.stderr if args.prompt is not None else sys.stdout,
             )
             os.chdir(workspace)
@@ -93,7 +95,7 @@ def run(*, splash: Splash | None = None) -> None:
                 resume=args.resume,
             )
         )
-        offer_worktree_cleanup()
+        offer_worktree_cleanup(created=workspace)
     except (ValueError, TypeError, ImportError, AttributeError, LookupError, OSError) as exc:
         parser.error(str(exc))
     except KeyboardInterrupt:
