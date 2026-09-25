@@ -30,8 +30,6 @@ from pydantic_ai_harness.tool_output_limits import (
     WorkspaceStore,
 )
 
-from .._workspace import HOST_ENV, local_workspace
-
 pytestmark = pytest.mark.anyio
 
 
@@ -53,7 +51,7 @@ class _FilesystemOnly:
     """A workspace backend with file operations but no command execution, like a mounted bucket."""
 
     def __init__(self, working_dir: Path) -> None:
-        self._local = local_workspace(working_dir)
+        self._local = LocalWorkspaceBackend(working_dir)
 
     @property
     def ref(self) -> WorkspaceRef | None:
@@ -116,7 +114,7 @@ class TestDefaultStore:
 
         agent = Agent(
             FunctionModel(respond),
-            capabilities=[ToolOutputLimits(bands=[Band(over=100, action=Spill())]), LocalWorkspace(work, env=HOST_ENV)],
+            capabilities=[ToolOutputLimits(bands=[Band(over=100, action=Spill())]), LocalWorkspace(work)],
         )
 
         @agent.tool_plain
@@ -167,7 +165,7 @@ class TestDefaultStore:
             await agent.run('go')
 
     async def test_store_with_its_own_workspace_needs_none_from_the_run(self, tmp_path: Path):
-        store = WorkspaceStore(workspace=local_workspace(tmp_path))
+        store = WorkspaceStore(workspace=LocalWorkspaceBackend(tmp_path))
         agent = Agent(FunctionModel(_call_big_tool), capabilities=[ToolOutputLimits(store=store)])
 
         @agent.tool_plain
@@ -209,7 +207,7 @@ class TestDefaultStore:
         assert result.output.startswith("[No stored tool result for handle 'call-1'.")
 
     async def test_workspace_failure_on_read_is_a_failed_tool_call(self, tmp_path: Path):
-        toolset = ToolOutputLimits(store=WorkspaceStore(directory='spills')).get_toolset()
+        toolset = ToolOutputLimits(store=WorkspaceStore()).get_toolset()
         assert toolset is not None
         tool = toolset.tools[READ_TOOL_NAME]  # type: ignore[union-attr]
         ctx = _Ctx(workspace=Workspace(_FailingRead(tmp_path)))
@@ -218,26 +216,27 @@ class TestDefaultStore:
 
 
 class TestWorkspaceStore:
-    async def test_directory_relative_to_working_dir(self, tmp_path: Path):
-        workspace = Workspace(local_workspace(tmp_path))
-        store = WorkspaceStore(directory='spills')
+    async def test_keys_become_paths_in_the_store_directory(self, tmp_path: Path):
+        workspace = Workspace(LocalWorkspaceBackend(tmp_path))
+        store = WorkspaceStore()
+        directory = f'{tmp_path.resolve()}/.pydantic-ai-harness/tool-output'
         handle = await store.write(workspace, 'run-1/../call 1.0', b'payload')
-        assert handle == f'{tmp_path.resolve()}/spills/run-1/_/call_1.0'
+        assert handle == f'{directory}/run-1/_/call_1.0'
         assert await store.read(workspace, handle) == b'payload'
         assert await store.read(workspace, 'run-1/_/call_1.0') == b'payload'
-        assert await store.write(workspace, '', b'empty') == f'{tmp_path.resolve()}/spills/_'
+        assert await store.write(workspace, '', b'empty') == f'{directory}/_'
 
     @pytest.mark.parametrize('handle', ['../secret.txt', '/etc/passwd', '.'])
     async def test_read_outside_directory_is_refused(self, tmp_path: Path, handle: str):
         (tmp_path / 'secret.txt').write_text('secret')
-        workspace = Workspace(local_workspace(tmp_path))
+        workspace = Workspace(LocalWorkspaceBackend(tmp_path))
         with pytest.raises(PermissionError, match='outside the store directory'):
-            await WorkspaceStore(directory='spills').read(workspace, handle)
+            await WorkspaceStore().read(workspace, handle)
 
     async def test_missing_handle_raises_file_not_found(self, tmp_path: Path):
-        workspace = Workspace(local_workspace(tmp_path))
+        workspace = Workspace(LocalWorkspaceBackend(tmp_path))
         with pytest.raises(FileNotFoundError):
-            await WorkspaceStore(directory='spills').read(workspace, 'run/missing.0')
+            await WorkspaceStore().read(workspace, 'run/missing.0')
 
     async def test_filesystem_only_workspace_uses_working_dir(self, tmp_path: Path):
         workspace = Workspace(_FilesystemOnly(tmp_path))

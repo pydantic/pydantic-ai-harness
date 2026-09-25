@@ -7,18 +7,18 @@ pytest.importorskip('pydantic_monty')
 import io
 import json
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 
 import anyio
 from pydantic_ai import Agent, AgentRunResultEvent, ModelRetry, PartStartEvent, RunContext, Tool
-from pydantic_ai.capabilities import AbstractCapability, DynamicCapability, LocalWorkspace
+from pydantic_ai.capabilities import AbstractCapability, AgentCapability, DynamicCapability, LocalWorkspace
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage
-from pydantic_ai.workspaces import LocalWorkspaceBackend, Workspace, WorkspaceBackend, WorkspaceRef
+from pydantic_ai.workspaces import LocalWorkspaceBackend, WorkspaceBackend, WorkspaceRef
 from pydantic_ai_harness.code_mode import (
     SpeculativeCallClaimedEvent,
     SpeculativeCallEvictedEvent,
@@ -41,9 +41,7 @@ from pydantic_clai2.speculative_mode import (
     ShowSandboxCalls,
     SpeculativeExecution,
     guidance,
-    mount_mode,
     speculative_capabilities,
-    workspace_mount,
 )
 
 
@@ -144,7 +142,7 @@ class TestFold:
         await fold_agent(streamed(respond), SpeculationCounters(), tmp_path).run('hi')
         [info] = seen
         assert sorted(tool.name for tool in info.function_tools) == ['edit_file', 'run_code', 'write_file']
-        assert guidance(mount_mode([FileSystem[None]()])).strip() in (info.instructions or '')
+        assert guidance('read-only').strip() in (info.instructions or '')
         assert (info.model_settings or {}).get('anthropic_eager_input_streaming') is True
 
     @pytest.mark.parametrize(
@@ -259,27 +257,34 @@ seen
 """
 
 
+def mount(granted: Sequence[AgentCapability[None]]) -> str | None:
+    """The mount the sandbox gets beside `granted`, as its guidance describes it."""
+    [speculative] = [
+        capability
+        for capability in speculative_capabilities(SpeculationCounters(), granted)
+        if isinstance(capability, SpeculativeExecution)
+    ]
+    return speculative.mount
+
+
 class TestWorkspaceMount:
     """The sandbox mount grants `pathlib` no more than the run's `FileSystem` grants its tools (Veria, #1078)."""
 
-    async def test_unrestricted_coder_mounts_its_workspace_read_write(self, tmp_path: Path) -> None:
-        mode = mount_mode([Coder[None](unrestricted_filesystem=True, repo_context=False)])
-        mount = await workspace_mount(Workspace(LocalWorkspaceBackend(tmp_path)), mode)
-        assert mount is not None
-        assert (mount.host_path, mount.virtual_path, mount.mode) == (str(tmp_path.resolve()),) * 2 + ('read-write',)
+    def test_unrestricted_coder_mounts_its_workspace_read_write(self) -> None:
+        assert mount([Coder[None](unrestricted_filesystem=True, repo_context=False)]) == 'read-write'
 
     @pytest.mark.parametrize(
         'file_system',
         [
             FileSystem[None](),
-            FileSystem[None](protected_patterns=[], read_only=True),
-            FileSystem[None](protected_patterns=[], tools=['read_file', 'list_files']),
-            FileSystem[None](protected_patterns=[], tools=['read_file', 'edit_file']),
+            FileSystem[None](read_only_patterns=[], read_only=True),
+            FileSystem[None](read_only_patterns=[], tools=['read_file', 'list_files']),
+            FileSystem[None](read_only_patterns=[], tools=['read_file', 'edit_file']),
         ],
         ids=['protected', 'read_only', 'read_tools', 'no_write_file'],
     )
     def test_write_limits_mount_read_only(self, file_system: FileSystem[None]) -> None:
-        assert mount_mode([file_system]) == 'read-only'
+        assert mount([file_system]) == 'read-only'
 
     def test_patterns_or_ambiguity_leave_nothing_mounted(self, tmp_path: Path) -> None:
         def dynamic(ctx: RunContext[None]) -> FileSystem[None]:
@@ -288,19 +293,19 @@ class TestWorkspaceMount:
         for granted in (
             [FileSystem[None](denied_patterns=['.env'])],
             [FileSystem[None](allowed_patterns=['src/*'])],
-            [FileSystem[None](protected_patterns=[], tools=['write_file'])],
+            [FileSystem[None](read_only_patterns=[], tools=['write_file'])],
             [FileSystem[None](tools=['file_info', 'list_directory'])],
             [customization_guide()],
             [FileSystem[None](), FileSystem[None](root_dir='/')],
-            [FileSystem[None](protected_patterns=[]), dynamic],
-            [FileSystem[None](protected_patterns=[]), DynamicCapability[None](dynamic)],
+            [FileSystem[None](read_only_patterns=[]), dynamic],
+            [FileSystem[None](read_only_patterns=[]), DynamicCapability[None](dynamic)],
         ):
-            assert mount_mode(granted) is None
+            assert mount(granted) is None
 
     @pytest.mark.parametrize(
         ('file_system', 'seen', 'kept'),
         [
-            (FileSystem(protected_patterns=[]), 'original', False),
+            (FileSystem(read_only_patterns=[]), 'original', False),
             (FileSystem(), 'original PermissionError', True),
             (FileSystem(denied_patterns=['.env']), 'FileNotFoundError FileNotFoundError', True),
         ],
@@ -346,7 +351,7 @@ class TestWorkspaceMount:
             )
             return ModelResponse(parts=[next(calls, TextPart('done'))])
 
-        file_system = FileSystem(protected_patterns=[])
+        file_system = FileSystem(read_only_patterns=[])
         sandbox = speculative_capabilities(SpeculationCounters(), (file_system,))
         capabilities: list[AbstractCapability[object]] = [
             SandboxPlugin(tmp_path),

@@ -11,12 +11,9 @@ import pytest
 def isolate_agent_dirs(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     """Point the disk-loading convention roots at empty dirs for every test.
 
-    `SubAgents` auto-loads from `~/.agents/agents/` (with a `.claude/` fallback) at
-    construction, and from the run workspace's `.agents/agents/` per run. Redirecting
-    home (and cwd, which must never be read) to fresh empty directories keeps tests
-    that build `SubAgents` from reading the developer's real agent files. Tests that
-    exercise loading pass explicit folders or a workspace, or populate the redirected
-    home root themselves."""
+    `SubAgents` reads agent folders through a workspace only. Redirecting home and cwd,
+    neither of which it may read, to fresh empty directories lets tests put definitions
+    there and assert they are ignored, without touching the developer's real files."""
     home = tmp_path_factory.mktemp('home_root')
     monkeypatch.chdir(tmp_path_factory.mktemp('project_root'))
 
