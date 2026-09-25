@@ -368,11 +368,11 @@ class PluginLoader(Generic[DepsT]):
             raise PluginError(name, exc) from exc
         if not isinstance(message, str):
             raise PluginError(name, TypeError('configure must return the message to show'))
-        if enable:
-            await self.enable(name)
-        elif self._entry(name).host is not None:
+        if self._entry(name).host is not None:
             await self.unload(name)
             await self.load(name)
+        if enable:
+            await self.enable(name)
         return message
 
     def _hook(self, entry: PluginEntry[DepsT]) -> Callable[..., object] | None:

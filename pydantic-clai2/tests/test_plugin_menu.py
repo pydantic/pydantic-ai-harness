@@ -147,6 +147,11 @@ async def test_configure_hook_through_commands(tmp_path: Path) -> None:
     [tuned] = [entry for entry in loader.entries() if entry.name == 'tuned']
     assert tuned.declaration.settings == {'runs': 2}
     assert tuned.host is not None and tuned.host is not first, 'reactivated with the new settings'
+    second = tuned.host
+    assert await loader.command(['enable', 'tuned']) == 'configured tuned\nEnabled tuned.'
+    [again] = [entry for entry in loader.entries() if entry.name == 'tuned']
+    assert again.declaration.settings == {'runs': 3}
+    assert again.host is not None and again.host is not second, 'enabling a loaded plugin applies its new settings'
 
     assert await loader.command(['configure', 'sync']) == 'sync'
     assert next(entry for entry in loader.entries() if entry.name == 'sync').host is None, 'still disabled'

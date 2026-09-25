@@ -239,7 +239,7 @@ def run_flow(
     messages: list[str] = []
     cursor = 0
     while True:
-        step = _selected(menu, _show_list(menu, runners, cursor), messages)
+        step = _next_step(menu, runners, cursor, messages)
         if step is None:
             return messages
         row, cursor = step
@@ -267,7 +267,7 @@ async def run_flow_async(
     messages: list[str] = []
     cursor = 0
     while True:
-        step = _selected(menu, await run_worker(partial(_show_list, menu, runners, cursor)), messages)
+        step = await run_worker(partial(_next_step, menu, runners, cursor, messages))
         if step is None:
             return messages
         row, cursor = step
@@ -281,9 +281,11 @@ async def run_flow_async(
             messages.append(message)
 
 
-def _show_list(menu: FieldMenu, runners: Runners, cursor: int) -> MenuResult:
-    """Build and show in one step, so rows that read the keyring are read off the event loop."""
-    return runners.run_list(menu.build(cursor))
+def _next_step(
+    menu: FieldMenu, runners: Runners, cursor: int, messages: list[str]
+) -> tuple[FieldRow | None, int] | None:
+    """Show the list and act on the pick in one step, so sources that touch the keyring stay off the event loop."""
+    return _selected(menu, runners.run_list(menu.build(cursor)), messages)
 
 
 def _selected(menu: FieldMenu, result: MenuResult, messages: list[str]) -> tuple[FieldRow | None, int] | None:
