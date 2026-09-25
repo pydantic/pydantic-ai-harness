@@ -1,13 +1,16 @@
 """Where `/mcp` keeps servers: a user file, plus project files that load only once trusted.
 
 A repository can ship `.clai/mcp_servers.json` and Claude Code's `.mcp.json`. A stdio server
-runs a program, so a cloned repository must not be able to start one by shipping either. Trust is recorded on the user side, keyed by the file's
-path and a SHA-256 of its bytes: any edit makes the file untrusted again, and a repository
-cannot trust itself. A symlinked file (or `.clai` folder) is never trusted, so a repository
-cannot borrow trust given to a file elsewhere. This follows Code Puppy's `/mcp trust`.
+runs a program, so a cloned repository must not be able to start one by shipping either.
+Trust is recorded on the user side, keyed by the file's path and a SHA-256 of its bytes: any
+edit makes the file untrusted again, and a repository cannot trust itself. A symlinked file
+(or `.clai` folder) is never trusted, so a repository cannot borrow trust given to a file
+elsewhere. Files are opened with `O_NOFOLLOW` where the platform has it, so a symlink swapped
+in after the check is not read. This follows Code Puppy's `/mcp trust`.
 """
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -101,7 +104,7 @@ class MCPStore:
         if accepted is None or not _regular(path):
             return 'untrusted'
         try:
-            current = _digest(path.read_bytes())
+            current = _digest(_read_regular(path))
         except OSError:
             return 'changed'
         return 'trusted' if accepted == current else 'changed'
@@ -111,7 +114,7 @@ class MCPStore:
         if linked := [str(path) for path in paths if not _regular(path)]:
             raise ValueError(f'{", ".join(linked)}: a symlink; only a file inside the repository can be trusted.')
         data = self.load()
-        trusted = {**data.trusted_projects, **{_key(path): _digest(path.read_bytes()) for path in paths}}
+        trusted = {**data.trusted_projects, **{_key(path): _digest(_read_regular(path)) for path in paths}}
         self.save(data.model_copy(update={'trusted_projects': trusted}))
 
     def revoke(self, *paths: Path) -> list[Path]:
@@ -139,7 +142,7 @@ def _read_trusted(path: Path, model: type[ProjectFile], accepted: dict[str, str]
     if not _regular(path):
         return None
     try:
-        content = path.read_bytes()
+        content = _read_regular(path)
     except OSError:
         return None
     if accepted.get(_key(path)) != _digest(content):
@@ -156,6 +159,13 @@ def _key(path: Path) -> str:
 
 def _regular(path: Path) -> bool:
     return not (path.is_symlink() or path.parent.is_symlink())
+
+
+def _read_regular(path: Path) -> bytes:
+    """The file's bytes; an `OSError` when the file itself is now a symlink."""
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    with os.fdopen(descriptor, 'rb') as file:
+        return file.read()
 
 
 def _digest(content: bytes) -> str:

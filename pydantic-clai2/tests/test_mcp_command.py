@@ -1,5 +1,6 @@
 """The `/mcp` command surface: the add/edit server form, trust, help, and completion."""
 
+import hashlib
 import io
 import json
 import sys
@@ -348,9 +349,19 @@ async def test_both_project_files_load_with_clai_first(tmp_path: Path) -> None:
     assert isinstance(shared.server, StdioServer) and shared.server.command == 'from-clai'
     assert shared.path == clai and extra.path == claude
 
+    assert 'Stopped shared' in await command(['stop', 'shared'])
+    clai.write_text('{"servers": {}}')
+    store.trust(clai)
+    [fallback, _] = command.servers.entries()
+    assert fallback.path == claude and command.servers.state(fallback) == 'ready', (
+        "a session stop belongs to the definition, not to another file's server of the same name"
+    )
+
+    clai.write_text('{"servers": {"mine": {"type": "stdio", "command": "from-clai"}}}')
+    store.trust(clai)
     claude.write_text('{"mcpServers": {}}')
     assert f'{claude} is changed since you trusted it' in await command([])
-    assert [entry.name for entry in command.servers.entries()] == ['shared'], 'the other file stays loaded'
+    assert [entry.name for entry in command.servers.entries()] == ['mine'], 'the unchanged file stays loaded'
     assert await command(['trust', 'revoke']) == f'Revoked trust in {clai}, {claude}.'
     assert store.project_servers() == {}
 
@@ -367,6 +378,26 @@ def test_trust_is_all_or_nothing_when_one_file_is_a_symlink(tmp_path: Path) -> N
     with pytest.raises(ValueError, match=r'\.mcp\.json: a symlink'):
         store.trust(*store.project_files())
     assert store.load().trusted_projects == {}
+
+
+def test_a_symlink_swapped_in_after_the_check_is_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, store = make(tmp_path)
+    elsewhere = tmp_path / 'elsewhere.json'
+    elsewhere.write_text('{"mcpServers": {"evil": {"command": "evil"}}}')
+    claude = tmp_path / 'repo' / CLAUDE_MCP_FILE
+    claude.symlink_to(elsewhere)
+    data = store.load()
+    digest = hashlib.sha256(elsewhere.read_bytes()).hexdigest()
+    store.save(data.model_copy(update={'trusted_projects': {str(claude.absolute()): digest}}))
+
+    def checked_before_the_swap(self: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(Path, 'is_symlink', checked_before_the_swap)
+    with pytest.raises(OSError):
+        store.trust(claude)
+    assert store.trust_state(claude) == 'changed'
+    assert store.project_servers() == {}
 
 
 def test_user_servers_shadow_project_servers(tmp_path: Path) -> None:

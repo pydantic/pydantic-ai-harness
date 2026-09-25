@@ -37,6 +37,11 @@ class ServerEntry:
     path: Path | None = None
     """The file that defines the server; `None` for plugin settings."""
 
+    @property
+    def origin(self) -> tuple[Source, Path | None, str]:
+        """The definition, so session state does not pass to another source's server of the same name."""
+        return self.source, self.path, self.name
+
 
 @dataclass(kw_only=True)
 class _Connection:
@@ -60,7 +65,7 @@ class MCPServers:
         """`plugin_servers` come from `/plugins add mcp` settings, kept for existing configurations."""
         self.store = store
         self._plugin_servers = plugin_servers or {}
-        self._overrides: dict[str, bool] = {}
+        self._overrides: dict[tuple[Source, Path | None, str], bool] = {}
         """Session-only enable state for servers whose file `/mcp` does not write."""
         self._connections: dict[str, _Connection] = {}
 
@@ -88,7 +93,7 @@ class MCPServers:
 
     def enabled(self, entry: ServerEntry) -> bool:
         """Whether the agent may use the server."""
-        return self._overrides.get(entry.name, entry.server.enabled)
+        return self._overrides.get(entry.origin, entry.server.enabled)
 
     def state(self, entry: ServerEntry) -> State:
         """What the dashboard shows."""
@@ -174,7 +179,6 @@ class MCPServers:
         if reason:
             raise ValueError(reason)
         await self.disconnect(name)
-        self._overrides.pop(name, None)
         self.store.delete(name)
         await to_thread.run_sync(TokenStore(name).forget)
 
@@ -227,7 +231,7 @@ class MCPServers:
         if entry.source == 'user':
             self.store.put(entry.name, entry.server.model_copy(update={'enabled': enabled}))
         else:
-            self._overrides[entry.name] = enabled
+            self._overrides[entry.origin] = enabled
 
     async def _connection(self, entry: ServerEntry) -> _Connection:
         connection = self._connections.get(entry.name)
