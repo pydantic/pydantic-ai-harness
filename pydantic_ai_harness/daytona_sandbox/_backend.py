@@ -558,7 +558,7 @@ def _in_deleted_state(sandbox: AsyncSandbox) -> bool:
 def _unavailable_message(sandbox_id: str) -> str:
     return (
         f'The Daytona sandbox {sandbox_id!r} no longer exists (it was deleted). '
-        'Attach to a live sandbox, or create a new one.'
+        "Pass `workspace='new'` to start a fresh sandbox."
     )
 
 
