@@ -246,8 +246,10 @@ class TestSignIn:
             return handle(request)
 
         logfire.handle = drop_first_poll
-        assert (await run_sign_in(logfire))[-1] == 'Signed in to Logfire.'
+        sleeps: list[float] = []
+        assert (await run_sign_in(logfire, sleeps=sleeps))[-1] == 'Signed in to Logfire.'
         assert dropped == [True]
+        assert sleeps == [0, 5]  # The server asked for no wait; a dropped poll still backs off.
 
     @pytest.mark.parametrize(
         ('resource', 'metadata_path'),
@@ -277,6 +279,8 @@ class TestSignIn:
             ('polls', [pending('invalid_grant')], 'Logfire sign-in failed: invalid grant. Run /logfire_mcp login'),
             ('polls', [(200, {'access_token': ''})], 'Logfire sign-in failed: ValidationError.'),
             ('polls', [granted('access-1', token_type='DPoP')], 'Logfire sign-in failed: ValidationError.'),
+            ('polls', [granted('access-1', scope='project:write')], 'Logfire did not grant project:read'),
+            ('device', (200, {**DEVICE, 'verification_uri_complete': 'http://x.test/d'}), 'failed: ValidationError.'),
             ('device', (200, {**DEVICE, 'expires_in': 0}), 'The Logfire sign-in code expired before it was approved.'),
             ('device', (503, 'unavailable'), 'Logfire refused browser sign-in: HTTP 503'),
             (
@@ -313,6 +317,8 @@ class TestSignIn:
             'failed',
             'malformed',
             'not-bearer',
+            'no-read-scope',
+            'plain-http-link',
             'expired',
             'device-down',
             'nested-error',

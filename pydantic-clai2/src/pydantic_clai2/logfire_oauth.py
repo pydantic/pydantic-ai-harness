@@ -129,8 +129,8 @@ class _Registered(BaseModel):
 class _Device(BaseModel):
     device_code: str
     user_code: str
-    verification_uri: str
-    verification_uri_complete: str | None = None
+    verification_uri: _Https
+    verification_uri_complete: _Https | None = None
     expires_in: float = 600
     interval: float = 5
 
@@ -256,6 +256,8 @@ async def sign_in(
         granted = await _poll(
             http, server=server, resource=resource, client_id=client_id, device=device, verifier=verifier, sleep=sleep
         )
+        if not granted.covers(READ_SCOPE):
+            raise SignInError(f'Logfire did not grant {READ_SCOPE}, which the MCP server needs.')
         if writable and not granted.covers(scope):
             writable = False  # Logfire granted less than asked; write tools will ask again.
     except (httpx.HTTPError, ValidationError) as exc:
@@ -301,6 +303,7 @@ async def _poll(
                 },
             )
         except httpx.TransportError:
+            interval += 5  # Back off as for `slow_down`, even when the server asked for no wait.
             continue  # A slow or dropped poll is retried; the approval on the Logfire page still stands.
         if response.is_success:
             return _Granted.model_validate_json(response.content)

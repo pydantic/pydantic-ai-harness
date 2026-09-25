@@ -231,9 +231,9 @@ def test_menu_validates_resets_and_notes_where_the_key_comes_from(monkeypatch: p
     assert (source.current(rows['key']), note()) == ('GONE', 'missing from /keys')
     source.save(source.settings.model_copy(update={'key': KeyReference(name='LOGFIRE_API_KEY')}))
     assert note() == ''
-    bad_url = 'Value error, Use an https:// URL without credentials or a query.'
-    assert source.problem(rows['url'], 'http://logfire.example.com/mcp') == bad_url
-    assert source.problem(rows['url'], 'https://user:pw@logfire.example.com/mcp') == bad_url
+    bad_url = 'Value error, Use an https:// URL without credentials, a query, or a fragment.'
+    for url in ('http://h.test/mcp', 'https://u:pw@h.test/mcp', 'https://h.test/mcp?a=1', 'https://h.test/mcp#staging'):
+        assert source.problem(rows['url'], url) == bad_url
     assert source.problem(rows['read_only'], 'maybe') == 'Input should be a valid boolean'
     assert source.problem(rows['url'], SELF_HOSTED) is None
     assert source.current(rows['read_only']) == 'false'

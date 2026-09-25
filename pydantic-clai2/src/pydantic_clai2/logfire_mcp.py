@@ -47,8 +47,10 @@ class LogfireMCPSettings(BaseModel):
     @classmethod
     def _https(cls, url: str) -> str:
         parts = urlsplit(url)
-        if parts.scheme != 'https' or not parts.hostname or parts.username or parts.password or parts.query:
-            raise ValueError('Use an https:// URL without credentials or a query.')
+        # A query or fragment would make the URL differ from the resource Logfire signs in for.
+        extras = parts.username or parts.password or parts.query or parts.fragment
+        if parts.scheme != 'https' or not parts.hostname or extras:
+            raise ValueError('Use an https:// URL without credentials, a query, or a fragment.')
         return url
 
 
