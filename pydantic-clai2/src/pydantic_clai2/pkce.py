@@ -161,6 +161,20 @@ async def refresh(
     return renewed if renewed.refresh_token else renewed.model_copy(update={'refresh_token': tokens.refresh_token})
 
 
+async def _until_listening(redirect_uri: str, callback: asyncio.Future[Tokens]) -> None:
+    """Return once the callback server answers, or when it has already failed (to bind, usually).
+
+    Core's server answers a request without this flow's `state` and keeps waiting, so the probe is harmless.
+    """
+    async with httpx.AsyncClient(timeout=1) as http:
+        while not callback.done():
+            try:
+                await http.get(redirect_uri)
+                return
+            except httpx.TransportError:
+                await asyncio.sleep(0.02)
+
+
 class PKCESignIn:
     """A signed-in session for one client, kept in the credential store under `account`."""
 
@@ -224,15 +238,19 @@ class PKCESignIn:
             raise ValueError(f'That sign-in attempt is for another {self.service} app.')
         flow = flow or self.start()
         url = flow.authorization_url()
-        try:
-            opened = await asyncio.to_thread(self.open_browser, url)
-        except webbrowser.Error:
-            opened = False
-        if not opened:
-            show(f'Open this URL to sign in to {self.service}: {url}')
+        # Listen before the browser opens: an app already approved redirects back at once, and a callback that
+        # arrives before the one-shot server binds is lost.
+        callback = asyncio.ensure_future(flow.exchange_code_from_callback())
         try:
             with fail_after(self.timeout):
-                tokens = await flow.exchange_code_from_callback()
+                await _until_listening(flow.redirect_uri, callback)
+                try:
+                    opened = await asyncio.to_thread(self.open_browser, url)
+                except webbrowser.Error:
+                    opened = False
+                if not opened:
+                    show(f'Open this URL to sign in to {self.service}: {url}')
+                tokens = await callback
         except TimeoutError:
             raise UserError(f'{self.service} sign-in timed out. Run {self.setup} to try again.') from None
         except OSError:
@@ -240,6 +258,9 @@ class PKCESignIn:
                 f'Could not listen on {self.client.redirect_uri} for the {self.service} sign-in. '
                 'Close whatever uses that port, or another sign-in, and try again.'
             ) from None
+        finally:
+            callback.cancel()
+            await asyncio.gather(callback, return_exceptions=True)
         await asyncio.to_thread(self._locked_save, tokens)
         return tokens
 

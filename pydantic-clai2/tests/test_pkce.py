@@ -176,6 +176,17 @@ async def test_sign_in_proves_the_verifier_without_a_secret_and_stores_the_token
     assert await sign_in.token() == 'at-1'
 
 
+async def test_an_already_approved_app_redirecting_at_once_is_not_lost() -> None:
+    def redirects_at_once(url: str) -> bool:  # One visit, before `open_browser` even returns: no retries.
+        params = dict(parse_qsl(urlsplit(url).query))
+        assert httpx.get(f'{params["redirect_uri"]}?{urlencode(approve(params))}', timeout=5).status_code == 200
+        return True
+
+    endpoint = TokenEndpoint(granted())
+    signed = await session(endpoint, open_browser=redirects_at_once, timeout=5).sign_in()
+    assert signed.access_token == SecretStr('at-1')
+
+
 def test_stored_tokens_hold_the_secrets_and_nothing_else_reveals_them() -> None:
     # `model_dump_json` masks `SecretStr`, which once stored asterisks in place of the tokens.
     signed = tokens(expires_in=60)
