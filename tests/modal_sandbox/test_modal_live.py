@@ -129,7 +129,9 @@ async def test_coder_tools_run_in_the_sandbox_modal_sandbox_supplies() -> None:
         assert 'hello from modal' in results[1]
         assert 'git version' in results[1]
         assert 'hello.py' in results[2]
-        assert [backend.ref is not None for backend in supplied] == [True]
+        # Core may ask for the workspace again after `for_run` only to compare it; that backend is
+        # discarded unused, so exactly one of them created a sandbox.
+        assert sum(backend.ref is not None for backend in supplied) == 1
     finally:
         for backend in supplied:
             if backend.ref is not None:
