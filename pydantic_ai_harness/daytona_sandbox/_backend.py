@@ -14,6 +14,8 @@ External assumptions last verified 2026-09-08 against Daytona Python SDK 0.198.0
 * `auto_stop_interval`, `auto_archive_interval`, and `auto_delete_interval` (negative disables
   it) are the creation-time lifecycle settings:
   https://www.daytona.io/docs/en/python-sdk/async/async-daytona/
+* `FileInfo` has `is_dir` and a `mode` string but no symlink flag, and the SDK does not say whether
+  `is_dir` follows a symlink.
 * SDK errors are typed by HTTP status (`DaytonaNotFoundError` 404, `DaytonaAuthenticationError`
   401, `DaytonaAuthorizationError` 403, `DaytonaValidationError` 400, `DaytonaConflictError` 409,
   `DaytonaRateLimitError` 429); transport failures become `DaytonaConnectionError` or
@@ -166,6 +168,9 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     shell string runs under `/bin/sh -c`; an argv sequence is shell-quoted into the session command. The deadline is enforced
     client-side, and the session is deleted, which kills its command, when the deadline expires or
     the caller is cancelled.
+
+    Daytona's file metadata has no symlink flag, so entries report `is_symlink=None`, and `is_dir`
+    is whatever Daytona reports for the path.
 
     Daytona answers a request for a missing path and a request to a deleted sandbox with the same
     not-found error, so a failed request is followed by one control-plane lookup of the sandbox:

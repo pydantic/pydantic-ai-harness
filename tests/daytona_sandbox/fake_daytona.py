@@ -289,7 +289,11 @@ class _HostProcess(FakeProcess):
 
 
 class _HostFileSystem(FakeFileSystem):
-    """Mirrors `sandbox.fs` on the host filesystem, so commands and file calls share one tree."""
+    """Mirrors `sandbox.fs` on the host filesystem, so commands and file calls share one tree.
+
+    Like the SDK's `FileInfo`, entries carry no symlink flag; `is_dir` follows a symlink, as
+    `Path.is_dir` does. The live tier checks what Daytona itself reports.
+    """
 
     async def get_file_info(self, path: str, request_timeout: float | None = None) -> SimpleNamespace:
         self._raise_if_needed()
