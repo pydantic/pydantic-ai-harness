@@ -8,6 +8,7 @@ from typing import TypeGuard
 
 import pytest
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.slack import Slack
@@ -29,6 +30,11 @@ pytestmark = pytest.mark.anyio
 BUILTIN = next(plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'slack')
 ENABLED = BUILTIN.model_copy(update={'enabled': True})
 CONTEXT = RunContext[None](deps=None, model=TestModel(), usage=RunUsage())
+
+
+@pytest.fixture(autouse=True)
+def no_env_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv('SLACK_USER_TOKEN', raising=False)
 
 
 def is_slack(capability: object) -> TypeGuard[Slack[None]]:
@@ -85,6 +91,23 @@ async def test_enabling_without_a_token_warns_and_gives_no_tools() -> None:
     assert 'Slack tools are off. Run /slack to choose its user token from /keys' in app.output.getvalue()
     assert 'slack' in {command.name for command in app.commands}
     assert await app.turn_token() is None
+    await app.plugins.close('exit')
+
+
+async def test_the_environment_variable_is_named_but_not_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('SLACK_USER_TOKEN', 'xoxp-env')
+    app = await shell()
+    assert 'CLAI does not read SLACK_USER_TOKEN from the environment. Run /slack and enter it' in app.output.getvalue()
+    assert await app.turn_token() is None
+    await app.plugins.close('exit')
+
+
+async def test_a_key_deleted_before_saving_points_back_to_slack(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(slack_plugin, 'prompt_api_key', answer(KeyReference(name='GONE')))
+    app = await shell()
+    with pytest.raises(UserError, match='Select a saved key again through /slack'):
+        await app.commands.execute_async('/slack')
+    assert load_codex_credentials(account='slack') is None
     await app.plugins.close('exit')
 
 

@@ -524,7 +524,8 @@ your saved keys: pick one, or enter a new token privately, which saves it in
 `/keys` as `SLACK_USER_TOKEN` (harness `Slack`'s documented name, used only as a
 label). `/slack` never overwrites an existing `SLACK_USER_TOKEN`. CLAI saves only
 the key's name for Slack, in the same credential store as the vLLM and OpenRouter
-connections, and does not read the `SLACK_USER_TOKEN` environment variable.
+connections. It does not read the `SLACK_USER_TOKEN` environment variable; if
+that is set and no key is chosen, CLAI says to enter it through `/slack` instead.
 
 Before every turn CLAI reads the key's current value from `/keys`, so replacing
 it there takes effect on the next turn with no reload. When no key is chosen,

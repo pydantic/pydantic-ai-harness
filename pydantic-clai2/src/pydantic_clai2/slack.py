@@ -1,5 +1,6 @@
 """The built-in `slack` plugin: harness `Slack`, with its user token chosen from `/keys` by `/slack`."""
 
+import os
 from functools import partial
 
 from anyio import to_thread
@@ -100,6 +101,10 @@ def connected_token() -> str:
     """The current value of the chosen key, so replacing it in `/keys` reaches the next turn and deleting it fails closed."""
     raw = load_codex_credentials(account=_ACCOUNT)
     if raw is None:
+        if os.environ.get(TOKEN_NAME):
+            raise UserError(
+                f'CLAI does not read {TOKEN_NAME} from the environment. Run /slack and enter it to save it in /keys.'
+            )
         raise UserError('Run /slack to choose its user token from /keys or enter one privately.')
     try:
         connection = SlackConnection.model_validate_json(raw)
