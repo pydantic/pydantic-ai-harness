@@ -39,7 +39,7 @@ result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summa
 print(result.output)
 ```
 
-Construction makes no Modal requests. The first workspace operation creates the sandbox; with `Coder` or `FileSystem`, that is the start of the run.
+The sandbox is created the first time the run uses it.
 
 Commands run under `sh -c` in the sandbox's shell environment. Nothing from your machine's environment reaches the sandbox: pass `env=` for variables every command should get, such as a token the agent needs. `working_dir=` sets the absolute directory commands start in and relative paths resolve against; it defaults to the image's.
 

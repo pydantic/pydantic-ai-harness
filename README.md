@@ -53,14 +53,16 @@ print(result.output)
 
 `LocalWorkspace` gives the agent this directory to work in: nothing touches your machine unless you attach it. Commands inherit nothing from your environment, so the example passes `PATH` and `HOME` to let them find your tools.
 
-To run the same agent in isolation, a sandbox capability (Modal, E2B, Daytona, or Sprites) replaces `LocalWorkspace`; see [Workspaces](#workspaces). With [Modal](docs/modal-sandbox.md), for example (the `python:3.12` image includes `git`):
+To run the same agent in isolation, a sandbox capability (Modal, E2B, Daytona, or Sprites) replaces `LocalWorkspace`; see [Workspaces](#workspaces). With [Modal](docs/modal-sandbox.md), for example, on an image with the `git` and `ripgrep` that Coder uses:
 
 ```python
+import modal
 from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
+image = modal.Image.debian_slim().apt_install('git', 'ripgrep')
 agent = Agent(
     'anthropic:claude-sonnet-5',
-    capabilities=[ModalSandbox(image='python:3.12'), Coder()],
+    capabilities=[ModalSandbox(image=image), Coder()],
 )
 ```
 
