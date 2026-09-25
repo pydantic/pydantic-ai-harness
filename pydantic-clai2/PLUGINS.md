@@ -385,8 +385,8 @@ order plugin instructions, renderers, and status segments are consulted in.
 
 `/plugins` and `/plugins list` also include every other public harness capability,
 including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
-appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
+`Coder`, `AskUser`, `RepoContext`, and `GoogleWorkspace` use the integrated
+entries above and below instead of appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
 are not separate capabilities.
 
 Press Space to enable an entry. Its preview shows the import path and any load
@@ -506,6 +506,40 @@ The request and its response are also emitted as `AskUserRequestedEvent` and
 `AskUserAnsweredEvent`, so a plugin that only wants to watch (log the question,
 show a "waiting for you" state) registers `@host.on(EventClass)` or
 `@host.render(EventClass)` without being the answerer.
+
+### `google_workspace`: Gmail, Calendar, and Drive tools
+
+`google_workspace` (`pydantic_clai2.google_workspace`) is a built-in that starts
+disabled. It gives the agent the tools of Google's hosted Workspace MCP servers
+through harness
+[`GoogleWorkspace`](../docs/google-workspace.md). It needs
+a Google OAuth access token whose scopes cover the products you select. Save it
+in `/keys` as `GOOGLE_ACCESS_TOKEN`, or set the `GOOGLE_ACCESS_TOKEN` environment
+variable; the saved key is checked first. Then run:
+
+```text
+/plugins enable google_workspace
+```
+
+Without a token, enabling it fails with a message naming both places, and no
+tools are added. Each turn reads the token again: Google access tokens expire
+after about an hour, and replacing the saved key applies from the next turn
+without reloading. If the token is removed while the plugin is loaded, the turn
+fails with the same message.
+
+| Key | Default | Does |
+|---|---|---|
+| `services` | `["gmail", "calendar", "drive"]` | products to connect: `gmail`, `drive`, `docs`, `sheets`, `slides`, `calendar`, `chat`, `people` |
+| `read_only` | `true` | keep only the tools Google marks as read-only |
+
+CLAI runs tools without asking first, so `read_only` defaults to `true`. Set it to
+`false` to also get the tools that send, change, and delete:
+
+```text
+/plugins add google_workspace pydantic_clai2.google_workspace '{"services": ["gmail", "docs"], "read_only": false}'
+```
+
+The token does not go in these settings; they are stored in plain SQLite.
 
 ## Managing plugins
 

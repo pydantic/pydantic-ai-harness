@@ -2,7 +2,7 @@
 
 from .config import PluginSettings
 
-# Coder, AskUser and RepoContext already have shell-integrated built-in entries.
+# Coder, AskUser, RepoContext and GoogleWorkspace already have shell-integrated built-in entries.
 _FACTORIES = (
     ('advisor', 'advisor:Advisor'),
     ('aws_lambda', 'aws_lambda:AWSLambdaDurability'),
@@ -26,7 +26,6 @@ _FACTORIES = (
     ('exa_search', 'exa:ExaSearch'),
     ('filesystem', 'filesystem:FileSystem'),
     ('github', 'github:GitHub'),
-    ('google_workspace', 'google_workspace:GoogleWorkspace'),
     ('grain', 'grain:Grain'),
     ('input_guardrail', 'guardrails:InputGuardrail'),
     ('output_guardrail', 'guardrails:OutputGuardrail'),
