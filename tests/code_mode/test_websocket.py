@@ -150,9 +150,9 @@ async def test_disconnect_mid_snippet_reports_started_calls(websocket_relay_url:
 
         @agent.tool_plain
         async def drop_connection() -> None:  # pyright: ignore[reportUnusedFunction]
-            for connection in connections:
-                await connection.close()
-            await asyncio.Event().wait()  # cancelled once the harness sees the disconnect
+            # One statement: the harness cancels this while the close is in flight, so a separate
+            # wait line would only sometimes run. The wait never ends on its own.
+            await asyncio.gather(*(connection.close() for connection in connections), asyncio.Event().wait())
 
         result = await agent.run('lose the worker mid-snippet')
 
