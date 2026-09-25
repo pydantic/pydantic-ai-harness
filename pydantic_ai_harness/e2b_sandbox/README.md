@@ -101,7 +101,7 @@ async def retry_on_clean_checkout(history: list[ModelMessage]) -> str:
     return result.output
 ```
 
-E2B resumes a paused sandbox when a run attaches to it. Metadata is passed to E2B as ordinary labels; it is not searched to recover sandboxes.
+E2B resumes a paused sandbox when a run attaches to it.
 
 ## Manage the sandbox yourself
 
@@ -130,7 +130,7 @@ async def run_with_cleanup() -> str:
 
 ## Configuration
 
-`env` sets environment variables every command gets, including on a sandbox attached by reference; a command's own `env` is layered on top, and nothing is read from the host environment. `template` picks the E2B template a new sandbox runs, `metadata` labels it, and `allow_internet_access` controls its outbound network access; these configure creation and do not reconfigure an attached sandbox.
+`env` sets environment variables every command gets, including on a sandbox attached by reference; a command's own `env` is layered on top, and nothing is read from the host environment. `template` picks the E2B template a new sandbox runs, and `allow_internet_access` controls its outbound network access; these configure creation and do not reconfigure an attached sandbox.
 
 `working_dir` is the absolute directory commands start in and relative paths resolve against. E2B has no create-time working directory, so it applies per command, including on an attached sandbox; `None` uses the sandbox's own default. Invalid values for `working_dir` or `sandbox_timeout` raise `UserError` when `E2BSandbox` is constructed.
 
@@ -140,7 +140,7 @@ Rejected credentials and a sandbox that is gone raise `WorkspaceUnavailableError
 
 ## Lifetime and cost
 
-A sandbox keeps running, and billing, after the agent run ends: Pydantic AI does not kill it. `sandbox_timeout` (default 300 seconds) is E2B's lifetime for a newly created sandbox, after which E2B stops it; that is the backstop for sandboxes you lose track of. Attaching by reference applies E2B's default 300-second lifetime from the time of attaching, which can extend a shorter remaining lifetime. Cancelling a run while E2B creates its sandbox waits for creation to finish, so `ref` still names the sandbox. To stop a sandbox sooner, kill it through `get_client()`, as above.
+A sandbox keeps running, and billing, after the agent run ends: Pydantic AI does not kill it. `sandbox_timeout` sets the lifetime of a newly created sandbox, after which E2B stops it; when it is unset, [E2B's default lifetime](https://docs.e2b.dev/sandbox) applies. That lifetime is the backstop for sandboxes you lose track of. Attaching by reference applies E2B's default lifetime from the time of attaching, which can extend a shorter remaining lifetime. Cancelling a run while E2B creates its sandbox waits for creation to finish, so `ref` still names the sandbox. To stop a sandbox sooner, kill it through `get_client()`, as above.
 
 `E2BSandbox.get_workspace` performs no I/O, so a backend can be rebuilt from a `WorkspaceRef` wherever the run continues, including under a durable execution engine. The reference carries no credentials, so each worker needs its own `E2B_API_KEY`. See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for how a run selects and restores its workspace.
 

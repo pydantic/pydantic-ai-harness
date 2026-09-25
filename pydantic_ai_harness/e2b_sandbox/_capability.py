@@ -11,10 +11,7 @@ from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 
 from pydantic_ai_harness._workspace_provider import check_integer, check_working_dir
-from pydantic_ai_harness.e2b_sandbox._backend import (
-    DEFAULT_SANDBOX_TIMEOUT,
-    E2BSandboxBackend,
-)
+from pydantic_ai_harness.e2b_sandbox._backend import E2BSandboxBackend
 
 
 @dataclass(kw_only=True)
@@ -33,17 +30,14 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
     template: str | None = None
     """E2B template name or ID for a newly created workspace."""
 
-    sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT
-    """Server-side lifetime backstop for a newly created workspace, in seconds."""
+    sandbox_timeout: int | None = None
+    """Lifetime of a newly created sandbox, in seconds; E2B's default when `None`."""
 
     working_dir: str | None = None
     """Absolute directory commands start in and relative paths resolve against; `None` uses the sandbox's own."""
 
     env: Mapping[str, str] | None = None
     """Environment variables every command gets, also on an attached workspace; nothing is read from the host."""
-
-    metadata: Mapping[str, str] | None = None
-    """Metadata added to a newly created workspace."""
 
     allow_internet_access: bool = True
     """Whether a newly created workspace may reach the internet."""
@@ -54,7 +48,7 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
                 '`defer_loading` is not supported on `E2BSandbox`: a run never takes its workspace '
                 'from a deferred capability, so the sandbox would never be used.'
             )
-        check_integer('sandbox_timeout', self.sandbox_timeout)
+        check_integer('sandbox_timeout', self.sandbox_timeout, optional=True)
         check_working_dir(self.working_dir)
 
     def get_workspace(self, ctx: RunContext[AgentDepsT], *, ref: WorkspaceRef | None) -> WorkspaceBackend | None:
@@ -68,6 +62,5 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
             sandbox_timeout=self.sandbox_timeout,
             working_dir=self.working_dir,
             env=self.env,
-            metadata=self.metadata,
             allow_internet_access=self.allow_internet_access,
         )

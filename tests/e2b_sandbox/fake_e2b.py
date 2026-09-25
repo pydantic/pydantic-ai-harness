@@ -61,7 +61,6 @@ def _echo_responder(command: str, timeout: float | None) -> tuple[str, str, int]
 class FakeCreateCall:
     template: str | None
     timeout: int | None
-    metadata: dict[str, str] | None
     envs: dict[str, str] | None
     secure: bool
     allow_internet_access: bool
@@ -545,16 +544,10 @@ class _HostFilesystem(FakeFilesystem):
 class FakeSandbox:
     """Mirrors `e2b.AsyncSandbox` for the members the backend uses."""
 
-    def __init__(
-        self,
-        control: FakeE2B,
-        id: str,
-        metadata: dict[str, str] | None = None,
-    ) -> None:
+    def __init__(self, control: FakeE2B, id: str) -> None:
         self._control = control
         self.id = id
         self.sandbox_id = id
-        self.metadata = metadata or {}
         self.files = FakeFilesystem(self, control)
         self.commands = FakeCommands(self, control)
         if control.host_root is not None:
@@ -603,21 +596,18 @@ class FakeAsyncSandboxFactory:
         self,
         template: str | None = None,
         timeout: int | None = None,
-        metadata: dict[str, str] | None = None,
         envs: dict[str, str] | None = None,
         secure: bool = True,
         allow_internet_access: bool = True,
     ) -> FakeSandbox:
-        self._control.create_calls.append(
-            FakeCreateCall(template, timeout, metadata, envs, secure, allow_internet_access)
-        )
+        self._control.create_calls.append(FakeCreateCall(template, timeout, envs, secure, allow_internet_access))
         if self._control.create_hangs:
             await anyio.sleep_forever()
         await anyio.lowlevel.checkpoint()
         if self._control.create_error is not None:
             raise self._control.create_error
         # E2B has created the sandbox before its response reaches the caller.
-        sandbox = self._control.new_sandbox(f'sbx-{len(self._control.sandboxes) + 1}', metadata)
+        sandbox = self._control.new_sandbox(f'sbx-{len(self._control.sandboxes) + 1}')
         if self._control.create_response_held is not None:
             await self._control.create_response_held.wait()
         return sandbox
@@ -664,8 +654,8 @@ class FakeE2B:
     def __post_init__(self) -> None:
         self.module = self._build_module()
 
-    def new_sandbox(self, id: str, metadata: dict[str, str] | None = None) -> FakeSandbox:
-        sandbox = FakeSandbox(self, id, metadata)
+    def new_sandbox(self, id: str) -> FakeSandbox:
+        sandbox = FakeSandbox(self, id)
         self.sandboxes.append(sandbox)
         return sandbox
 

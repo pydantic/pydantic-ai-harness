@@ -46,7 +46,6 @@ if TYPE_CHECKING:
     from pydantic_ai.workspaces import WorkspaceCommand
 
 __all__ = ('E2BSandboxBackend',)
-DEFAULT_SANDBOX_TIMEOUT = 300
 
 try:
     import e2b
@@ -149,14 +148,14 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         workspace: A live `e2b.AsyncSandbox` you already have. Whoever created it owns killing it.
         ref: Identity of an existing sandbox to attach to on first use.
         template: E2B template name or id a newly created sandbox runs; E2B's default when `None`.
-        sandbox_timeout: How long E2B keeps a newly created sandbox alive, in seconds.
+        sandbox_timeout: How long E2B keeps a newly created sandbox alive, in seconds; E2B's default
+            when `None`.
         working_dir: Absolute directory commands start in and relative paths resolve against.
             E2B has no create-time working directory, so this is applied per command, including
             on an attached sandbox; `None` uses the sandbox's own default, discovered with
             `pwd -P` on first use.
         env: Environment variables every command gets, on a created or an attached sandbox;
             per-command `env` is layered on top. Nothing is read from the host environment.
-        metadata: Metadata added to a newly created workspace.
         allow_internet_access: Whether a newly created sandbox may reach the internet.
     """
 
@@ -166,10 +165,9 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         *,
         ref: WorkspaceRef | None = None,
         template: str | None = None,
-        sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
+        sandbox_timeout: int | None = None,
         working_dir: str | None = None,
         env: Mapping[str, str] | None = None,
-        metadata: Mapping[str, str] | None = None,
         allow_internet_access: bool = True,
     ) -> None:
         if ref is not None and ref.provider != 'e2b':
@@ -181,11 +179,11 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         self._template = template
         self._sandbox_timeout = sandbox_timeout
         self._env = dict(env) if env is not None else None
-        self._metadata = dict(metadata) if metadata is not None else None
         self._allow_internet_access = allow_internet_access
         self._canonical_working_dir: str | None = None
         self._working_dir = absolute_path('working_dir', working_dir)
-        self._created_timeout: int | None = None
+        # Set once this backend creates the sandbox, so an expiry message can name its lifetime.
+        self._created = False
         self._lock = anyio.Lock()
 
     async def get_client(self) -> e2b.AsyncSandbox:
@@ -257,16 +255,20 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
 
     def _gone_message(self) -> str:
         assert self._ref is not None
-        if self._created_timeout is None:
+        if not self._created:
             return (
                 f'The E2B sandbox {self._ref.id!r} is no longer running '
                 '(it does not exist, was killed, or expired at its configured lifetime). '
                 'Attach to a live sandbox, or create a new one.'
             )
+        lifetime = (
+            "E2B's default lifetime"
+            if self._sandbox_timeout is None
+            else f'its sandbox_timeout of {self._sandbox_timeout}s'
+        )
         return (
-            f'The E2B sandbox {self._ref.id!r} is no longer running (it may have reached its '
-            f'sandbox_timeout of {self._created_timeout}s, or been killed). '
-            'Start a new run, or raise sandbox_timeout for longer work.'
+            f'The E2B sandbox {self._ref.id!r} is no longer running (it may have reached {lifetime}, '
+            'or been killed). Start a new run, or raise sandbox_timeout for longer work.'
         )
 
     async def read_bytes(self, path: str) -> bytes:
@@ -316,13 +318,13 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             async with self._sdk_errors('Could not start E2B sandbox'):
                 sandbox = await e2b.AsyncSandbox.create(
                     template=self._template,
+                    # `None` leaves the lifetime to E2B's default.
                     timeout=self._sandbox_timeout,
-                    metadata=self._metadata,
                     envs=dict(self._env) if self._env is not None else None,
                     secure=True,
                     allow_internet_access=self._allow_internet_access,
                 )
-            self._created_timeout = self._sandbox_timeout
+            self._created = True
             return sandbox
         # A transient failure like any unreachable service: it propagates for durable engines to
         # retry, with a message that says what did not answer.

@@ -42,8 +42,8 @@ def test_foreign_reference_is_rejected() -> None:
     ('settings', 'message'),
     [
         ({'working_dir': 'repo'}, "working_dir must be an absolute POSIX path or None, got 'repo'"),
-        ({'sandbox_timeout': 0}, 'sandbox_timeout must be an integer of at least 1, got 0'),
-        ({'sandbox_timeout': 1.5}, 'sandbox_timeout must be an integer of at least 1, got 1.5'),
+        ({'sandbox_timeout': 0}, 'sandbox_timeout must be an integer of at least 1 or None, got 0'),
+        ({'sandbox_timeout': 1.5}, 'sandbox_timeout must be an integer of at least 1 or None, got 1.5'),
         ({'defer_loading': True, 'id': 'e2b'}, '`defer_loading` is not supported on `E2BSandbox`'),
     ],
 )
@@ -97,7 +97,6 @@ async def test_capability_forwards_creation_options_and_run_does_not_kill(fake_e
         sandbox_timeout=120,
         working_dir='/work',
         env={'FOO': 'bar'},
-        metadata={'owner': 'test'},
         allow_internet_access=False,
     )
     agent = Agent(TestModel(call_tools=['run_command']), capabilities=[capability])
@@ -109,13 +108,7 @@ async def test_capability_forwards_creation_options_and_run_does_not_kill(fake_e
     result = await agent.run('run', deps=None)
     assert 'ok' in result.output
     call = fake_e2b.create_calls[0]
-    assert (call.template, call.timeout, call.envs, call.metadata, call.allow_internet_access) == (
-        'base',
-        120,
-        {'FOO': 'bar'},
-        {'owner': 'test'},
-        False,
-    )
+    assert (call.template, call.timeout, call.envs, call.allow_internet_access) == ('base', 120, {'FOO': 'bar'}, False)
     assert fake_e2b.sandboxes[0].commands.calls[-1].cwd == '/work'
     assert fake_e2b.sandboxes[0].killed is False
     assert isinstance(result.workspace, Workspace)
@@ -127,7 +120,7 @@ async def test_capability_forwards_creation_options_and_run_does_not_kill(fake_e
 
 
 async def test_explicit_ref_uses_attach_even_with_creation_options(fake_e2b: FakeE2B) -> None:
-    capability = E2BSandbox(template='base', env={'FOO': 'bar'}, metadata={'owner': 'test'})
+    capability = E2BSandbox(template='base', env={'FOO': 'bar'})
     ctx = RunContext(deps=None, model=TestModel(), usage=RunUsage())
     backend = capability.get_workspace(ctx, ref=WorkspaceRef(provider='e2b', id='existing'))
     assert isinstance(backend, E2BSandboxBackend)

@@ -87,18 +87,22 @@ class TestCreate:
             template='base',
             sandbox_timeout=120,
             env={'FOO': 'bar'},
-            metadata={'owner': 'harness'},
             allow_internet_access=False,
         )
         assert backend.ref == WorkspaceRef(provider='e2b', id='sbx-1')
         call = fake_e2b.create_calls[-1]
-        assert (call.template, call.timeout, call.envs) == ('base', 120, {'FOO': 'bar'})
-        assert (call.metadata, call.allow_internet_access) == ({'owner': 'harness'}, False)
+        assert (call.template, call.timeout, call.envs, call.allow_internet_access) == (
+            'base',
+            120,
+            {'FOO': 'bar'},
+            False,
+        )
 
     async def test_defaults(self, fake_e2b: FakeE2B) -> None:
         await started()
         call = fake_e2b.create_calls[-1]
-        assert (call.template, call.timeout, call.envs, call.metadata) == (None, 300, None, None)
+        # A lifetime left unset is not passed, so E2B's own default applies.
+        assert (call.template, call.timeout, call.envs) == (None, None, None)
         # Passed explicitly: it decides whether the sandbox is reachable without its token.
         assert (call.secure, call.allow_internet_access) == (True, True)
 
@@ -252,11 +256,17 @@ class TestRun:
         with pytest.raises(TimeoutException, match='slow'):
             await backend.run(['x'])
 
-    async def test_a_gone_sandbox_names_itself_and_its_lifetime(self, fake_e2b: FakeE2B) -> None:
+    @pytest.mark.parametrize(
+        ('settings', 'lifetime'),
+        [({}, "E2B's default lifetime"), ({'sandbox_timeout': 300}, 'sandbox_timeout of 300s')],
+    )
+    async def test_a_gone_sandbox_names_itself_and_its_lifetime(
+        self, fake_e2b: FakeE2B, settings: dict[str, Any], lifetime: str
+    ) -> None:
         fake_e2b.run_error = fake_e2b.ambiguous_type('unavailable')
         fake_e2b.sandbox_is_running = False
-        backend = await started()
-        with pytest.raises(WorkspaceUnavailableError, match="'sbx-1' is no longer running .* sandbox_timeout of 300s"):
+        backend = await started(**settings)
+        with pytest.raises(WorkspaceUnavailableError, match=f"'sbx-1' is no longer running .* {lifetime}"):
             await backend.run(['x'])
 
     async def test_an_attached_sandbox_names_itself_when_gone(self, fake_e2b: FakeE2B) -> None:
