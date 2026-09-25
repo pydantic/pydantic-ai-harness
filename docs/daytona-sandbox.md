@@ -127,7 +127,7 @@ Without `client=`, each run opens its own `AsyncDaytona` API client on first use
 
 A sandbox keeps running, and billing, after the run ends. Daytona stops it after `auto_stop_interval` idle minutes (default 60; `0` disables it), archives a stopped sandbox after `auto_archive_interval` minutes (Daytona's default, 7 days, when unset), and deletes a stopped sandbox after `auto_delete_interval` minutes (default `-1`, never). A stopped sandbox keeps its disk, and attaching to it starts it again. Deleting sandboxes you are done with is the application's job, through `get_client()` or the Daytona dashboard. These settings, `snapshot`, and `network_block_all` apply when a sandbox is created, not to one attached by reference.
 
-A command's `timeout` is enforced client-side; when it expires or the caller is cancelled, the backend deletes the command's session, which kills the command. Cancelling a run while the sandbox is being created can leave a sandbox the application never received a reference for; `auto_stop_interval` and `auto_delete_interval` bound what it costs.
+A command's `timeout` is enforced client-side; when it expires or the caller is cancelled, the backend deletes the command's session, which kills the command. A run cancelled while its sandbox is being created waits for creation to finish, so the sandbox is always recorded in `ref`. Only a creation that outlasts the backend's own creation bound can leave a sandbox nothing names; `auto_stop_interval` and `auto_delete_interval` bound what it costs.
 
 The capability emits no telemetry spans of its own; core agent and tool spans cover the calls made through tools.
 
