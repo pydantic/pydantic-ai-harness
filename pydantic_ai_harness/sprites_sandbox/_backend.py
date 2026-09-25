@@ -229,7 +229,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
         This is the Sprite handle, not the `AsyncSpritesClient` passed as `client=`. A handle
         obtained before `aclose()` belongs to the closed client; call this again for a fresh one.
 
-        The only place `_client` and `_workspace` are read, so nothing can reach an
+        The only place `_client` and `_sandbox` are read, so nothing can reach an
         unhydrated one: both stay optional and every other method comes through here.
         The lock serializes concurrent first uses -- two callers each creating a Sprite
         would leave the loser billed and unreferenced. Attaching by `ref` to a Sprite that
