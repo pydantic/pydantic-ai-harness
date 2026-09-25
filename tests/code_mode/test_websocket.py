@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 import pytest
+import websockets
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
@@ -123,3 +125,37 @@ async def test_dial_failure_redacts_sandbox_url() -> None:
     (retry,) = _parts(result.all_messages(), RetryPromptPart)
     assert 'hunter2' not in str(retry.content)
     assert '<monty_sandbox_url>' in str(retry.content)
+
+
+async def test_disconnect_mid_snippet_reports_started_calls(websocket_relay_url: str) -> None:
+    """A dropped worker connection resets the session and lists the calls that already started."""
+    connections: list[websockets.ServerConnection] = []
+
+    async def proxy(client: websockets.ServerConnection) -> None:
+        connections.append(client)
+        async with websockets.connect(websocket_relay_url, max_size=None) as upstream:
+
+            async def pump(source: Any, sink: Any) -> None:
+                async for message in source:
+                    await sink.send(message)
+
+            await asyncio.gather(pump(client, upstream), pump(upstream, client), return_exceptions=True)
+
+    async with websockets.serve(proxy, '127.0.0.1', 0, max_size=None) as server:
+        port: int = next(iter(server.sockets)).getsockname()[1]
+        agent = Agent(
+            _snippets_model('await drop_connection()'),
+            capabilities=[CodeMode(monty_sandbox_url=f'ws://127.0.0.1:{port}')],
+        )
+
+        @agent.tool_plain
+        async def drop_connection() -> None:  # pyright: ignore[reportUnusedFunction]
+            for connection in connections:
+                await connection.close()
+            await asyncio.Event().wait()  # cancelled once the harness sees the disconnect
+
+        result = await agent.run('lose the worker mid-snippet')
+
+    (retry,) = _parts(result.all_messages(), RetryPromptPart)
+    assert 'MontyDisconnectError' in str(retry.content)
+    assert 'drop_connection({}) did not finish' in str(retry.content)

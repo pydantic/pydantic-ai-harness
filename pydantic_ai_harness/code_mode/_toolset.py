@@ -219,7 +219,7 @@ def _describe_started_calls(calls: dict[str, ToolCallPart], returns: dict[str, T
         # ever sees parts built above, which set 'denied' or leave the default 'success'. Record
         # any further outcome here rather than letting it fall through and read as a return.
         if result is None:
-            outcome = 'raised, so it may have applied a partial change'
+            outcome = 'did not finish, so it may have applied a partial change'
         elif result.outcome == 'denied':
             outcome = 'was denied and did not run'
         else:
@@ -1070,6 +1070,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         # behavior as a normal call while presenting one combined result to the model.
         capture = execution.capture
 
+        def started_calls() -> str:
+            # A failure that resets the session has no traceback saying what already ran, so the
+            # model would otherwise repeat the side effects of calls that started.
+            if not execution.nested_calls:
+                return ''
+            return f'\n\n{_describe_started_calls(execution.nested_calls, execution.nested_returns)}'
+
         in_workflow = in_temporal_workflow(ctx)
         try:
             session = await run_state.get_session(
@@ -1127,14 +1134,14 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # semantics are the same -- the model gets another chance.
             message = f'Runtime error:\n{capture.prepend_to(e.display())}'
             duration_spent = _is_duration_exhausted(e)
-            if execution.nested_calls and (execution.budget_exhausted or _exhausted_sandbox_limit(e) is not None):
+            if execution.budget_exhausted or _exhausted_sandbox_limit(e) is not None:
                 # A retry is the only record the model gets of an uncaught failure, and these
                 # calls already started. Without them the model reruns their side effects when
                 # it retries. Asking which limit tripped, rather than testing one flag per limit,
                 # is what keeps a newly added limit from quietly losing this. It matters most on
                 # the duration path, where the advice is to restart, which discards the REPL state
                 # the model would otherwise reconstruct from.
-                message += f'\n\n{_describe_started_calls(execution.nested_calls, execution.nested_returns)}'
+                message += started_calls()
             if duration_spent:
                 # This error keeps the session, so every later call fails on arrival too. Left
                 # alone it reads like an ordinary runtime error, which points the model at
@@ -1170,6 +1177,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             await run_state.reset()
             raise ModelRetry(
                 'The code crashed the sandbox worker and the session was reset. Revise the code and try again.'
+                f'{started_calls()}'
             ) from e
         except Exception as e:
             # The session may have been invalidated by a host-side binding or protocol failure.
@@ -1185,7 +1193,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 error_text = error_text.replace(self.monty_sandbox_url, '<monty_sandbox_url>')
             raise ModelRetry(
                 'Code execution failed and the session was reset. Re-run any imports, recreate '
-                f'any state you need, and try again.\n{capture.prepend_to(error_text)}'
+                f'any state you need, and try again.\n{capture.prepend_to(error_text)}{started_calls()}'
             ) from e
         except BaseException as e:
             # Convert a sandbox panic to a retry (see `is_sandbox_panic`);
@@ -1198,6 +1206,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             await run_state.reset()
             raise ModelRetry(
                 'The code aborted inside the sandbox and the session was reset. Revise the code and try again.'
+                f'{started_calls()}'
             ) from e
 
         result = completed.output

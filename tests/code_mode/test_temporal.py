@@ -21,6 +21,7 @@ runs `temporalite` automatically.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import subprocess
 import sys
@@ -175,12 +176,35 @@ code_mode_agent = Agent(
 )
 
 
+# Set by the workflow and read by `os_access`, which Monty calls from a thread behind the portal.
+_request_id: contextvars.ContextVar[str] = contextvars.ContextVar('request_id', default='unset')
+
+
+def _request_id_os(fn: str, args: tuple[object, ...], kwargs: dict[str, object]) -> object:
+    return _request_id.get()
+
+
+def _remote_code_mode_model(messages: list[ModelRequest | ModelResponse], info: AgentInfo) -> ModelResponse:
+    """Model that adds with a tool and reads the workflow's contextvar through `os_access`."""
+    returns = [
+        part
+        for msg in messages
+        if isinstance(msg, ModelRequest)
+        for part in msg.parts
+        if isinstance(part, ToolReturnPart) and part.tool_name == 'run_code'
+    ]
+    if returns:
+        return ModelResponse(parts=[TextPart(content=f'done: {returns[-1].content}')])
+    code = 'import os\ntotal = await add(a=3, b=4)\nf\'{total} {os.getenv("REQUEST_ID")}\''
+    return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='remote_tc_1')])
+
+
 remote_code_mode_agent = Agent(
-    FunctionModel(_code_mode_model),
+    FunctionModel(_remote_code_mode_model),
     name='code_mode_temporal_remote_agent',
     toolsets=[FunctionToolset(tools=[add], id='math')],
     capabilities=[
-        CodeMode(monty_sandbox_url=f'ws://127.0.0.1:{MONTY_RELAY_PORT}'),
+        CodeMode(monty_sandbox_url=f'ws://127.0.0.1:{MONTY_RELAY_PORT}', os_access=_request_id_os),
         TemporalDurability(activity_config=BASE_ACTIVITY_CONFIG),
     ],
 )
@@ -216,6 +240,7 @@ class RemoteCodeModeWorkflow:
 
     @workflow.run
     async def run(self, prompt: str) -> str:
+        _request_id.set('req-42')
         result = await remote_code_mode_agent.run(prompt)
         return str(result.output)
 
@@ -335,7 +360,7 @@ async def test_code_mode_runs_over_websocket_in_temporal_workflow(client: Client
     """Remote workers run and replay in a workflow like local ones do.
 
     Every Monty call inside a workflow goes through the blocking portal, so this covers that
-    path for both bindings.
+    path for both bindings, including `os_access` seeing the workflow's contextvars.
     """
     workflow_id = 'test_code_mode_temporal_remote_1'
     async with Worker(
@@ -351,7 +376,7 @@ async def test_code_mode_runs_over_websocket_in_temporal_workflow(client: Client
             id=workflow_id,
             task_queue=TASK_QUEUE,
         )
-    assert output == 'done: 70'
+    assert output == 'done: 7 req-42'
 
     history = await client.get_workflow_handle(workflow_id).fetch_history()
     replay_result = await Replayer(

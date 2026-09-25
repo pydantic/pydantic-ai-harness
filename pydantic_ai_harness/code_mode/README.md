@@ -232,9 +232,9 @@ call. The budget is reserved before each call is scheduled, so a snippet cannot 
 than it allows. A call past the budget fails at its call site inside the sandbox. A snippet that
 catches the error keeps the results of the calls that already completed and can return them. A
 snippet that lets it propagate gets a model retry reporting how many nested calls started,
-followed by per-call detail: what each was called with, and whether it returned, raised, or was
-denied. Calls that raised are included rather than filtered out, since a tool can apply a change
-before failing. That detail is bounded -- arguments and results are previewed, and the list stops
+followed by per-call detail: what each was called with, and whether it returned, did not finish, or was
+denied. Calls that did not finish are included rather than filtered out, since a tool can apply a change
+before it stops. That detail is bounded -- arguments and results are previewed, and the list stops
 at a size cap and says how many entries it left out -- so a large payload cannot inflate the
 retry. The reported total stays exact whether or not the list was cut, which is what tells the
 model some calls are missing from what it can see. The list is context for the model, not a guard:
@@ -253,7 +253,7 @@ time-bounded work behind a Temporal activity instead.
 
 ## REPL state
 
-State persists between `run_code` calls within the same agent run -- variables, imports, and function definitions carry over. Pass `restart: true` in the tool call to reset state. If a worker crash or host-side execution failure invalidates the session, `run_code` returns a model retry that reports the reset; the next snippet must recreate any required state.
+State persists between `run_code` calls within the same agent run -- variables, imports, and function definitions carry over. Pass `restart: true` in the tool call to reset state. If a worker crash or host-side execution failure invalidates the session, `run_code` returns a model retry that reports the reset and the nested calls that already started; the next snippet must recreate any required state.
 
 ## Eager execution
 
@@ -503,6 +503,9 @@ server is on a private network: the connection carries your tool results and fil
 Only code execution moves to the worker. Your tools, `mount` directories, `os_access`, and `print`
 output are still handled by the agent's process, and REPL state persists across `run_code` calls
 as it does locally. Eager execution, speculation, resource limits, and Temporal work the same way.
+Each snippet may take `max_duration_secs` plus 10 seconds before the connection gives up on it.
+With no duration limit (`resource_limits='unlimited'`, or inside a Temporal workflow), a server
+that stops responding is waited on indefinitely.
 
 ## Temporal durability
 
@@ -683,7 +686,7 @@ CodeMode(
     os_access=None,       # OS behavior; custom handlers may expose host resources
     mount=None,           # host directories to share with the sandbox
     resource_limits=None, # sandbox time and memory caps; 'unlimited' removes them
-    monty_sandbox_url=None, # wss:// URL of a remote Monty worker server
+    monty_sandbox_url=None, # ws:// or wss:// URL of a remote Monty worker server
     dynamic_catalog=False,
 )
 ```

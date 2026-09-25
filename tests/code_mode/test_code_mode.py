@@ -1224,7 +1224,7 @@ class TestCodeMode:
             )
 
         message = exc_info.value.message
-        assert "flaky({'value': 1}) raised, so it may have applied a partial change" in message
+        assert "flaky({'value': 1}) did not finish, so it may have applied a partial change" in message
         assert "flaky({'value': 0}) returned 0" in message
 
     async def test_budget_retry_marks_denied_calls_as_not_run(self) -> None:
@@ -2916,8 +2916,12 @@ class TestCodeMode:
         run_code = tools['run_code']
 
         await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, run_code)
-        with pytest.raises(ModelRetry, match='crashed the sandbox worker'):
-            await wrapper.call_tool('run_code', {'code': 'while True:\n    pass'}, ctx, run_code)
+        with pytest.raises(ModelRetry, match='crashed the sandbox worker') as exc_info:
+            await wrapper.call_tool(
+                'run_code', {'code': 'r = await add(a=1, b=2)\nwhile True:\n    pass'}, ctx, run_code
+            )
+        # The crash leaves no traceback, so the retry is the only record of the call that ran.
+        assert "add({'a': 1, 'b': 2}) returned 3" in exc_info.value.message
         # The reset is observable: the next call is a fresh REPL, so the type checker
         # rejects the name assigned before the crash.
         with pytest.raises(ModelRetry, match='Type error in code'):
