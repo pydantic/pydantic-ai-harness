@@ -393,6 +393,12 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                     await proc.wait()
                     await self._drain_with_timeout(stdout_chunks, stderr_chunks, proc)
                 return f'[Command timed out after {timeout}s]'
+            except BaseException:
+                # A cancelled call cannot hand back a live process group
+                # (rationale mirrors shell/_persistent.py::_kill_session).
+                with anyio.CancelScope(shield=True):
+                    await self._kill_process_group(proc)
+                raise
             finally:
                 await proc.aclose()
 

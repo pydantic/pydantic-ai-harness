@@ -61,8 +61,10 @@ denylist active -- `Shell()` alone is a working (if permissive) configuration.
 | `shell` | Opt-in: run a command that outlives the run, in `foreground` (wait up to `timeout`, then hand back the still-running process) or `background` mode. Returns the PID and the paths of its output log and JSON status file. |
 
 `run_command` accepts an optional `timeout_seconds` argument that overrides
-`default_timeout` for a single call. `check_command` and `stop_command` take the
-`command_id` string returned by `start_command`.
+`default_timeout` for a single call. If a `run_command` call is cancelled, it
+kills the command's process group before re-raising the cancellation (POSIX).
+`check_command` and `stop_command` take the `command_id` string returned by
+`start_command`.
 
 Output is labelled with `[stdout]` / `[stderr]` markers and an `[exit code: N]`
 line on non-zero exit. When it exceeds `max_output_chars` the **tail** is kept
