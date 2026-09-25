@@ -264,8 +264,12 @@ need `**`.
 | `denied_patterns` | Matching paths are always rejected (denylist). |
 | `protected_patterns` | Matching paths are read-only -- reads succeed, writes are rejected. |
 
-`protected_patterns` defaults to `.git/*`, `.env`/`.env.*`, `*.pem`, `*.key`,
-and `**/secrets*`. Pass an empty list to disable protection.
+`protected_patterns` defaults to `**/.git/*`, `**/.env`, `**/.env.*`, `*.pem`,
+`*.key`, and `**/secrets*`, which match at any depth: `apps/api/.env` and
+`sub/.git/config` are protected as well as the root-level files. Protection
+rejects writes only; the model can still read these files. To make a path
+unreadable, add it to `denied_patterns`. Pass an empty list to disable
+protection.
 
 ### Direct access vs. walkers
 

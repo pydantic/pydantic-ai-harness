@@ -13,10 +13,13 @@ from pydantic_ai.toolsets import FilteredToolset
 
 from pydantic_ai_harness.filesystem._toolset import DEFAULT_TOOL_NAMES, READ_ONLY_TOOL_NAMES, FileSystemToolset
 
+# A leading `**/` also matches at the root (see `FileSystemToolset._matches`), so
+# these cover `.env` and `apps/api/.env` alike. `*` already spans `/`, so the
+# suffix patterns need no prefix.
 _DEFAULT_PROTECTED: list[str] = [
-    '.git/*',
-    '.env',
-    '.env.*',
+    '**/.git/*',
+    '**/.env',
+    '**/.env.*',
     '*.pem',
     '*.key',
     '**/secrets*',
@@ -52,8 +55,9 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     protected_patterns: Sequence[str] = field(default_factory=lambda: list(_DEFAULT_PROTECTED))
     """Paths matching these patterns are read-only (writes are rejected).
 
-    Defaults to protecting `.git/`, `.env`, key files, and secrets.
-    Set to an empty list to disable protection.
+    Defaults to protecting `.git/`, `.env` files, key files, and secrets at
+    any depth. Protected paths stay readable; use `denied_patterns` to block
+    reads too. Set to an empty list to disable protection.
     """
 
     max_read_lines: int = 2000

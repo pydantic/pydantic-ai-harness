@@ -1757,8 +1757,45 @@ class TestFileSystemCapability:
 
     def test_protected_defaults(self) -> None:
         fs = FileSystem()
-        assert '.git/*' in fs.protected_patterns
-        assert '.env' in fs.protected_patterns
+        assert '**/.git/*' in fs.protected_patterns
+        assert '**/.env' in fs.protected_patterns
+
+    @pytest.mark.parametrize(
+        'path',
+        [
+            '.env',
+            '.env.local',
+            '.git/config',
+            'server.pem',
+            'deploy.key',
+            'secrets.yaml',
+            'apps/api/.env',
+            'apps/.env.local',
+            'sub/.git/config',
+            'certs/server.pem',
+            'config/deploy.key',
+            'config/secrets.yaml',
+        ],
+    )
+    async def test_default_protection_applies_at_any_depth(self, tmp_path: Path, path: str) -> None:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('original\n')
+        toolset = FileSystem[None](root_dir=tmp_path).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+
+        assert 'original' in await toolset.read_file(path)
+        with pytest.raises(ModelRetry, match='protected'):
+            await toolset.write_file(path, 'overwritten\n')
+        assert target.read_text() == 'original\n'
+
+    @pytest.mark.parametrize('path', ['apps/env.example', 'apps/api/prod.env', 'docs/git/config.md'])
+    async def test_default_protection_leaves_lookalikes_writable(self, tmp_path: Path, path: str) -> None:
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        toolset = FileSystem[None](root_dir=tmp_path).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+
+        assert 'Wrote' in await toolset.write_file(path, 'content\n')
 
     def test_non_positive_max_read_lines_rejected(self) -> None:
         with pytest.raises(ValueError, match='max_read_lines must be a positive integer'):
