@@ -32,13 +32,13 @@ from pydantic_ai_harness import Memory
 from pydantic_ai_harness.memory import FileStore
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5',
     capabilities=[LocalWorkspace('.'), Memory(FileStore('.agent-memory'))],
     defer_model_check=True,
 )
 ```
 
-`FileStore` keeps the notebook as Markdown files under its directory in the run's [workspace](https://pydantic.dev/docs/ai/workspace/), so the model can also open them with its file tools, and a run without a workspace fails at its start. To keep them somewhere else, such as on this machine while the agent works in a sandbox, pass `FileStore('.', workspace=LocalWorkspaceBackend('/var/lib/myapp/memory'))`. The default `InMemoryStore` keeps memory for the life of the process.
+`FileStore` keeps the notes as Markdown files in the run's [workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/), so the model can also open them with its file tools. A run without a workspace fails at its start. To keep them on your machine while the agent works in a sandbox, pass a backend: `FileStore('.', workspace=LocalWorkspaceBackend('/var/lib/myapp/memory'))`.
 
 The namespace is resolved by application code, not supplied to the tools. The model therefore cannot select another user's namespace in a tool call.
 
@@ -137,7 +137,7 @@ class AppDeps:
 
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5',
     deps_type=AppDeps,
     capabilities=[
         Memory(
@@ -167,7 +167,7 @@ from pydantic_ai_harness.memory import FileStore
 
 store = FileStore('.', workspace=LocalWorkspaceBackend('/var/lib/myapp/memory'))
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5',
     capabilities=[
         Memory(store, heading='Your notes'),
         Memory(store, agent_name='org', heading='Org notes').prefix_tools('org'),

@@ -37,17 +37,12 @@ print(result.output)
 
 ## Where commands run
 
-Every command, output file, and signal goes through the run's workspace
-(`ctx.workspace`), not the agent process. Attach one to the run:
-`LocalWorkspace(...)` from `pydantic_ai.capabilities` runs commands as
-subprocesses on this machine in a local checkout, and a sandbox provider's
-workspace runs them in its environment. A run without a workspace fails at its
-start with an error that says how to attach one. Commands start in the
-workspace's working directory; to run them in a subdirectory, set it on the
-workspace (`LocalWorkspace('./repo')`). See
-[Workspaces](https://pydantic.dev/docs/ai/workspace/). A read-only workspace
-(`LocalWorkspace(..., read_only=True)`, or any `ReadOnlyWorkspace`) refuses to
-run commands, so `Shell` offers no tools for that run.
+Commands run in the run's [workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/):
+on your machine with `LocalWorkspace`, or in a sandbox. A run without a
+workspace fails at its start. Commands start in the workspace's working
+directory; to run them in a subdirectory, set it on the workspace:
+`LocalWorkspace('./repo')`. A read-only workspace can't run commands, so
+`Shell` offers no tools for that run.
 
 ## Tools
 
@@ -92,10 +87,8 @@ spawn because it holds a NUL byte or contains a character the operating system
 cannot encode. Failures
 the model can do nothing about still abort the run: a host that cannot allocate
 a process, an argument or environment that exceeds the platform's combined
-size limit, and an invalid character in an application-supplied `env`. A
-workspace that refuses an operation (a read-only one, or a control command past
-its deadline) is reported as a failed tool call the model sees, with no retry
-prompt; a workspace that is gone ends the run.
+size limit, and an invalid character in an application-supplied `env`. A command that runs past its timeout returns its output so far, ending in
+`[Command timed out after Ns]`. A workspace that is gone ends the run.
 
 > **These checks are best-effort, not a security boundary.** `allowed_commands`
 > is a guardrail against accidents, not a security boundary. Validation checks
@@ -112,16 +105,10 @@ written by `run_command` and `start_command`, including redirected output and
 background stdout/stderr logs. `None` (the default) adds no limit. This is
 separate from `max_output_chars`, which bounds the returned tool result.
 
-The positive integer is applied with `ulimit -f` in the workspace shell that
-runs the command, so descendants inherit it and the agent process is unaffected.
-`ulimit -f` counts blocks: 512 bytes in POSIX `sh` and 1 KiB in bash (macOS
-`/bin/sh` is bash), so the shell measures its block size first and the limit is
-rounded up to whole blocks. A workspace whose hard limit is lower refuses the
-setting, and the command fails with `Unable to apply max_file_bytes.` on stderr.
-`persist_cwd=True` and `tools=['shell']` (the persistent tool) raise
-`ValueError` when the toolset is constructed rather than ignoring the setting.
-Working-directory persistence uses a capture file written by the command's
-shell, which would also be subject to the limit.
+The limit covers the command and every process it starts, rounded up to whole
+512-byte or 1 KiB blocks. If the workspace's own limit is lower, the command
+fails with `Unable to apply max_file_bytes.` It can't be combined with
+`persist_cwd=True` or `tools=['shell']`.
 
 A process killed by the file-size signal gets a diagnosed tool result; other
 nonzero exits include the configured limit as context because programs can
@@ -138,31 +125,28 @@ tool-call result carries the failure and limit context.
 
 ## Environment control
 
-A command gets the workspace's environment plus `Shell(env=...)`, minus names
-matching `denied_env_patterns`. `LocalWorkspace` passes on the host's `PATH` and
-`HOME` and nothing else from the agent process; give it `env=` for anything more.
-A sandbox provider's workspace has whatever its provider configures. Two fields shape what `Shell` adds:
+A command gets the workspace's environment plus `Shell(env=...)`.
+`LocalWorkspace` passes on your `PATH` and `HOME` and nothing else; a sandbox
+has whatever its provider configures. Two fields shape what `Shell` adds:
 
 | Field | Effect |
 |---|---|
 | `env` | Variables added to every command's environment, on top of the workspace's own. |
 | `denied_env_patterns` | Glob patterns (`fnmatch`) for variable names dropped from `env`. Mirrors `denied_commands`. |
 
-`denied_env_patterns` filters `env` only: the workspace's own environment is
-its provider's to configure. The two compose so an `env` built from a larger
-mapping (the host environment, say) can drop known-sensitive names on the way
-in. Leaving both unset adds nothing.
+`denied_env_patterns` filters `env` only, so you can build `env` from a larger
+mapping, such as the host environment, and drop sensitive names on the way in.
+Leaving both unset adds nothing.
 
 ```python
-import os
-
 from pydantic_ai_harness import LLM_API_KEY_ENV_PATTERNS, Shell
 
-# Pass the host environment to commands, minus provider credentials.
-Shell(env=dict(os.environ), denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
-
-# Or add just the variables the commands need.
+# Add only the variables commands need.
 Shell(env={'PYTHONUNBUFFERED': '1'})
+
+# Or start from a larger mapping and drop LLM credentials from it (other secrets still pass).
+app_env = {'PYTHONUNBUFFERED': '1', 'ANTHROPIC_API_KEY': 'sk-...'}
+Shell(env=app_env, denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
 ```
 
 `LLM_API_KEY_ENV_PATTERNS` covers common provider prefixes (`ANTHROPIC_*`,
@@ -171,31 +155,23 @@ Shell(env={'PYTHONUNBUFFERED': '1'})
 cover other host secrets (a `LOGFIRE_TOKEN`, a GitHub token, cloud
 credentials), and its prefixes are coarse, so `GOOGLE_*` also strips
 non-credential vars like `GOOGLE_APPLICATION_CREDENTIALS`. Treat it as a
-starting point and add your own patterns. It is not the default, so it is
-opt-in.
+starting point and add your own patterns.
 
-Neither control is a security boundary. With `LocalWorkspace`, a command runs
-under the agent process's OS identity and may still read the parent process's
-environment through system interfaces such as Linux procfs, as well as other
-host files. Use a sandbox provider's workspace when commands are untrusted.
+Neither is a security boundary: with `LocalWorkspace`, a command can still read
+your process's environment and your files. Use a sandbox for untrusted commands.
 
 ## Background processes
 
-`start_command` starts the command as a detached job inside the workspace and
-returns a short ID. A small `sh` wrapper, started in its own session (`setsid`
-where the workspace has it), writes stdout and stderr to log files in a private
-job directory under `.pydantic-ai-harness/shell` in the workspace's working
-directory (which gets a `.gitignore` of `*`) and records the exit
-code when the command ends. Use `check_command(command_id)` to poll and
-`stop_command(command_id)` to terminate and collect final output: the whole
-process group is signalled through the workspace -- `SIGTERM`, escalating to
-`SIGKILL` after a grace period. A command stopped by `SIGTERM` reports the
-shell's status for it, `[exit code: 143]`.
+`start_command` starts the command in the background inside the workspace and
+returns a short ID. Its output is logged under `.pydantic-ai-harness/shell/` in
+the working directory, which is git-ignored. Use `check_command(command_id)` to
+poll and `stop_command(command_id)` to terminate and collect final output: the
+whole process group gets `SIGTERM`, then `SIGKILL` after a grace period. A
+command stopped by `SIGTERM` reports `[exit code: 143]`.
 
-On run end, the toolset's cleanup terminates every still-running background
-process and deletes its job directory from the workspace. The agent runtime enters toolsets via an
-`AsyncExitStack`, so this cleanup runs whether the run succeeds or raises -- an
-agent that forgets to call `stop_command` won't leak processes.
+When the run ends, successfully or not, every background process still running
+is stopped and its job directory deleted, so a forgotten `stop_command` doesn't
+leak processes.
 
 ## Persistent commands
 
@@ -208,15 +184,11 @@ from pydantic_ai_harness import Shell
 Shell(tools=['shell'])
 ```
 
-`shell(command, mode='foreground', timeout=None)` hands the command to a small
-`sh` supervisor started inside the workspace in its own session (`setsid` where
-the workspace has it). The supervisor appends the command's combined stdout and
-stderr to an output log, publishes a JSON status file (`{"pid": ..., "exit_code":
-...}`, with `exit_code` null until the command exits), and waits for the
-command. The tool returns the supervisor's PID and both paths, which name files
-in the same workspace the model's other tools act on, so the model reads
-progress with those tools and stops the process group with the `kill` command
-the result names. Foreground waits up to
+`shell(command, mode='foreground', timeout=None)` starts the command under a
+small supervisor that writes its combined output to a log and its exit status to
+a JSON file (`{"pid": ..., "exit_code": ...}`, `exit_code` null while it runs).
+The tool returns the PID and both paths, so the model reads progress with its
+file tools and stops the command with the `kill` command the result names. Foreground waits up to
 `timeout` seconds (default `default_timeout`, at most `MAX_FOREGROUND_WAIT`,
 270) for the exit status and returns the last 16,000 bytes of the log followed
 by the handles, even if the command is still running; background returns the
@@ -227,12 +199,9 @@ the model gets the handles back, does other work, and polls the status file.
 
 The command outlives the agent run and the event loop, so a server the model
 starts keeps serving for as long as the workspace does. Nothing wakes the agent
-when the command finishes; the model polls. A foreground call that is cancelled
-(a run cancellation, say) cannot hand back its handles, so it kills the
-supervisor's process group and removes the log directory instead. A log
-directory that was handed back is never rotated or deleted: the caller owns
-cleaning it up, and a verbose command should bound its own output. A launch
-that fails in the workspace surfaces as a retry naming the shell's error.
+when the command finishes; the model polls. Cancelling a foreground call kills the command. Logs that were handed back are
+never deleted: clean them up yourself, and keep verbose commands' output
+bounded.
 
 `allowed_commands`, `denied_commands`, `denied_operators`, `allow_interactive`,
 `env`, and `denied_env_patterns` apply to `shell` exactly as to `run_command`.
@@ -250,8 +219,8 @@ show output as it arrives without parsing the tool result:
 | `CommandFinishedEvent` | stream | `pid`, `output_path`, `status_path`, `exit_code`, `truncated`, `total_lines` |
 
 Output events are emitted while a foreground call waits: at most the first
-16,000 bytes of the log per call, in chunks of up to 4,096 bytes, polled with a
-backoff from 50 ms to 1 s so a remote workspace is not asked continuously. A background call emits only the started and finished events. `finished`
+16,000 bytes of the log per call, in chunks of up to 4,096 bytes, polled every
+50 ms to 1 s. A background call emits only the started and finished events. `finished`
 means the tool stopped waiting, not that the command exited: `exit_code` is
 `None` while no status has been published, and `truncated` says the log held
 more than the events showed. `total_lines` counts logical lines in logs up to
@@ -279,7 +248,7 @@ Shell(
     denied_operators=[],           # blocked shell operators
     default_timeout=30.0,          # seconds, per run_command
     max_output_chars=50_000,       # output cap returned to the model
-    max_file_bytes=None,          # per-file size limit via `ulimit -f` (None = no added limit)
+    max_file_bytes=None,           # per-file size limit for commands (None = no limit)
     persist_cwd=False,             # make cd sticky across calls
     allow_interactive=False,       # allow TTY-style commands
     env=None,                      # variables added to the workspace's environment

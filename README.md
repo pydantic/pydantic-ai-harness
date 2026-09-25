@@ -21,13 +21,13 @@ Install with [`uv`](https://docs.astral.sh/uv/):
 uv:
 
 ```bash
-uv add "pydantic-ai-harness[anthropic]"
+uv add "pydantic-ai-harness[coder,anthropic]"
 ```
 
 pip:
 
 ```bash
-pip install "pydantic-ai-harness[anthropic]"
+pip install "pydantic-ai-harness[coder,anthropic]"
 ```
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
@@ -49,7 +49,7 @@ print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-`LocalWorkspace` runs the agent's file tools and commands on your own machine, in this directory. It is not a sandbox: commands can reach anything your user account can. They get your `PATH` and `HOME`, so they find your tools; pass `env=` to add other variables. To run the same agent in isolation, a sandbox capability (Modal, E2B, Daytona, or Sprites) replaces `LocalWorkspace`; see [Workspaces](#workspaces).
+`LocalWorkspace('.')` is where the agent works: its file tools and commands run on your machine, in this directory. It is not a sandbox, so commands can reach anything you can. To run the same agent in an isolated cloud machine, swap it for a sandbox capability (Modal, E2B, Daytona, or Sprites); see [Workspaces](#workspaces).
 
 Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus repository context and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
 
@@ -98,20 +98,27 @@ agent = Agent(
 
 ## Workspaces
 
-A [workspace](https://pydantic.dev/docs/ai/workspace/) is where an agent's files and commands live: this machine through core's `LocalWorkspace`, or an isolated sandbox. Harness capabilities don't pick one for you: a run without a workspace fails at its start with a message saying what to attach, rather than on the first tool call.
+A [workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/) is where the agent's files and commands live: your machine with `LocalWorkspace`, or an isolated sandbox. Harness capabilities never pick one for you. Attach one, or the run fails at its start and tells you what to attach.
 
-The capabilities the model works in use the run's workspace, starting in its working directory: [FileSystem](pydantic_ai_harness/filesystem/), [Shell](pydantic_ai_harness/shell/), [Repo Context](pydantic_ai_harness/repo_context/), [Macroscope](pydantic_ai_harness/macroscope/), and [Coder](pydantic_ai_harness/coder/). Several agents, or several runs, can share one workspace: pass `workspace=result.workspace` to the next run, as the [Coder page](pydantic_ai_harness/coder/#sharing-a-workspace) shows.
+[Coder](pydantic_ai_harness/coder/), [FileSystem](pydantic_ai_harness/filesystem/), [Shell](pydantic_ai_harness/shell/), [Repo Context](pydantic_ai_harness/repo_context/), and [Macroscope](pydantic_ai_harness/macroscope/) work in the run's workspace, starting in its working directory. To work in a subdirectory, set it on the workspace: `LocalWorkspace('./repo')`. To continue in the same files from a later run or another agent, see [Sharing a workspace](pydantic_ai_harness/coder/#sharing-a-workspace).
 
-Capabilities that only keep or read their own files use the run's workspace by default, and take `workspace=LocalWorkspaceBackend(...)` to use another one, such as skills checked in next to your code while the agent works in a sandbox:
+Skills, SubAgents, ToolOutputLimits, and Memory's `FileStore` use the run's workspace for their own files too. To keep those files on your machine while the agent works in a sandbox, point them at a local location:
 
-- [Tool Output Limits](pydantic_ai_harness/tool_output_limits/) spills oversized results to `.pydantic-ai-harness/tool-output/` (`WorkspaceStore(workspace=...)`, or `store=LocalFileStore()` for this machine's temporary directory).
-- [Skills](pydantic_ai_harness/skills/) reads skill directories at run start (`Skills(workspace=...)`).
+```python
+from pydantic_ai.workspaces import LocalWorkspaceBackend
+from pydantic_ai_harness import Memory, ToolOutputLimits
+from pydantic_ai_harness.memory import FileStore
+from pydantic_ai_harness.tool_output_limits import LocalFileStore
 
-[Shell](pydantic_ai_harness/shell/) keeps background job logs in `.pydantic-ai-harness/shell/`; the `.pydantic-ai-harness/` directory gets a `.gitignore` so none of it shows up in `git status`.
+memory = Memory(FileStore('.', workspace=LocalWorkspaceBackend('/var/lib/myapp/memory')))  # notes on this machine
+limits = ToolOutputLimits(store=LocalFileStore())  # spills in this machine's temp directory
+```
 
-`FileSystem`'s `root_dir` is a guardrail for the file tools, checked before each operation. `Shell` commands are not bounded by it, and `LocalWorkspace` is not a sandbox: use a sandbox workspace for untrusted work.
+By default, harness files (Shell's background job logs, tool-output spills) go in `.pydantic-ai-harness/` in the workspace's working directory, which is git-ignored.
 
-Upgrading from an earlier release? The [Coder page](pydantic_ai_harness/coder/#upgrading) lists what changed and how to update.
+`FileSystem`'s `root_dir` limits only the file tools, not `Shell` commands.
+
+Upgrading from an earlier release? The [Coder page](pydantic_ai_harness/coder/#upgrading) lists what changed.
 
 ## Capabilities
 

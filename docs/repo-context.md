@@ -35,7 +35,7 @@ result = agent.run_sync('Summarize the coding-assistant setup in this repo.')
 print(result.output)
 ```
 
-Everything is read through the run's [workspace](https://pydantic.dev/docs/ai/workspace/), anchored at its working directory: set the directory on the workspace (`LocalWorkspace('./repo')`), not on `RepoContext`. `home_dir` and `asset_roots` are workspace paths; relative ones resolve from the working directory, and `~` is not expanded. A run without a workspace fails at its start.
+`RepoContext` reads from the run's [workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/), starting at its working directory. To point it at a subdirectory, set it on the workspace: `LocalWorkspace('./repo')`. `home_dir` and `asset_roots` are paths in the workspace: relative ones resolve from the working directory, and `~` is not expanded. A run without a workspace fails at its start.
 
 ### 1. Walk-up instruction autoload (on by default)
 
@@ -48,7 +48,7 @@ When `home_dir` is `None` (the default), only the working directory is scanned -
 Exposes one tool, `inventory_agent_context()`, that reports where the repo's CE assets live -- the `.claude`/`.agents`/`.codex`/`.grok` roots and, within each, the `skills/` (`SKILL.md`), `agents/` (`.md`), and `settings.json` (hooks) it contains. It returns a structured `AgentContextInventory`; it locates assets and does not parse them, leaving translation to the orchestrator.
 
 Rename the tool with `inventory_tool_name`, or scope which roots it scans with `asset_roots`.
-Relative asset roots are resolved from the working directory. Skill discovery visits up to eight nested directories to bound traversal through symlink cycles.
+Skill discovery goes at most eight directories deep.
 
 ### 3. Nested-on-traversal (off by default)
 

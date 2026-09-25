@@ -45,8 +45,8 @@ hang the host with catastrophic backtracking.
 Construct an `Agent` with `ToolOutputLimits()` in its `capabilities`. With no arguments it
 uses the default band: spill returns of 10,000 characters or more, with a bounded truncation
 fallback if the store cannot accept the write. Spills go to the run's
-[workspace](https://pydantic.dev/docs/ai/workspace/), so attach one (or see
-[Spill store](#spill-store) for other options):
+[workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/), so attach one
+([Spill store](#spill-store) has other options):
 
 ```python
 from pydantic_ai import Agent
@@ -271,15 +271,13 @@ returns non-text warns and falls back to compact JSON rather than losing the too
 
 ## Spill store
 
-Spilled payloads are written into the run's workspace (`ctx.workspace`) by the default
-`WorkspaceStore`, one file per `(run_id, tool_call_id, retry)`. With a remote sandbox the files
-live in the sandbox, next to everything else the agent works on. The handle is the file's
-absolute workspace path, so a workspace file tool such as `FileSystem`'s `read_file` can open it
-too; `read_tool_result` only reads handles inside the store directory.
+The default `WorkspaceStore` writes each spill as a file in the run's workspace, under
+`.pydantic-ai-harness/tool-output/` in the working directory, which is git-ignored. With a
+sandbox the files live in the sandbox. The handle is the file's absolute path, so a file tool
+such as `FileSystem`'s `read_file` can open it too. `read_tool_result` only opens handles
+inside the store's directory.
 
-Files go under `.pydantic-ai-harness/tool-output` in the workspace's working directory.
-`.pydantic-ai-harness/` gets a `.gitignore` holding `*`, so the files stay out of `git status`.
-Pass `workspace` to keep spills in a different workspace than the run's:
+To keep spills in a different workspace than the run's, pass a backend:
 
 ```python
 from pydantic_ai.workspaces import LocalWorkspaceBackend
@@ -288,8 +286,8 @@ from pydantic_ai_harness.tool_output_limits import ToolOutputLimits, WorkspaceSt
 spills_elsewhere = ToolOutputLimits(store=WorkspaceStore(workspace=LocalWorkspaceBackend('/var/spills')))
 ```
 
-`workspace=` takes a workspace backend, not the `LocalWorkspace` capability. In this release it is
-used in-process only: a durable engine does not route it through its workflow.
+`workspace=` takes a backend, not the `LocalWorkspace` capability. Under a durable engine such
+as Temporal it is written in-process, not through the workflow.
 
 Spilled files are kept for the life of the workspace; they are not pruned by this capability.
 
@@ -308,9 +306,8 @@ store = LocalFileStore(cleanup_after=timedelta(hours=6))  # default: None = keep
 agent = Agent('anthropic:claude-sonnet-5', capabilities=[ToolOutputLimits(store=store)])
 ```
 
-`LocalFileStore` creates its root owner-only, rejects handles that resolve outside it, and with
-`cleanup_after` set prunes files older than that age in a background thread; a failed prune
-warns instead of failing the run.
+`LocalFileStore` keeps its directory owner-only. Set `cleanup_after` to delete spills older than
+that age.
 
 Any other backend (a blob store, a durable engine's storage) implements the `OverflowStore`
 protocol and is passed as `store=...`:
@@ -324,7 +321,6 @@ class OverflowStore(Protocol):
     async def read(self, handle: str) -> bytes: ...
 ```
 
-
 ### Reading spills with your file tool
 
 When the agent also has a file tool that can read the spill files, the model uses that tool
@@ -335,10 +331,8 @@ qualifies when `read_file` is registered, `max_read_chars` is at most 50,000, it
 - `read_tool_result` is not offered, and each spill marker names `read_file` and the file.
 - A `read_file` call on a spill file is exempt from reduction, as `read_tool_result`'s returns
   are; `max_read_chars` keeps it bounded.
-- Once a marker in the conversation has named `read_tool_result`, for example before a deferred
-  `FileSystem` was loaded, `read_tool_result` stays offered for the rest of the run.
 
-The check uses configuration only, so it does no workspace I/O and never starts a sandbox.
+
 Spills kept in a store with its own `workspace`, or in another kind of store, keep
 `read_tool_result`.
 

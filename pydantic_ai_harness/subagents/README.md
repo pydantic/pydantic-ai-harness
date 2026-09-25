@@ -191,7 +191,7 @@ orchestrator = Agent(
 )
 ```
 
-Definitions are read at the start of every run from the run's [workspace](https://pydantic.dev/docs/ai/workspace/), so a sandbox's agent files are found and nothing is read from your home directory. To read them from somewhere else, such as definitions that ship with your application, pass `workspace=LocalWorkspaceBackend('/app')`.
+Definitions are read at the start of every run from the run's [workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/), so a sandbox's agent files are found and nothing is read from your home directory. To read them from somewhere else, such as definitions that ship with your application, pass `workspace=LocalWorkspaceBackend('/app')`.
 
 `agent_folders` controls which folders are read. It defaults to `'agents'`, the conventional layout:
 
