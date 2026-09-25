@@ -17,7 +17,6 @@ from rich.console import Console
 
 import pydantic_clai2.day_ai as day_ai
 from pydantic_clai2 import DEFAULT_PLUGINS
-from pydantic_clai2.capability_catalog import HARNESS_PLUGINS
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.mcp import TokenStore
@@ -79,10 +78,9 @@ def day_ai_client(loader: PluginLoader[None]) -> object:
     return client
 
 
-def test_declared_as_a_disabled_built_in_not_a_raw_catalog_entry() -> None:
+def test_declared_as_a_disabled_built_in_not_the_raw_capability() -> None:
     [declaration] = [plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'day_ai']
     assert declaration == PluginSettings(id='day_ai', factory='pydantic_clai2.day_ai', enabled=False)
-    assert all('day_ai' not in plugin.factory for plugin in HARNESS_PLUGINS)
 
 
 async def test_environment_token_skips_browser_sign_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
