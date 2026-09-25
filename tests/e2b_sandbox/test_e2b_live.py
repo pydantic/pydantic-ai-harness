@@ -36,12 +36,14 @@ from contextlib import asynccontextmanager
 import anyio
 import pytest
 from pydantic_ai.workspaces import Workspace, WorkspaceTimeoutError, WorkspaceUnavailableError
+from pytest_examples import CodeExample
 
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.e2b_sandbox import (
     E2BSandboxBackend,
 )
 
+from .._docs_examples import documented_cleanup, python_blocks, run_block
 from .._tool_calls import call_tools
 
 pytestmark = pytest.mark.e2b_live
@@ -366,3 +368,39 @@ class TestCoder:
 
         assert '"exit_code": 0' in shell_output
         assert 'made-in-sandbox' in read_output
+
+
+class TestEnvironment:
+    """What a command sees without being given anything."""
+
+    async def test_commands_get_a_usable_environment(self) -> None:
+        """Validates the fake-encoded assumption that a command sees the template's `PATH` and `HOME`, and
+        git in the default template, and that a per-call `env` adds to them rather than replacing them.
+        """
+        async with _owned(sandbox_timeout=120) as backend:
+            result = await backend.run('echo "$PATH"; echo "$HOME"; git --version', shell=True, timeout=60)
+            path, home, git = result.stdout.splitlines()
+            assert path and home and git.startswith('git version')
+
+            result = await backend.run('echo "$FOO"; echo "$PATH"', shell=True, env={'FOO': '1'}, timeout=60)
+            assert result.stdout.splitlines() == ['1', path]
+
+
+# The README's Python blocks are the same as this page's.
+_DOCS_BLOCKS = python_blocks('docs/e2b-sandbox.md')
+
+
+class TestDocsExamples:
+    """The docs page, run as written."""
+
+    @pytest.mark.parametrize('example', [pytest.param(block, id=f'line {block.start_line}') for block in _DOCS_BLOCKS])
+    def test_docs_example(self, example: CodeExample) -> None:
+        """Every example on the docs page runs as written, and its agent's tools do their work in a real sandbox.
+
+        The fake stands in for E2B, so only this shows the page's code, its default settings, and its
+        cleanup work against the real service. A follow-up run, from the message history or a stored ref,
+        works in the first run's sandbox.
+        """
+        _, runs = run_block(example, cleanup=documented_cleanup(_DOCS_BLOCKS, 'kill_sandbox'))
+        assert all(run.used_sandbox for run in runs), runs
+        assert len({run.ref for run in runs}) <= 1, runs
