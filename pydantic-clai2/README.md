@@ -22,7 +22,9 @@ configuration in your editor, and switch on OAuth sign-in for remote servers.
 lists them all. Saved servers are available to the agent from the next prompt,
 with tool names prefixed by the server name. A server connects on the first
 prompt that needs it (or `/mcp start`) and stays connected; one that cannot
-connect is marked `error` and left out rather than failing the prompt. See
+connect is marked `error` and left out rather than failing the prompt. A
+repository's Claude Code-style `.mcp.json` (or `.clai/mcp_servers.json`) loads
+once you review it and run `/mcp trust accept`. See
 [Connect MCP servers](PLUGINS.md#connect-mcp-servers) for storage, secrets, OAuth,
 and project trust. `/plugins disable mcp` removes the command and tools.
 
@@ -696,7 +698,7 @@ next opportunity without cancelling in-flight tools or changing your draft.
 Each Alt+Enter sends one message. If the run is no longer accepting steering,
 the message stays queued. Slash commands, `!` shell commands, and exit signals
 are not steered or skipped over. With no queued message, Alt+Enter does nothing.
-While running, the input box shows both shortcuts.
+While running with at least one queued message, the input box shows both shortcuts.
 Shift-Enter inserts a newline. CLAI requests modified
 key reporting while the editor is active and releases it for menus and on exit.
 Ctrl-R searches history; Enter accepts a search
@@ -1015,7 +1017,9 @@ and cancellation. Unsupported terminals may ignore these changes. Redirected
 output receives no palette-changing sequences. Your terminal configuration file
 is not modified.
 
-The early splash retains its brand colours. Code uses the terminal foreground
+The early splash and the `CLAI 2.0` banner keep Pydantic's brand colours under
+every palette, except on 16-colour terminals, where the palette owns the ANSI
+slots. Code uses the terminal foreground
 and ANSI syntax colours; bundled palettes use Termflow's default diff colours. Theme selection adds no
 model requests or telemetry.
 
@@ -1236,9 +1240,9 @@ Speculative Execution  29 hits · 0 misses · 0 wasted    saved ≥ 7.0s
 
 Counts are coloured only when non-zero, using `/theme` colours. Switching off
 hides the row; switching back on shows the same session totals. Headless runs
-and redirected output use the same tools but show no row. Speculative execution
-needs `pydantic-monty` (`pip install "pydantic-ai-harness[code-mode]"`); without
-it, CLAI prints a warning and runs tools natively.
+and redirected output use the same tools but show no row. The `pydantic-monty`
+sandbox behind speculative execution is a `pydantic-clai2` dependency; if it
+cannot be imported, CLAI prints a warning and runs tools natively.
 
 ## Status line
 
