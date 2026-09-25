@@ -235,6 +235,18 @@ class TestStore:
         assert LocalFileStore()._root.name == 'pyai_harness_overflow'
 
     @pytest.mark.skipif(not hasattr(os, 'getuid'), reason='POSIX ownership check')
+    async def test_new_root_created_0700_regardless_of_umask(self, tmp_path: Path):
+        root = tmp_path / 'store'
+        store = LocalFileStore(base_dir=root)
+        old_umask = os.umask(0)
+        try:
+            with patch.object(Path, 'chmod', side_effect=AssertionError('root was not created 0700')):
+                await store.write('run/c.0', b'x')
+        finally:
+            os.umask(old_umask)
+        assert oct(root.stat().st_mode & 0o777) == '0o700'
+
+    @pytest.mark.skipif(not hasattr(os, 'getuid'), reason='POSIX ownership check')
     async def test_preexisting_open_root_is_tightened(self, tmp_path: Path):
         root = tmp_path / 'store'
         root.mkdir()

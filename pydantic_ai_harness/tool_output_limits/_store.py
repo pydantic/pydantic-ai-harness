@@ -118,9 +118,11 @@ class LocalFileStore:
         """Create the root and make sure only the current user can reach it.
 
         A root that already exists may have been created by someone else (the default
-        lives in the shared temp dir), so ownership is checked rather than assumed.
+        lives in the shared temp dir), so ownership is checked rather than assumed. A root
+        this call creates gets `0700` at creation, so there is no window before the `chmod`
+        in which another user could plant an entry in it.
         """
-        self._root.mkdir(parents=True, exist_ok=True)
+        self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
         getuid = getattr(os, 'getuid', None)
         if getuid is None:
             return
