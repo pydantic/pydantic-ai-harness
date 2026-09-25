@@ -278,8 +278,10 @@ and one combined result. Hooks on `fetch_item` and other tools called by the cod
 Hooks around `run_code` itself run only after the model has finished writing the call, so
 they cannot approve or change lines that eager mode has already run.
 
-Configured Monty resource limits still apply. Eager fragments and the remaining code share
-the same session duration and memory allowances.
+Configured Monty resource limits still apply, but `max_duration_secs` and the sleep allowance
+count per fragment: each eager fragment and the remaining code get their own, so an eager
+call can run longer in total than the same code without eager mode. Memory is shared by the
+session.
 
 Keep these limitations in mind:
 
