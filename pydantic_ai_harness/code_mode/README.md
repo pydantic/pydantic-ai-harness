@@ -199,25 +199,11 @@ result
 Printed output is limited to 10 MiB. Exceeding the limit makes `run_code` return a model retry.
 
 Sandbox execution is bounded by `resource_limits`, which defaults to 30 seconds of execution time
-and a 256 MiB heap. What this guarantees is a per-snippet ceiling: no single `run_code` snippet runs
-longer than `max_duration_secs` of sandbox time, which is what stops a runaway loop. Time spent
-awaiting a nested tool is excluded from that timer.
-
-It is not a run-wide CPU budget, and it cannot be relied on as one. Monty applies the limits per
-sandbox session, so consecutive `run_code` calls draw down one shared allowance and each new session
-starts with a full one. Sessions are replaced by `restart: true` and by the failures that reset the
-REPL: a worker crash, a type error, a host-side failure, and a syntax error before any code has run.
-Each of those renews the allowance without the model asking for a restart. An ordinary exception
-inside a snippet is not one of them.
-
-Once a session's duration allowance is spent, every later `run_code` call fails on arrival, including
-snippets that would cost almost nothing, because they reuse the same session. Rewriting the code
-does not help. `restart: true` is what recovers it, at the cost of the REPL state that session was
-holding, so any variables, imports, and definitions have to be recreated. `run_code` says as much
-in the retry it returns, and that retry also reports the nested calls the snippet already made, so
-restarting does not throw away the only record of them. The behaviour is worth knowing when
-choosing `max_duration_secs`: set it low and a long agent run will spend it on ordinary work and
-pay a restart to continue.
+and a 256 MiB heap. `max_duration_secs` applies to each `run_code` snippet: no snippet runs longer
+than that of sandbox time, which is what stops a runaway loop. Time spent awaiting a nested tool is
+excluded. A snippet that hits the limit is stopped and its session is reset, so any variables,
+imports, and definitions have to be recreated. The retry `run_code` returns says so and reports the
+nested calls the snippet already made.
 
 Monty also limits cumulative suspensions with `max_suspensions` (default 1,000 per session).
 External calls, OS callbacks, name lookups and future resolutions each consume this budget, so
@@ -667,7 +653,7 @@ Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python 
   `unicodedata`, `datetime`, `os`, `pathlib`)
 - `asyncio.gather(...)` accepts positional awaitables but no keyword arguments; other task creation
   and wait APIs are unavailable
-- No wall-clock or timing primitives by default (`asyncio.sleep`, `datetime.datetime.now()`, `datetime.date.today()`, `time`) -- `datetime.datetime.now()`/`datetime.date.today()` become available when an `os_access` handler implements them (the built-in `OSAccess` does); `asyncio.sleep`/`time` never do
+- No clock, sleep, or randomness by default (`datetime.datetime.now()`, `datetime.date.today()`, `time.time()`, `asyncio.sleep`, `time.sleep`, unseeded `random`) -- they become available when an `os_access` handler implements them (the built-in `OSAccess` does)
 - No `import *`
 - Filesystem I/O needs an `os_access` handler or a `mount`; `os.getenv`/`os.environ` need an `os_access` handler
 - Tools requiring approval or with deferred (`CallDeferred`) execution are sandboxed like any other tool; without a `HandleDeferredToolCalls` (or equivalent) capability on the agent to resolve them inline, calling one from `run_code` raises an error that surfaces to the model as a retry

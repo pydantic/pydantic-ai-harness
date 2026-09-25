@@ -111,7 +111,12 @@ def _resolve_resource_limits(limits: WorkflowResourceLimits | Literal['unlimited
         raise UserError(
             f'Unknown `resource_limits` key(s): {sorted(unknown)}. Valid keys are {sorted(_RESOURCE_LIMIT_KEYS)}.'
         )
-    return {**_default_resource_limits(), **limits}
+    resolved = _default_resource_limits()
+    if 'max_memory' in limits:
+        resolved['max_memory'] = limits['max_memory']
+    if 'max_duration_secs' in limits:
+        resolved['max_feed_duration_secs'] = limits['max_duration_secs']
+    return resolved
 
 
 class _WorkflowArguments(TypedDict):

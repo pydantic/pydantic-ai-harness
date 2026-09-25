@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import inspect
 import keyword
 import math
@@ -51,6 +50,7 @@ try:
         MontyTypingError,
         MountDir,
         OsFunction,
+        OsHandler,
         ResourceLimits,
     )
 except ImportError as _import_error:  # pragma: no cover
@@ -105,6 +105,17 @@ def _check_monty_sandbox_url(url: str) -> None:
         raise UserError(f'`monty_sandbox_url` must be a `ws://` or `wss://` URL, not scheme {scheme!r}.')
 
 
+def _os_handler(os_access: CodeModeOS) -> OsHandler:
+    """Adapt `CodeMode.os_access` to Monty's keyword-only `os=` handler."""
+    if isinstance(os_access, AbstractOS):
+        return os_access
+
+    def handler(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> object:
+        return os_access(name, args, kwargs)
+
+    return handler
+
+
 def in_durable_execution(ctx: RunContext[object]) -> bool:
     """Whether a durable executor is active, where streamed execution tiers must stay disabled."""
     return any(
@@ -122,8 +133,8 @@ def _exhausted_sandbox_limit(error: MontyRuntimeError) -> str | None:
     This gates the started-call summary, so it deliberately errs toward inclusion and matches on
     Monty's wording alone. A nested tool that fails with one of these phrases in its own message is
     misread, and that costs nothing: the summary only states which calls really started, which is
-    true regardless of why the snippet ended. The restart guidance cannot afford the same
-    looseness and uses `_is_duration_exhausted` instead.
+    true regardless of why the snippet ended. The session reset cannot afford the same looseness
+    and uses `_is_duration_exhausted` instead.
     """
     message = error.display(format='msg')
     for limit, marker in _SANDBOX_LIMIT_MARKERS.items():
@@ -133,10 +144,10 @@ def _exhausted_sandbox_limit(error: MontyRuntimeError) -> str | None:
 
 
 def _is_duration_exhausted(error: MontyRuntimeError) -> bool:
-    """Whether this runtime error is Monty's spent `max_duration_secs` allowance.
+    """Whether this runtime error is Monty stopping the snippet at `max_duration_secs`.
 
-    Stricter than `_exhausted_sandbox_limit` because it gates advice to restart, and a wrong
-    restart discards REPL state the session could still use. A missed one only costs the hint.
+    Stricter than `_exhausted_sandbox_limit` because it gates a session reset, and a wrong reset
+    discards REPL state the session could still use.
 
     The empty traceback is the structural signal: the duration limit interrupts execution rather
     than failing at a particular operation, and Monty attaches no frame to it, measured at top
@@ -149,8 +160,8 @@ def _is_duration_exhausted(error: MontyRuntimeError) -> bool:
     carries a frame from the allocation that tripped it. Keeping both means neither has to be
     sound alone.
 
-    Callers must read `False` as "add nothing", not as "not a timeout". A miss leaves the ordinary
-    runtime-error message intact, which is the behaviour that shipped before the hint existed.
+    Callers must read `False` as "not known to be a timeout". A miss keeps the session and the
+    ordinary runtime-error message.
     """
     return not error.traceback() and _exhausted_sandbox_limit(error) == 'max_duration_secs'
 
@@ -238,14 +249,10 @@ def _describe_started_calls(calls: dict[str, ToolCallPart], returns: dict[str, T
 
 
 class CodeModeResourceLimits(TypedDict, total=False):
-    """Caps on the sandbox code executed by `run_code`.
-
-    Monty enforces these per session. Consecutive `run_code` calls therefore share one duration
-    allowance, and anything that resets the session starts a fresh one, so the bound that holds
-    throughout is per snippet: no single snippet runs longer than `max_duration_secs`.
-    """
+    """Caps on the sandbox code executed by `run_code`."""
 
     max_duration_secs: float
+    """Sandbox execution time allowed to each `run_code` snippet; time awaiting tools does not count."""
     max_memory: int
     max_suspensions: int
     """Cumulative host-interaction budget per session, not a per-snippet tool-call count.
@@ -278,7 +285,7 @@ def _resolve_resource_limits(
         # make the original run and replay take different branches, which Temporal cannot record.
         max_duration_secs = None
     return {
-        'max_duration_secs': max_duration_secs,
+        'max_feed_duration_secs': max_duration_secs,
         'max_memory': max_memory,
         'max_suspensions': max_suspensions,
     }
@@ -379,9 +386,8 @@ _MOUNT_ONLY_NOTE = (
 )
 _OS_ENABLED_NOTE = (
     '- **Configured OS access**: `pathlib.Path` operations, `os.getenv`/`os.environ`, '
-    '`datetime.datetime.now()`, and `datetime.date.today()` are routed to the OS handler '
-    'configured for this agent (availability depends on that configuration). `asyncio.sleep` and '
-    'the `time` module remain unavailable.'
+    '`datetime.datetime.now()`, `datetime.date.today()`, and `asyncio.sleep` are routed to the OS '
+    'handler configured for this agent (availability depends on that configuration).'
 )
 _MOUNT_LIFETIME_NOTE = (
     "- **Mount write lifetime**: writes through a `mode='overlay'` mount last only for the current "
@@ -704,14 +710,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     """
 
     resource_limits: CodeModeResourceLimits | Literal['unlimited'] | None = field(default=None, kw_only=True)
-    """Sandbox execution limits, applied per Monty session.
+    """Sandbox execution limits.
 
-    `None` applies a 30-second execution and 256 MiB heap backstop. The guarantee is per snippet:
-    no single `run_code` snippet runs longer than `max_duration_secs`. It is not a run-wide budget,
-    since consecutive calls share one session allowance and any reset of the session (`restart:
-    true`, a crash, a type error, a host-side failure) starts a fresh one. `'unlimited'` removes
-    the time and memory caps, but Monty's finite suspension budget still applies. Set
-    `max_suspensions` to bound cumulative host interactions across consecutive snippets.
+    `None` applies a 30-second execution and 256 MiB heap backstop. `max_duration_secs` is per
+    snippet: no single `run_code` snippet runs longer than it, and it is not a run-wide budget.
+    `'unlimited'` removes the time and memory caps, but Monty's finite suspension budget still
+    applies. Set `max_suspensions` to bound cumulative host interactions across consecutive snippets.
     """
 
     os_access: CodeModeOS | None = None
@@ -1097,8 +1101,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                         session.feed_start,
                         code,
                         print_callback=capture.callback,
-                        # Monty calls OS handlers from its own thread; run them in the caller's context.
-                        os=None if self.os_access is None else partial(contextvars.copy_context().run, self.os_access),
+                        os=None if self.os_access is None else _os_handler(self.os_access),
                         mount=self.mount,
                         skip_type_check=not type_check,
                     )
@@ -1139,19 +1142,17 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 # calls already started. Without them the model reruns their side effects when
                 # it retries. Asking which limit tripped, rather than testing one flag per limit,
                 # is what keeps a newly added limit from quietly losing this. It matters most on
-                # the duration path, where the advice is to restart, which discards the REPL state
-                # the model would otherwise reconstruct from.
+                # the duration path, which resets the session and with it the REPL state the model
+                # would otherwise reconstruct from.
                 message += started_calls()
             if duration_spent:
-                # This error keeps the session, so every later call fails on arrival too. Left
-                # alone it reads like an ordinary runtime error, which points the model at
-                # rewriting the snippet -- the one move that cannot work.
+                # The limit stops the sandbox mid-operation, and Monty makes no promise about the
+                # heap it leaves behind, so the session is discarded rather than fed again.
+                await run_state.reset()
                 message += (
-                    '\n\nThe sandbox session has spent its whole `max_duration_secs` allowance, '
-                    'which every `run_code` call in the session shares, so later calls fail on '
-                    'arrival too and revising this code will not help. Pass `restart: true` to '
-                    'start a fresh session; that discards REPL state, so recreate anything you '
-                    'still need.'
+                    '\n\nThe code ran longer than `max_duration_secs` and was stopped, so the '
+                    'session was reset. Re-run any imports, recreate any state you need, and make '
+                    'the code do less work per call.'
                 )
             if isinstance(e.exception(), RuntimeError) and re.fullmatch(
                 r'suspension limit [0-9]+ exceeded', e.display(format='msg')

@@ -639,7 +639,7 @@ class TestCodeMode:
         ('code', 'expected'),
         [
             pytest.param("type('a')", "<class 'str'>", id='type'),
-            pytest.param('len', '<built-in function len>', id='builtin'),
+            pytest.param('len', "MontyStdTypeProxy(kind='function', name='len')", id='builtin'),
             pytest.param("ValueError('boom')", "ValueError('boom')", id='exception'),
             pytest.param('...', 'Ellipsis', id='ellipsis'),
             pytest.param("[float('nan'), float('-inf'), 1.5]", ['nan', '-inf', 1.5], id='non-finite-float'),
@@ -909,13 +909,13 @@ class TestCodeMode:
         with pytest.raises(UserError, match='`max_suspensions` must be at least 1'):
             await wrapper.__aenter__()
 
-    async def test_duration_exhaustion_points_at_restart(self) -> None:
-        """A spent duration allowance tells the model to restart, not to rewrite the snippet.
+    async def test_duration_exhaustion_resets_the_session(self) -> None:
+        """A snippet stopped at `max_duration_secs` resets the session and tells the model so.
 
-        The allowance is per session and this error keeps the session, so every later call fails
-        on arrival; only `restart: true` recovers it. Detection matches Monty's rendered timeout
-        text, so this drives a real exhausted session rather than a fixed string: if Monty rewords
-        the message, this test fails instead of the hint quietly disappearing.
+        Monty leaves no guarantees about a heap a time limit interrupted, so the session is not fed
+        again. Detection matches Monty's rendered timeout text, so this drives a real timeout rather
+        than a fixed string: if Monty rewords the message, this test fails instead of the reset
+        quietly disappearing.
         """
         wrapper = CodeMode[object](resource_limits={'max_duration_secs': 0.3}).get_wrapper_toolset(
             _build_function_toolset(add)
@@ -923,27 +923,25 @@ class TestCodeMode:
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
+        await wrapper.call_tool('run_code', {'code': 'saved = 42'}, ctx, tools['run_code'])
         spend_it = 'y = 0\nfor i in range(100_000_000):\n    y += i\ny'
 
         with pytest.raises(ModelRetry) as exc_info:
             await wrapper.call_tool('run_code', {'code': spend_it}, ctx, tools['run_code'])
-        assert '`restart: true`' in exc_info.value.message
+        assert 'the session was reset' in exc_info.value.message
 
-        # The session is kept, so a later trivial snippet fails on arrival and needs the same hint.
-        with pytest.raises(ModelRetry) as later:
-            await wrapper.call_tool('run_code', {'code': '1 + 1'}, ctx, tools['run_code'])
-        assert '`restart: true`' in later.value.message
-
-        # And restarting really does clear it, which is what the hint promises.
-        result = await wrapper.call_tool('run_code', {'code': '1 + 1', 'restart': True}, ctx, tools['run_code'])
+        # The next snippet runs in a fresh session with a full allowance, and the old state is gone.
+        result = await wrapper.call_tool('run_code', {'code': '1 + 1'}, ctx, tools['run_code'])
         assert result.return_value == 2
+        with pytest.raises(ModelRetry, match="name 'saved' is not defined"):
+            await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
 
     async def test_tool_error_resembling_a_timeout_is_not_treated_as_exhaustion(self) -> None:
-        """A nested tool failing with the sandbox's timeout wording must not trigger the hint.
+        """A nested tool failing with the sandbox's timeout wording must not reset the session.
 
         Monty re-raises a tool's exception at the sandbox call site keeping its message, so text
-        alone cannot tell the two apart. A false positive is worse than a miss here: it tells the
-        model to restart, discarding REPL state the session is still perfectly able to use.
+        alone cannot tell the two apart. A false positive is worse than a miss here: it discards
+        REPL state the session is still perfectly able to use.
         """
 
         def boom() -> str:
@@ -961,17 +959,17 @@ class TestCodeMode:
         with pytest.raises(ModelRetry) as exc_info:
             await wrapper.call_tool('run_code', {'code': 'await boom()'}, ctx, tools['run_code'])
         assert 'time limit exceeded' in exc_info.value.message
-        assert 'restart' not in exc_info.value.message
+        assert 'session was reset' not in exc_info.value.message
 
         # The session was never exhausted, so its REPL state is still there to use.
         kept = await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
         assert kept.return_value == 42
 
     async def test_duration_exhaustion_reports_calls_already_made(self) -> None:
-        """Restarting discards REPL state, so the retry has to say what already ran.
+        """A timeout resets the session, so the retry has to say what already ran.
 
-        Otherwise the advice is to throw away the only record of the work while giving the model
-        nothing to reconstruct it from.
+        Otherwise the reset throws away the only record of the work while giving the model nothing
+        to reconstruct it from.
         """
         wrapper = CodeMode[object](resource_limits={'max_duration_secs': 0.3}).get_wrapper_toolset(
             _build_function_toolset(add)
@@ -989,15 +987,15 @@ class TestCodeMode:
             )
 
         message = exc_info.value.message
-        assert '`restart: true`' in message
+        assert 'the session was reset' in message
         assert '1 nested tool calls started' in message
         assert "add({'a': 1, 'b': 2}) returned 3" in message
 
-    async def test_memory_exhaustion_reports_calls_without_advising_restart(self) -> None:
-        """Exceeding `max_memory` reports what already ran, but is not a reason to restart.
+    async def test_memory_exhaustion_reports_calls_without_resetting(self) -> None:
+        """Exceeding `max_memory` reports what already ran, but keeps the session.
 
-        The session still has its duration allowance and later calls work, so the restart advice
-        would be wrong here even though the summary is just as necessary.
+        The allocation failed at a known point and later calls work, so a reset would discard
+        usable state even though the summary is just as necessary.
         """
         wrapper = CodeMode[object](resource_limits={'max_memory': 8 * 1024 * 1024}).get_wrapper_toolset(
             _build_function_toolset(add)
@@ -1017,7 +1015,7 @@ class TestCodeMode:
         message = exc_info.value.message
         assert 'memory limit exceeded' in message
         assert "add({'a': 1, 'b': 2}) returned 3" in message
-        assert 'restart' not in message
+        assert 'session was reset' not in message
 
     async def test_every_resource_limit_reports_started_calls_when_exhausted(self) -> None:
         """Exhausting any option a caller can set still reports the calls that already ran.
@@ -3790,6 +3788,39 @@ class TestCodeModeOSAccess:
         run_value.set('from the run')
         result = await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('A')"}, ctx, tools['run_code'])
         assert result.return_value == 'from the run'
+
+    @pytest.mark.parametrize(
+        'code',
+        [
+            pytest.param('import datetime\ndatetime.datetime.now()', id='datetime'),
+            pytest.param('import time\ntime.time()', id='time'),
+            pytest.param('import asyncio\nawait asyncio.sleep(0)', id='sleep'),
+            pytest.param('import random\nrandom.random()', id='random'),
+        ],
+    )
+    async def test_clock_sleep_and_entropy_need_os_access(self, code: str) -> None:
+        """Without `os_access` sandbox code has no clock, sleep, or entropy, so a replay sees the same run."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        with pytest.raises(ModelRetry, match='is not supported in this environment'):
+            await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+
+    async def test_os_callback_answers_the_clock(self) -> None:
+        seen: list[str] = []
+
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            seen.append(fn)
+            return 1_000_000.0
+
+        wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        result = await wrapper.call_tool('run_code', {'code': 'import time\ntime.time()'}, ctx, tools['run_code'])
+        assert result.return_value == 1_000_000.0
+        assert seen == ['time.time']
 
     async def test_abstract_os_instance_dispatches_inside_run_code(self) -> None:
         """An `AbstractOS` instance is accepted as the `os` value and dispatches OS calls."""

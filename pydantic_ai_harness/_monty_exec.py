@@ -43,6 +43,7 @@ try:
         ExternalReturnValue,
         ExternalSettledResult,
         MontyComplete,
+        OSPolicy,
         ResourceLimits,
     )
 except ImportError as _import_error:  # pragma: no cover
@@ -111,17 +112,21 @@ async def _release_monty(stack: AsyncExitStack) -> None:
 
     Cancellation is delivered again at every suspension point while an enclosing cancel scope
     stays cancelled, which would abandon the session or pool exit half way and leak the worker.
-    The exit waits for a snippet that is still running, so it is bounded by `max_duration_secs`
-    (and, for a remote worker, the transport's per-turn deadline); Monty offers no way to
-    interrupt a running feed.
+    The exit waits for a snippet that is still running, so it is bounded by
+    `max_feed_duration_secs` (and, for a remote worker, the transport's per-turn deadline); Monty
+    offers no way to interrupt a running feed.
     """
     with anyio.CancelScope(shield=True):
         await stack.aclose()
 
 
-# Extra time the WebSocket transport allows on top of `max_duration_secs`, so the sandbox's own
+# Extra time the WebSocket transport allows on top of `max_feed_duration_secs`, so the sandbox's own
 # limit fires first and the model sees a time-limit error rather than a dropped connection.
 _REMOTE_TURN_SLACK_SECS = 10.0
+
+# Route the clock, sleeps, and unseeded randomness to the `os=` handler, as before Monty 1.0. Without
+# one they are unavailable, which keeps sandbox code deterministic when a Temporal workflow replays it.
+_OS_POLICY: OSPolicy = {'datetime': 'call_host', 'sleep': 'call_host', 'random_start': 'call_host'}
 
 
 @dataclass
@@ -157,15 +162,19 @@ class MontyRunState:
                 if self.monty_sandbox_url is None:
                     pool = AsyncMonty()
                 else:
-                    max_duration_secs = limits.get('max_duration_secs')
-                    timeout = None if max_duration_secs is None else max_duration_secs + _REMOTE_TURN_SLACK_SECS
+                    max_feed_duration_secs = limits.get('max_feed_duration_secs')
+                    timeout = (
+                        None if max_feed_duration_secs is None else max_feed_duration_secs + _REMOTE_TURN_SLACK_SECS
+                    )
                     pool = AsyncMontyWebsocket(self.monty_sandbox_url, request_timeout=timeout)
                 self.pool = await _enter_monty(self._pool_stack, pool, self.portal)
             except BaseException:
                 await self._release_pool()  # a failed spawn or dial must not leave the portal thread behind
                 raise
         if self.session is None:
-            checkout = self.pool.checkout(limits=limits, type_check=type_check, type_check_stubs=type_check_stubs)
+            checkout = self.pool.checkout(
+                limits=limits, type_check=type_check, type_check_stubs=type_check_stubs, os_policy=_OS_POLICY
+            )
             self.session = await _enter_monty(self._session_stack, checkout, self.portal)
         return self.session
 
