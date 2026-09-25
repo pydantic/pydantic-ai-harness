@@ -96,7 +96,7 @@ async def test_an_expired_sandbox_is_unavailable() -> None:
 
 
 async def test_coder_tools_run_in_the_sandbox_modal_sandbox_supplies() -> None:
-    """`ModalSandbox` supplies the workspace, and the documented image has what `Coder` needs."""
+    """`ModalSandbox` supplies the workspace, and `Coder`'s tools run in it."""
     import modal  # noqa: PLC0415 - optional extra, absent on slim installs
 
     supplied: list[ModalSandboxBackend] = []
