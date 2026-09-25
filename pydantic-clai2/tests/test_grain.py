@@ -11,6 +11,7 @@ from fastmcp.client.auth.oauth import TokenStorageAdapter
 from fastmcp.client.transports import StreamableHttpTransport
 from keyring.errors import PasswordDeleteError
 from mcp.shared.auth import OAuthToken
+from menu_script import Script, pick
 from pydantic import JsonValue, ValidationError
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.exceptions import UserError
@@ -18,20 +19,26 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.grain import Grain
 from rich.console import Console
+from termflow.tui import MenuItem  # pyright: ignore[reportMissingTypeStubs]
+from termflow.tui.menu import MenuResult  # pyright: ignore[reportMissingTypeStubs]
 
 from pydantic_clai2 import DEFAULT_PLUGINS, api_keys
+from pydantic_clai2 import grain as grain_module
 from pydantic_clai2._app import create_shell
+from pydantic_clai2.api_keys import KeyReference
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.credential_store import load_codex_credentials, save_codex_credentials
+from pydantic_clai2.field_menu import FieldMenu
 from pydantic_clai2.grain import (
     GRAIN_MCP_URL,
     KEY_ACCOUNT,
     KEY_NAME,
     TOKEN_ACCOUNT,
+    GrainConnection,
+    GrainForm,
     GrainSignIn,
     activate,
-    grain_command,
 )
 from pydantic_clai2.headless import no_screen
 from pydantic_clai2.plugin_loader import PluginLoader
@@ -81,7 +88,10 @@ def host(
 
 
 def grain(plugin: PluginHost[None]) -> Grain[None]:
-    [capability] = plugin.capabilities
+    """The `Grain` the plugin builds for the next run."""
+    [build] = plugin.capabilities
+    assert callable(build)
+    capability = build(run_context())
     assert isinstance(capability, Grain)
     return capability  # pyright: ignore[reportUnknownVariableType] -- `isinstance` cannot narrow the type argument.
 
@@ -134,7 +144,9 @@ def shell_for(store: SettingsStore) -> None:
     )
 
 
-async def test_enabling_the_builtin_adds_grain_and_the_command(tmp_path: Path) -> None:
+async def test_enabling_the_builtin_adds_grain_and_the_menu_saves_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = SettingsStore(tmp_path / 'settings.db')
     commands = Commands()
     loader: PluginLoader[None] = PluginLoader(
@@ -148,9 +160,19 @@ async def test_enabling_the_builtin_adds_grain_and_the_command(tmp_path: Path) -
     assert loader.capabilities() == []
 
     await loader.enable('grain')
-    [capability] = loader.capabilities()
+    [build] = loader.capabilities()
+    assert callable(build)
+    capability = build(run_context())
     assert isinstance(capability, Grain) and capability.read_only
-    assert 'Not signed in' in await commands.execute_async('/grain')
+    assert 'Not signed in' in await commands.execute_async('/grain status')
+
+    script = Script(lists=[pick('read_only'), MenuResult(cancelled=True)], choices=[pick('false')], texts=[])
+    monkeypatch.setattr(grain_module, 'TERMINAL', script.runners)
+    assert 'all tools' in await commands.execute_async('/grain')
+    [saved] = store.plugins()
+    assert saved.settings == {'read_only': False, 'include_instructions': True}, 'saved at once, for the next load'
+    rebuilt = build(run_context())
+    assert isinstance(rebuilt, Grain) and not rebuilt.read_only, 'and applied to the next prompt without a reload'
 
 
 async def test_token_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,7 +181,11 @@ async def test_token_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> No
     activate(plugin)
     capability = grain(plugin)
     assert capability.client is None and capability.auth is None and not capability.read_only
-    assert await plugin.commands.execute_async('/grain') == 'Grain uses the GRAIN_ACCESS_TOKEN environment variable.'
+    assert grain(plugin) is capability, 'rebuilt only when the token source or a setting changes'
+    assert (
+        await plugin.commands.execute_async('/grain status')
+        == 'Grain uses the GRAIN_ACCESS_TOKEN environment variable.'
+    )
     assert 'cannot revoke' in await plugin.commands.execute_async('/grain logout')
 
 
@@ -170,13 +196,13 @@ async def test_without_a_token_it_signs_in_through_the_browser_and_keeps_tokens_
     assert capability.auth is None and capability.read_only
     oauth = sign_in(capability)
     assert oauth.tokens.name == TOKEN_ACCOUNT
-    assert 'Not signed in' in await plugin.commands.execute_async('/grain')
+    assert 'Not signed in' in await plugin.commands.execute_async('/grain status')
 
     storage = TokenStorageAdapter(oauth.tokens, server_url=GRAIN_MCP_URL)
     token = OAuthToken(access_token='access', token_type='Bearer', refresh_token='refresh')
     await storage.set_tokens(token)
     oauth.context.current_tokens = token
-    assert 'Signed in to Grain' in await plugin.commands.execute_async('/grain')
+    assert 'Signed in to Grain' in await plugin.commands.execute_async('/grain status')
 
     assert 'Signed out of Grain' in await plugin.commands.execute_async('/grain logout')
     assert await storage.get_tokens() is None
@@ -222,7 +248,7 @@ def test_completes_subcommands() -> None:
     plugin = host()
     activate(plugin)
     [command] = plugin.commands
-    assert list(command.complete([])) == ['key', 'logout']
+    assert list(command.complete([])) == ['key', 'logout', 'status']
     assert list(command.complete(['logout', ''])) == []
 
 
@@ -238,7 +264,9 @@ class Prompt:
         return next(self.values)
 
 
-def configure(monkeypatch: pytest.MonkeyPatch, *, typed: tuple[str, ...] = (), keys: tuple[str, ...] = ()) -> Prompt:
+def answer_key_prompt(
+    monkeypatch: pytest.MonkeyPatch, *, typed: tuple[str, ...] = (), keys: tuple[str, ...] = ()
+) -> Prompt:
     """Answer `/grain key`: `keys` drive the saved-key picker, `typed` the masked prompt."""
     prompt = Prompt(*typed)
     monkeypatch.setattr('pydantic_clai2.grain.PromptSession', lambda: prompt)
@@ -252,11 +280,13 @@ def run_context() -> RunContext[None]:
 
 
 async def test_a_typed_token_goes_to_keys_and_only_its_name_is_saved(monkeypatch: pytest.MonkeyPatch) -> None:
-    prompt = configure(monkeypatch, typed=('typed-secret',))
+    prompt = answer_key_prompt(monkeypatch, typed=('typed-secret',))
     plugin = host()
     activate(plugin)
+    assert sign_in(grain(plugin)).tokens.name == TOKEN_ACCOUNT
     result = await plugin.commands.execute_async('/grain key')
-    assert result == 'Grain uses the /keys entry GRAIN_ACCESS_TOKEN. /plugins reload grain applies it.'
+    assert result == 'Grain uses the /keys entry GRAIN_ACCESS_TOKEN from the next prompt.'
+    assert callable(grain(plugin).auth), 'the running session switches without a reload'
     assert prompt.labels == [('Grain access token (saved in /keys as GRAIN_ACCESS_TOKEN; Enter for none): ', True)]
     assert api_keys.load_keys()[KEY_NAME].get_secret_value() == 'typed-secret'
     saved = load_codex_credentials(account=KEY_ACCOUNT)
@@ -268,7 +298,7 @@ async def test_a_typed_token_goes_to_keys_and_only_its_name_is_saved(monkeypatch
     capability = grain(reloaded)
     assert capability.client is None and callable(capability.auth)
     assert capability.auth(run_context()) == 'typed-secret'
-    assert await reloaded.commands.execute_async('/grain') == 'Grain uses the /keys entry GRAIN_ACCESS_TOKEN.'
+    assert await reloaded.commands.execute_async('/grain status') == 'Grain uses the /keys entry GRAIN_ACCESS_TOKEN.'
     assert 'No API key' in await reloaded.commands.execute_async('/grain logout')
 
     api_keys.save_key(name=KEY_NAME, value='replaced')
@@ -280,31 +310,96 @@ async def test_a_typed_token_goes_to_keys_and_only_its_name_is_saved(monkeypatch
 
 async def test_an_existing_key_is_shared_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
     api_keys.save_key(name='SHARED_GRAIN', value='shared-secret')
-    configure(monkeypatch, keys=('enter',))
-    assert 'SHARED_GRAIN' in await grain_command(['key'], auth=None)
+    answer_key_prompt(monkeypatch, keys=('enter',))
     plugin = host()
     activate(plugin)
+    assert 'SHARED_GRAIN' in await plugin.commands.execute_async('/grain key')
     auth = grain(plugin).auth
     assert callable(auth) and auth(run_context()) == 'shared-secret'
 
 
 @pytest.mark.parametrize(
     ('keys', 'expected'),
-    [(('down', 'down', 'enter'), 'Grain uses no /keys entry.'), (('escape',), 'Grain key unchanged.')],
+    [(('down', 'down', 'enter'), 'Grain uses no /keys entry'), (('escape',), 'Grain key unchanged.')],
 )
 async def test_no_key_or_cancel(monkeypatch: pytest.MonkeyPatch, keys: tuple[str, ...], expected: str) -> None:
     api_keys.save_key(name='SHARED_GRAIN', value='shared-secret')
-    configure(monkeypatch, keys=('enter',))
-    await grain_command(['key'], auth=None)
-    configure(monkeypatch, keys=keys)
-    assert (await grain_command(['key'], auth=None)).startswith(expected)
+    answer_key_prompt(monkeypatch, keys=('enter',))
     plugin = host()
     activate(plugin)
-    uses_key = grain(plugin).client is None
-    assert uses_key == (expected == 'Grain key unchanged.')
+    await plugin.commands.execute_async('/grain key')
+    answer_key_prompt(monkeypatch, keys=keys)
+    assert (await plugin.commands.execute_async('/grain key')).startswith(expected)
+    reloaded = host()
+    activate(reloaded)
+    for loaded in (plugin, reloaded):
+        uses_key = grain(loaded).client is None
+        assert uses_key == (expected == 'Grain key unchanged.')
 
 
 def test_an_invalid_saved_choice_fails_closed() -> None:
     save_codex_credentials(account=KEY_ACCOUNT, value='not json')
     with pytest.raises(UserError, match='/grain key'):
         activate(host())
+
+
+async def test_the_menu_picks_a_key_and_changes_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    api_keys.save_key(name='SHARED_GRAIN', value='shared-secret')
+    answer_key_prompt(monkeypatch, keys=('enter',))
+    output = io.StringIO()
+    plugin = host(output=output)
+    activate(plugin)
+    assert '/grain picks a /keys token' in output.getvalue(), 'an unconfigured plugin says where to configure it'
+    script = Script(
+        lists=[
+            pick('token'),
+            pick('include_instructions'),
+            reset('include_instructions'),
+            pick('read_only'),
+            MenuResult(cancelled=True),
+        ],
+        choices=[pick('false'), MenuResult(cancelled=True)],
+        texts=[],
+    )
+    monkeypatch.setattr(grain_module, 'TERMINAL', script.runners)
+    result = await plugin.commands.execute_async('/grain')
+    assert result.splitlines() == [
+        'Grain uses the /keys entry SHARED_GRAIN from the next prompt.',
+        'Grain server instructions: left out. Saved; applies to the next prompt.',
+        'Grain server instructions: included. Saved; applies to the next prompt.',
+    ]
+    capability = grain(plugin)
+    assert callable(capability.auth) and capability.auth(run_context()) == 'shared-secret'
+    assert capability.include_instructions and capability.read_only
+
+
+async def test_the_menu_shows_each_token_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    form = GrainForm(GrainConnection(host()))
+    token, read_only, _ = form.rows()
+    assert form.current(token) == 'browser sign-in' and form.current(read_only) == 'true'
+    assert 'No API key' in form.reset(token)
+    assert form.problem(read_only, 'anything') is None
+    form.connection.key = KeyReference(name='SHARED_GRAIN')
+    assert form.current(token) == '/keys: SHARED_GRAIN'
+    monkeypatch.setenv('GRAIN_ACCESS_TOKEN', 'grain-token')
+    assert form.current(token) == 'GRAIN_ACCESS_TOKEN (environment)'
+
+
+async def test_closing_the_menu_saves_the_defaults_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    saved: list[dict[str, JsonValue]] = []
+    plugin = PluginHost[None](
+        name='grain', console=Console(file=io.StringIO()), settings={}, save_settings=saved.append
+    )
+    activate(plugin)
+    closed = Script(lists=[MenuResult(cancelled=True)] * 2, choices=[], texts=[])
+    monkeypatch.setattr(grain_module, 'TERMINAL', closed.runners)
+    assert await plugin.commands.execute_async('/grain') == 'Grain settings unchanged.'
+    assert await plugin.commands.execute_async('/grain') == 'Grain settings unchanged.'
+    assert saved == [{'read_only': True, 'include_instructions': True}]
+
+
+def reset(key: str) -> MenuResult:
+    """What the menu hands back when `r` is pressed on the row `key`."""
+    return FieldMenu(GrainForm(GrainConnection(host())), searchable=False).reset_marker(
+        object(), MenuItem(key, value=key)
+    )
