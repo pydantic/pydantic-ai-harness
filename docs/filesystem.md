@@ -1,6 +1,6 @@
 ---
 title: FileSystem
-description: Give a Pydantic AI agent glob-filtered file access to the run's workspace, scoped to a single directory tree with path containment checks.
+description: "Give a Pydantic AI agent tools to read, write, edit, list, and search files in the run's workspace, bounded by one directory with allow, deny, and read-only glob patterns."
 ---
 
 # FileSystem

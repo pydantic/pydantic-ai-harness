@@ -1,6 +1,6 @@
 ---
 title: Skills
-description: Load Agent Skill instructions from the run's workspace, on demand.
+description: "Load Agent Skills (SKILL.md files) from the run's workspace into a Pydantic AI agent on demand: the model sees each skill's name and description and loads its instructions when needed."
 ---
 
 # Skills
