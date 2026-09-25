@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
+import signal
 from collections.abc import AsyncIterator
 
 import anyio
-import anyio.to_thread
 import pytest
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.exceptions import UserError
@@ -238,7 +237,7 @@ class TestSpritesSandbox:
 
         assert not isinstance(caught.value, WorkspaceError)
         assert ('connection' if attach else 'creation') in str(caught.value)
-        assert transport.commands == []
+        assert transport.operations == []
 
     async def test_run_deadline_starts_once_the_sprite_is_acquired(self, transport: SpriteTransport) -> None:
         transport.names.add('remote')
@@ -367,62 +366,45 @@ class TestSpritesSandbox:
         assert transport.aborted == 1
         assert 'Could not close a Sprite control connection' in caplog.text
 
-    async def test_transport_loss_propagates_the_sdk_error_and_requests_cancel(
-        self, transport: SpriteTransport
-    ) -> None:
+    async def test_transport_loss_propagates_the_sdk_error(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
         await backend.get_client()
         error = ConnectionResetError('control connection lost')
-        transport.run_exit_override = -1
+        transport.connection_dropped = True
         transport.connection_lost = error
         with pytest.raises(ConnectionResetError) as caught:
             await backend.run(['true'])
         assert caught.value is error
-        assert any(len(command) == 5 for command in transport.commands)
 
     async def test_transport_loss_without_an_sdk_error_is_a_connection_error(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
         await backend.get_client()
-        transport.run_exit_override = -1
-        transport.run_stderr = b'Error: op failed'
-        with pytest.raises(ConnectionError, match='before reporting an exit status. Error: op failed$'):
-            await backend.run(['true'])
+        transport.connection_dropped = True
+        with pytest.raises(ConnectionError, match='before reporting an exit status. partial$'):
+            await backend.run(['sh', '-c', 'printf partial >&2'])
 
-    async def test_timeout_cancels_before_original_close_finishes(self, transport: SpriteTransport) -> None:
-        backend = SpritesSandboxBackend()
-        await backend.get_client()
-        transport.control_close_hang = True
-        with pytest.raises(WorkspaceTimeoutError):
-            await backend.run('sleep .5; touch escaped', shell=True, timeout=0.01)
-        assert not (transport.root / 'escaped').exists()
-
-    async def test_cancel_failure_is_logged_and_the_timeout_still_raised(
+    async def test_kill_failure_is_logged_and_the_timeout_still_raised(
         self, transport: SpriteTransport, caplog: pytest.LogCaptureFixture
     ) -> None:
         backend = SpritesSandboxBackend()
         await backend.get_client()
-        transport.cancel_exit_override = 1
+        transport.signal_error = RuntimeError('WebSocket not connected')
         with pytest.raises(WorkspaceTimeoutError):
-            await backend.run('sleep 1', shell=True, timeout=0.01)
-        assert 'Could not confirm remote Sprite command termination' in caplog.text
+            await backend.run(['sleep', '0.2'], timeout=0.01)
+        assert 'Could not stop the remote Sprite command' in caplog.text
 
-    async def test_argv_shell_environment_and_nonzero_exit(
-        self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Commands inherit the Sprite's exec environment, which the fake runs on this process's.
-        monkeypatch.setenv('BASH_ENV', '/startup')
-        monkeypatch.setenv('ENV', '/startup')
+    async def test_argv_shell_environment_and_nonzero_exit(self, transport: SpriteTransport) -> None:
         backend = SpritesSandbox[None](env={'BASE': 'base', 'LAYERED': 'base'}).get_workspace(context(), ref=None)
         assert isinstance(backend, SpritesSandboxBackend)
 
         result = await backend.run(['/bin/echo', 'a; echo injected'])
         assert result.stdout == 'a; echo injected\n'
         result = await backend.run(
-            'printf "$0 $BASE $LAYERED ${BASH_ENV-unset} ${ENV-unset}"; printf error >&2; exit 124',
+            'printf "$0 $BASE $LAYERED"; printf error >&2; exit 124',
             shell=True,
             env={'LAYERED': 'command'},
         )
-        assert (result.exit_code, result.stdout, result.stderr) == (124, '/bin/sh base command unset unset', 'error')
+        assert (result.exit_code, result.stdout, result.stderr) == (124, '/bin/sh base command', 'error')
 
     async def test_canonical_working_directory_preserves_spaces(self, transport: SpriteTransport) -> None:
         target = transport.root / ' directory '
@@ -435,31 +417,13 @@ class TestSpritesSandbox:
 
     async def test_unexpected_working_directory_output(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
-        transport.run_exit_override = 1
+        transport.exit_override = 1
         with pytest.raises(WorkspaceError, match='working directory'):
             await backend.working_dir()
 
-    @pytest.mark.parametrize(
-        'command,cwd,expected',
-        [
-            (['true'], 'absent', FileNotFoundError),
-            (['missing-program'], None, FileNotFoundError),
-            (['true'], 'file', NotADirectoryError),
-            (['./file'], None, PermissionError),
-            (['./garbage'], None, WorkspaceError),
-        ],
-    )
-    async def test_command_that_cannot_start_raises(
-        self, transport: SpriteTransport, command: list[str], cwd: str | None, expected: type[Exception]
-    ) -> None:
-        (transport.root / 'file').write_text('')
-        garbage = transport.root / 'garbage'
-        garbage.write_bytes(b'\x00\x01')
-        garbage.chmod(0o755)
-        backend = SpritesSandboxBackend(working_dir=str(transport.root))
-        with pytest.raises(expected) as caught:
-            await backend.run(command, cwd=None if cwd is None else str(transport.root / cwd))
-        assert type(caught.value) is expected
+    async def test_command_that_cannot_start_is_a_workspace_error(self, transport: SpriteTransport) -> None:
+        with pytest.raises(WorkspaceError, match='^Could not run the command in the Sprite: Error: .*missing-program'):
+            await SpritesSandboxBackend().run(['missing-program'])
 
     async def test_filesystem_fallback_handles_directories_and_binary(self, transport: SpriteTransport) -> None:
         sandbox = Workspace(SpritesSandboxBackend())
@@ -471,31 +435,27 @@ class TestSpritesSandbox:
         await sandbox.remove('folder')
         assert not await sandbox.exists('folder')
 
-    async def test_deadline_kills_child_and_preserves_partial_output(self, transport: SpriteTransport) -> None:
+    async def test_deadline_kills_the_command_and_preserves_partial_output(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
         await backend.get_client()
         with pytest.raises(WorkspaceTimeoutError, match='Command timed out after 0.3 seconds') as caught:
-            await backend.run('printf ready; sleep 1; touch escaped', shell=True, timeout=0.3)
-        await anyio.sleep(1)
-        assert not (transport.root / 'escaped').exists()
+            await backend.run('printf ready; exec sleep 5', shell=True, timeout=0.3)
         assert caught.value.stdout == 'ready'
+        assert transport.signals == ['KILL']
+        [operation] = transport.operations
+        assert operation.process is not None
+        assert operation.process.wait(timeout=1) == -signal.SIGKILL
 
-    async def test_cancellation_before_remote_start_prevents_command(self, transport: SpriteTransport) -> None:
+    async def test_cancellation_kills_the_command(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
         await backend.get_client()
-        transport.release_start = threading.Event()
-        task = asyncio.create_task(backend.run(['touch', 'escaped']))
-        try:
-            assert await anyio.to_thread.run_sync(transport.started.wait, 5)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        finally:
-            transport.release_start.set()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        assert await anyio.to_thread.run_sync(transport.finished.wait, 5)
-        assert not (transport.root / 'escaped').exists()
+        async with anyio.create_task_group() as group:
+            group.start_soon(backend.run, ['sleep', '5'])
+            await transport.exec_started.wait()
+            group.cancel_scope.cancel()
+        [operation] = transport.operations
+        assert operation.process is not None
+        assert operation.process.wait(timeout=1) == -signal.SIGKILL
 
     @pytest.mark.parametrize('timeout', [0, -1, float('inf')])
     async def test_invalid_timeout(self, transport: SpriteTransport, timeout: float) -> None:

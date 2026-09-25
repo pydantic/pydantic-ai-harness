@@ -1,9 +1,10 @@
 """Integration tests that require a real Fly.io Sprite.
 
-The fake-backed suites cover the harness-owned logic: remote process supervision, deadline
-handling, and exception mapping. This live tier admits only what a correctly written fake could
-not catch: real process execution in a Sprite, output reaching the client before a command ends,
-cancellation of the remote process group, and deletion as the Sprites control plane reports it.
+The fake-backed suites cover the harness-owned logic: deadline handling, cancellation, and
+exception mapping. This live tier admits only what a correctly written fake could not catch: real
+process execution in a Sprite, `env` layered on the Sprite's environment, output reaching the
+client before a command ends, SIGKILL reaching a timed-out command, and deletion as the Sprites
+control plane reports it.
 
 Admission rule:
   A test belongs here only when its docstring can name the fake-encoded assumption it
@@ -114,21 +115,37 @@ async def test_command_and_file_round_trip(client: AsyncSpritesClient) -> None:
         assert await workspace.read_bytes(f'{root}/binary.bin') == b'\x00\xff\n'
 
 
-async def test_timeout_raises_with_the_partial_output(client: AsyncSpritesClient) -> None:
-    """Validates the fake-encoded assumption that exec output streams before the command ends.
+async def test_env_is_layered_on_the_sprite_environment(client: AsyncSpritesClient) -> None:
+    """Validates the fake-encoded assumption that exec `env` is added to the Sprite's own environment.
+
+    The exec API documents that a set `env` replaces the default environment; if it does here,
+    every command given `env=` loses `PATH`.
+    """
+    async with _owned(client) as backend:
+        result = await backend.run(
+            ['sh', '-c', 'printf "%s" "$ADDED"; test -n "$PATH"'], env={'ADDED': 'yes'}, timeout=60
+        )
+
+        assert (result.exit_code, result.stdout) == (0, 'yes')
+
+
+async def test_a_timed_out_command_is_killed(client: AsyncSpritesClient) -> None:
+    """Validates the fake-encoded assumptions that exec output streams before the command ends and
+    that `signal('KILL')` stops the command.
 
     The deadline is enforced client-side, so the output printed before it expired must reach the
-    `WorkspaceTimeoutError`, and the cancel payload must stop the remote process group.
+    `WorkspaceTimeoutError`. The command must be gone well within the 10 seconds a disconnected
+    non-TTY command may keep running, so it is the signal that stopped it.
     """
-    marker = f'/tmp/{_unique("after-deadline")}'
+    pid_file = f'/tmp/{_unique("timed-out")}.pid'
     async with _owned(client) as backend:
         with pytest.raises(WorkspaceTimeoutError) as exc_info:
-            await backend.run(f'echo DIAGNOSTIC; sleep 20; touch {marker}', shell=True, timeout=5)
+            await backend.run(f'echo $$ > {pid_file}; echo DIAGNOSTIC; sleep 60', shell=True, timeout=5)
 
         assert 'DIAGNOSTIC' in exc_info.value.stdout
         assert exc_info.value.timeout == 5
-        assert (await backend.run(['sleep', '20'], timeout=60)).exit_code == 0
-        assert (await backend.run(['test', '-e', marker], timeout=60)).exit_code == 1
+        check = await backend.run(['sh', '-c', 'sleep 2; kill -0 "$(cat "$1")"', 'sh', pid_file], timeout=60)
+        assert check.exit_code != 0
 
 
 async def test_reattach_to_a_deleted_sprite_is_unavailable(client: AsyncSpritesClient) -> None:

@@ -1,9 +1,11 @@
 """Controllable fake for the Sprites SDK boundary.
 
 The Sprite handles, clients and exception classes are the real ones from the installed SDK; only
-the network calls are replaced. Commands run for real: the backend's control payloads execute in
-local subprocesses whose working directory is `SpriteTransport.root`, so commands share one host
-directory and deadlines are real.
+the network calls are replaced. Commands run for real: an exec operation runs its argv in a local
+subprocess, in its `dir` (`SpriteTransport.root` by default) with its `env` layered on this
+process's environment, so commands share one host directory and deadlines are real. A command that
+cannot start completes without an exit status and with the error on stderr, as `op.error` does, and
+`signal()` reaches only the command's own process.
 
 Deletion follows the SDK: `destroy_sprite` (and `AsyncSprite.delete()`) returns once the API accepts
 the request, after which `get_sprite` raises `NotFoundError` and a control connection to the
@@ -13,8 +15,9 @@ deleted Sprite fails its WebSocket handshake with HTTP 404 (`websockets.exceptio
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import subprocess
-import sys
 import threading
 from pathlib import Path
 from typing import BinaryIO
@@ -28,24 +31,27 @@ from websockets.http11 import Response
 
 
 class FakeOperation:
-    def __init__(self, transport: SpriteTransport, args: list[str]) -> None:
+    def __init__(self, transport: SpriteTransport, cmd: list[str], env: dict[str, str], dir: str | None) -> None:
         self.transport = transport
-        self.args = args
+        self.closed = False
         self.stdout = b''
         self.stderr = b''
-        self.exit_override = transport.run_exit_override if len(args) == 6 else transport.cancel_exit_override
+        self.process: subprocess.Popen[bytes] | None = None
+        try:
+            self.process = subprocess.Popen(
+                cmd,
+                cwd=dir or transport.root,
+                env={**os.environ, **env},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as error:
+            self.stderr = f'Error: {error}\n'.encode()
         self._task = asyncio.create_task(asyncio.to_thread(self._execute))
 
     def _execute(self) -> int:
-        self.transport.commands.append(self.args)
-        if len(self.args) == 6:
-            self.transport.controls.add(self.args[4])
-            self.transport.started.set()
-            if self.transport.release_start is not None:
-                assert self.transport.release_start.wait(5)
-        process = subprocess.Popen(
-            [sys.executable, *self.args[1:]], cwd=self.transport.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
+        if (process := self.process) is None:
+            return -1
         assert process.stdout is not None and process.stderr is not None
         stdout = bytearray()
         stderr = bytearray()
@@ -66,15 +72,21 @@ class FakeOperation:
         for reader in readers:
             reader.join()
         self.stdout, self.stderr = bytes(stdout), bytes(stderr)
-        if len(self.args) == 6:
-            self.transport.finished.set()
         return code
 
     async def wait(self) -> int:
-        result = await asyncio.shield(self._task)
-        if len(self.args) == 6 and self.transport.run_stderr:
-            self.stderr = self.transport.run_stderr
-        return self.exit_override if self.exit_override is not None else result
+        code = await asyncio.shield(self._task)
+        self.closed = True
+        if self.transport.connection_dropped:
+            return -1
+        return self.transport.exit_override if self.transport.exit_override is not None else code
+
+    async def signal(self, sig: str) -> None:
+        self.transport.signals.append(sig)
+        if self.transport.signal_error is not None:
+            raise self.transport.signal_error
+        assert self.process is not None
+        self.process.send_signal(getattr(signal, f'SIG{sig}'))
 
     def get_stdout(self) -> bytes:
         return self.stdout
@@ -103,7 +115,7 @@ class FakeControlConnection:
         self.sprite = sprite
         # The SDK's read loop stores the exception that ended the connection here.
         self.close_error = self.transport.connection_lost
-        self.closed = False
+        self.closed = self.transport.connection_dropped
         self.ws: FakeSocket | None = None
 
     async def connect(self) -> None:
@@ -113,10 +125,15 @@ class FakeControlConnection:
             raise InvalidStatus(Response(404, 'Not Found', Headers()))
         self.ws = FakeSocket(self.transport)
 
-    async def start_op(self, op: str, *, cmd: list[str], stdin: bool) -> FakeOperation:
+    async def start_op(
+        self, op: str, *, cmd: list[str], env: dict[str, str], dir: str | None, stdin: bool
+    ) -> FakeOperation:
         assert op == 'exec'
         assert stdin is False
-        return FakeOperation(self.transport, cmd)
+        operation = FakeOperation(self.transport, cmd, env, dir)
+        self.transport.operations.append(operation)
+        self.transport.exec_started.set()
+        return operation
 
     async def close(self) -> None:
         self.transport.control_close_started.set()
@@ -131,7 +148,7 @@ class FakeControlConnection:
 
 
 class SpriteTransport:
-    """SDK acquisition fake; public control payloads execute in local subprocesses."""
+    """SDK acquisition fake; exec operations run in local subprocesses."""
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -141,8 +158,8 @@ class SpriteTransport:
         self.release_create: asyncio.Event | None = None
         self.release_get: asyncio.Event | None = None
         self.clients: list[AsyncSpritesClient] = []
-        self.controls: set[str] = set()
-        self.commands: list[list[str]] = []
+        self.operations: list[FakeOperation] = []
+        self.exec_started = asyncio.Event()
         self.get_error: Exception | None = None
         self.close_error: Exception | None = None
         self.close_calls = 0
@@ -151,17 +168,16 @@ class SpriteTransport:
         self.connect_error: Exception | None = None
         self.control_close_error: Exception | None = None
         self.connection_lost: Exception | None = None
+        # The connection closes before the command reports an exit status.
+        self.connection_dropped = False
         self.control_close_hang = False
         self.control_close_started = asyncio.Event()
         self.release_control_close: asyncio.Event | None = None
         self.control_closes = 0
         self.aborted = 0
-        self.run_exit_override: int | None = None
-        self.cancel_exit_override: int | None = None
-        self.run_stderr = b''
-        self.started = threading.Event()
-        self.finished = threading.Event()
-        self.release_start: threading.Event | None = None
+        self.exit_override: int | None = None
+        self.signals: list[str] = []
+        self.signal_error: Exception | None = None
 
     def client(self, token: str, base_url: str, timeout: float) -> AsyncSpritesClient:
         client = AsyncSpritesClient(token=token, base_url=base_url, timeout=timeout)

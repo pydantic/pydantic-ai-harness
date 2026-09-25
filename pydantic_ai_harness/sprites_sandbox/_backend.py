@@ -1,7 +1,7 @@
 """Fly.io Sprites backend for Pydantic AI's `WorkspaceBackend` protocol.
 
-External assumptions last verified 2026-09-15 against sprites-py 0.7.0 source and a local
-WebSocket transport probe, with no live cloud calls:
+External assumptions last verified 2026-09-25 against sprites-py 0.7.0 source, the Sprites API
+docs, and (2026-09-15) a local WebSocket transport probe, with no live cloud calls:
 
 * `AsyncSpritesClient` accepts token, base URL, and HTTP timeout; sprite creation uses the SDK's
   fixed 120-second request timeout, while `aclose` closes the local async HTTP client and control pools:
@@ -9,12 +9,23 @@ WebSocket transport probe, with no live cloud calls:
 * `create_sprite` and `get_sprite` raise `AuthenticationError` (401), `NotFoundError` (404),
   `NetworkError` (transport), and a plain `SpriteError` for any other HTTP failure:
   https://github.com/superfly/sprites-py/blob/v0.7.0/src/sprites/client.py
-* `ControlConnection` is asyncio-based and exposes `connect`, `start_op`, `close`, and its
-  WebSocket as `ws`; an operation provides `wait`, `get_stdout`, and `get_stderr`, and a failed
-  handshake raises `websockets.exceptions.InvalidStatus`:
+* `ControlConnection` is asyncio-based and exposes `connect`, `start_op` (with `cmd`, `env`, and
+  `dir`), `close`, `closed`, `close_error`, and its WebSocket as `ws`; an operation provides
+  `wait`, `get_stdout`, `get_stderr`, `closed`, and `signal`, and a failed handshake raises
+  `websockets.exceptions.InvalidStatus`. An `op.error` from the Sprite completes the operation
+  without an exit status and with `Error: <message>` in stderr, leaving the connection open:
   https://github.com/superfly/sprites-py/blob/v0.7.0/src/sprites/control.py
-* A control WebSocket disconnect does not kill the remote command, so the backend's RUN/CANCEL
-  process supervision is required:
+* `signal` takes a signal name without the `SIG` prefix (`KILL`), as the SDK docstring and the
+  Go SDK's list of valid names give it. Whether it reaches the command's process group is not
+  documented:
+  https://github.com/superfly/sprites-go/blob/main/exec.go
+* The exec API documents that a set `env` replaces the default environment. The backend passes
+  `env` to `start_op` and assumes it is layered on the Sprite's own environment, as the class
+  docstring states; the live tier checks that `PATH` survives:
+  https://sprites.dev/api/sprites/exec
+* A control WebSocket disconnect does not stop a non-TTY command at once; it may keep running for
+  `max_run_after_disconnect` (10 seconds by default), so a timeout or cancellation sends SIGKILL
+  before closing the connection:
   https://sprites.dev/api/sprites/exec
 * Provider retention is separate from local client disconnect:
   https://docs.sprites.dev/concepts/lifecycle/
@@ -26,7 +37,6 @@ lifecycle or command transport behavior. The integration uses the SDK's native a
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import os
@@ -48,11 +58,10 @@ from pydantic_ai.workspaces import (
 )
 
 from pydantic_ai_harness._workspace_provider import absolute_path, command_argv
-from pydantic_ai_harness.sprites_sandbox._process import CANCEL, RUN, SPAWN_FAILED, SPAWN_FAILED_EXIT
 
 try:
     from sprites import AsyncSprite, AsyncSpritesClient
-    from sprites.control import ControlConnection
+    from sprites.control import ControlConnection, OpConn
     from sprites.exceptions import AuthenticationError, NetworkError, NotFoundError, SpriteError
     from sprites.exceptions import TimeoutError as SpriteTimeoutError
     from websockets.exceptions import InvalidStatus
@@ -120,6 +129,16 @@ async def _close_connection(connection: ControlConnection) -> None:
         # `close` has nothing to fail on before `connect` opened the socket.
         if connection.ws is not None:  # pragma: no branch
             connection.ws.transport.abort()
+
+
+async def _kill(operation: OpConn) -> None:
+    """Send SIGKILL to a command still running in the Sprite, logging a failure instead of raising it.
+
+    The signal reaches the command the Sprite started; a child it put in the background may outlive it.
+    """
+    error = await cleanup_call(lambda: operation.signal('KILL'), timeout=_CONTROL_TIMEOUT)
+    if error is not None:
+        logger.warning('Could not stop the remote Sprite command: %r', error)
 
 
 def _map_error(error: Exception, name: str) -> WorkspaceError | None:
@@ -280,20 +299,6 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
             self._canonical_working_dir = directory
         return self._canonical_working_dir
 
-    async def _cancel_remote(self, sprite: AsyncSprite, control: str) -> None:
-        connection = ControlConnection(sprite)
-
-        async def cancel() -> None:
-            await connection.connect()
-            operation = await connection.start_op('exec', cmd=['python3', '-I', '-c', CANCEL, control], stdin=False)
-            if await operation.wait() != 0:
-                raise RuntimeError('the cancellation script failed')
-
-        error = await cleanup_call(cancel, timeout=_CONTROL_TIMEOUT)
-        if error is not None:
-            logger.warning('Could not confirm remote Sprite command termination: %r', error)
-        await _close_connection(connection)
-
     async def run(
         self,
         command: WorkspaceCommand,
@@ -307,8 +312,6 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         directory = absolute_path('cwd', cwd) if cwd is not None else self._working_dir
         args = command_argv(command, shell)
-        options = json.dumps({'args': args, 'cwd': directory, 'env': {**self._env, **(env or {})}})
-        control = f'/tmp/pydantic-ai-{uuid.uuid4().hex}'
 
         # Acquiring the Sprite has its own bound; the deadline is the command's alone.
         sprite = await self.get_client()
@@ -320,7 +323,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
             with deadline:
                 await connection.connect()
                 operation = await connection.start_op(
-                    'exec', cmd=['python3', '-I', '-c', RUN, control, options], stdin=False
+                    'exec', cmd=args, env={**self._env, **(env or {})}, dir=directory, stdin=False
                 )
                 code = await operation.wait()
             stdout = operation.get_stdout() if operation is not None else b''
@@ -336,36 +339,23 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
                 # The SDK keeps the transport failure that closed the connection; that is what propagates.
                 if connection.close_error is not None:
                     raise connection.close_error
+                if not connection.closed:
+                    # The connection is still open, so the Sprite answered with an error (`op.error`)
+                    # instead of an exit status; the SDK puts its message in stderr.
+                    raise WorkspaceError(f'Could not run the command in the Sprite: {_decode(stderr).strip()}')
                 raise ConnectionError(
                     f'Sprite command transport closed before reporting an exit status. {_decode(stderr).strip()}'.strip()
                 )
         except BaseException as error:
-            await self._cancel_remote(sprite, control)
+            if operation is not None and not operation.closed:
+                # A timeout or a cancellation left the command running in the Sprite.
+                await _kill(operation)
             await _close_connection(connection)
             if isinstance(error, Exception) and (mapped := _map_error(error, sprite.name)) is not None:
                 raise mapped from error
             raise
         await _close_connection(connection)
-        if code == SPAWN_FAILED_EXIT and stderr.startswith(SPAWN_FAILED.encode()):
-            raise _spawn_error(stderr)
         return CommandResult(exit_code=code, stdout=_decode(stdout), stderr=_decode(stderr))
-
-
-_SPAWN_ERRORS: dict[str, type[OSError]] = {
-    error.__name__: error for error in (FileNotFoundError, IsADirectoryError, NotADirectoryError, PermissionError)
-}
-
-
-def _spawn_error(stderr: bytes) -> Exception:
-    """The error for a command the Sprite could not start, as `RUN` reported it.
-
-    A path-level failure (a missing `cwd` or executable, say) is the builtin error; anything else
-    is a `WorkspaceError`.
-    """
-    name, number, message, filename = json.loads(stderr.removeprefix(SPAWN_FAILED.encode()))
-    if (error := _SPAWN_ERRORS.get(name)) is not None:
-        return error(number, message, filename)
-    return WorkspaceError(f'Could not start the command in the Sprite: {message}')
 
 
 def _decode(data: bytes) -> str:

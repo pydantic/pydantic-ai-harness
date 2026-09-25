@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -80,5 +79,3 @@ if _HAS_SPRITES:  # pragma: no branch - the fixture requires the SDK-backed fake
         yield transport
         for client in transport.clients:
             await client.aclose()
-        for control in transport.controls:
-            shutil.rmtree(control, ignore_errors=True)

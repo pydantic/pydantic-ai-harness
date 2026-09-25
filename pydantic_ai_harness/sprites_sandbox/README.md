@@ -41,8 +41,6 @@ Construction makes no Sprites requests. The Sprite is created at the first works
 
 Commands run under `sh -c` in the Sprite's shell environment. Nothing from your machine's environment reaches the Sprite: pass `env=` for variables every command should get, such as a token the agent needs. `working_dir=` sets the absolute directory commands start in and relative paths resolve against; it defaults to the Sprite's.
 
-When a command exits, its process group is killed, so a plain `server &` stops with the command that started it. `Shell` background jobs keep running, because they start in their own session with `setsid`.
-
 ## Continue in the same Sprite
 
 ```python
@@ -123,7 +121,7 @@ To delete the Sprite an agent run created, take the backend from `result.workspa
 
 A Sprite persists after the agent run ends, with its files and installed packages. It pauses when idle and resumes on the next command: compute is billed while it is active, storage until it is deleted. Pydantic AI never deletes a Sprite; deleting it through the SDK when you are done is the application's job.
 
-- Pass a finite `timeout` to bound a command. On a timeout or a cancelled call, the command's process group is killed in the Sprite and `WorkspaceTimeoutError` carries the output produced so far.
+- Pass a finite `timeout` to bound a command. On a timeout or a cancelled call, the command is sent SIGKILL through the Sprites API, and `WorkspaceTimeoutError` carries the output produced so far. Background processes the command started, such as a `server &` or a `Shell` background job, may outlive it.
 - A deleted Sprite and rejected credentials raise `WorkspaceUnavailableError`, which ends the run. Network and connection errors propagate unchanged, so a durable execution engine can retry them.
 - The `WorkspaceRef` carries no credentials, so every worker that reattaches needs its own `SPRITE_TOKEN`. See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for how a run selects and restores its workspace.
 
