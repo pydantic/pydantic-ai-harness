@@ -1,6 +1,7 @@
 """Interactive terminal shell around a capability-independent session."""
 
 import asyncio
+import math
 import sys
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
@@ -9,8 +10,8 @@ from pathlib import Path
 from threading import Thread
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from anyio import create_task_group
-from anyio.abc import TaskGroup
+from anyio import create_memory_object_stream, create_task_group
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import History
@@ -29,7 +30,6 @@ from ._branding import print_banner
 from ._completion_adapter import COMPLETION_STYLE, PromptCompleter
 from ._rendering import StreamRenderer
 from ._session import Session
-from .capability_catalog import HARNESS_PLUGINS
 from .command_context import CommandContext, CommandProvider
 from .commands import (
     Command,
@@ -87,7 +87,7 @@ DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (
     PluginSettings(
         id='coder',
         factory='pydantic_ai_harness.coder:Coder',
-        settings={'unrestricted_filesystem': True, 'repo_context': False},
+        settings={'unrestricted_filesystem': True, 'repo_context': False, 'sub_agents': False},
     ),
     PluginSettings(id='ask_user', factory='pydantic_clai2.ask_user_menu:activate'),
     PluginSettings(id='repo_context', factory='pydantic_clai2.repo_context'),
@@ -96,9 +96,10 @@ DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (
     PluginSettings(id='logfire', factory='pydantic_clai2.logfire'),
     PluginSettings(id='notifications', factory='pydantic_clai2.notifications'),
     PluginSettings(id='mcp', factory='pydantic_clai2.mcp'),
-    *HARNESS_PLUGINS,
 )
-"""Built-in declarations, including opt-in harness capabilities. `remove` restores their defaults.
+"""Built-in declarations, each integrated with the shell. `remove` restores their defaults.
+
+Other harness capabilities are not listed here: a user adds one on purpose with `/plugins add` or a plugin module.
 
 `coder` leaves out its own `RepoContext` because `repo_context` binds one, so instruction files load once.
 """
@@ -510,7 +511,7 @@ class _Shell(Generic[DepsT, OutputT]):
     reload_requested: bool = False
     editor: LivePrompt | None = None
     forks: Forks[DepsT, OutputT] = field(init=False)
-    _mid_turn: TaskGroup | None = field(default=None, init=False, repr=False)
+    _mid_turn_commands: MemoryObjectSendStream[str] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.forks = Forks(
@@ -601,11 +602,20 @@ class _Shell(Generic[DepsT, OutputT]):
         return (self.editor.suspended if self.editor is not None else bare_screen)()
 
     def run_now(self, text: str) -> bool:
-        """Open a bare `during_turn` command's menu over a streaming turn instead of queueing it."""
-        if self._mid_turn is None or not self.commands.runs_during_turn(text):
+        """Open a bare `during_turn` command's menu over a streaming turn instead of queueing it.
+
+        Key handlers call this from an input reader callback, which runs on the event loop but
+        outside any task, so it hands the command to the turn's task rather than spawning one.
+        """
+        if self._mid_turn_commands is None or not self.commands.runs_during_turn(text):
             return False
-        self._mid_turn.start_soon(self._run_mid_turn, text)
+        self._mid_turn_commands.send_nowait(text)
         return True
+
+    async def _serve_mid_turn(self, commands: MemoryObjectReceiveStream[str]) -> None:
+        async with commands, create_task_group() as menus:
+            async for text in commands:
+                menus.start_soon(self._run_mid_turn, text)
 
     async def _run_mid_turn(self, text: str) -> None:
         async with self.screen.overlay():
@@ -738,8 +748,10 @@ class _Shell(Generic[DepsT, OutputT]):
         # they save apply once it ends. A menu still open when it ends delays the next prompt.
         ended = TurnEnd(text=start.text, outcome='cancelled')
         with self.session_settings.turn():
+            send, receive = create_memory_object_stream[str](math.inf)
             async with create_task_group() as mid_turn:
-                self._mid_turn = mid_turn
+                mid_turn.start_soon(self._serve_mid_turn, receive)
+                self._mid_turn_commands = send
                 try:
                     ended = await _run_prompt(
                         self.session,
@@ -753,7 +765,8 @@ class _Shell(Generic[DepsT, OutputT]):
                         spinner=self.spinners.active,
                     )
                 finally:
-                    self._mid_turn = None
+                    self._mid_turn_commands = None
+                    send.close()
         return ended
 
 

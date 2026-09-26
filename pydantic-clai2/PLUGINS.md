@@ -36,7 +36,7 @@ separately.
 /mcp auth NAME [logout]               sign in to an OAuth server again, or sign out
 /mcp edit NAME                        the same form, prefilled
 /mcp remove NAME
-/mcp trust [status|accept|revoke]     load this repository's .clai/mcp_servers.json
+/mcp trust [status|accept|revoke]     load this repository's .clai/mcp_servers.json and .mcp.json
 /mcp help
 ```
 
@@ -112,16 +112,40 @@ cannot produce the same name.
 
 ### Project servers and trust
 
-A repository can commit `.clai/mcp_servers.json` (same `servers` shape, found
-between the working directory and the git root). Because a stdio server runs a
-program, its servers do not load until you run `/mcp trust accept`. Trust is
-stored in your `mcp.json`, keyed by the file's path and a SHA-256 of its
-contents: any change to the file unloads its servers until you accept again, and
+A repository can commit either or both of these project files. Each is found by
+looking in the working directory, then each parent up to the git root:
+
+| Path | Shape |
+| --- | --- |
+| `.clai/mcp_servers.json` | `{"servers": {...}}`, the same shape as your `mcp.json` |
+| `.mcp.json` | Claude Code's project scope: `{"mcpServers": {...}}` |
+
+A `.mcp.json` written for Claude Code loads as is in the common case:
+
+```json
+{"mcpServers": {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
+                            "env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}"}},
+                "docs": {"type": "http", "url": "https://example.com/mcp"}}}
+```
+
+As in Claude Code, `type` can be left out for a stdio server (an entry with a
+`command`); `http` and `sse` servers name their `type`. Each server otherwise takes
+the keys described above. Differences from Claude Code: `$VAR` and `${VAR}` are
+expanded only in `env` and `headers` values (not in `command`, `args`, or `url`),
+`${VAR:-default}` is not supported, server names cannot contain underscores, and
+keys CLAI does not know fail loudly with the file's path. Claude Code's user and
+local scopes (`~/.claude.json`) are not read.
+
+Because a stdio server runs a program, project servers do not load until you run
+`/mcp trust accept`, which accepts every project file found. Trust is
+stored in your `mcp.json`, keyed by each file's path and a SHA-256 of its
+contents: any change to a file unloads its servers until you accept again, and
 a repository cannot trust itself. A symlinked project file or `.clai` folder is
 never trusted, so a repository cannot point at a file you trusted elsewhere.
 `/mcp stop` on a project server lasts for the
 session; edit the project file to change it permanently. When a name exists in
-both places, your own server wins.
+more than one place, your own server wins, then plugin settings, then
+`.clai/mcp_servers.json`, then `.mcp.json`.
 
 ### Plugin settings and gaps
 
@@ -351,37 +375,35 @@ order plugin instructions, renderers, and status segments are consulted in.
 
 | Id | Backed by | Settings | Does |
 |---|---|---|---|
-| `coder` | `pydantic_ai_harness.coder:Coder` | `{"unrestricted_filesystem": true, "repo_context": false}` | the file and shell tools |
+| `coder` | `pydantic_ai_harness.coder:Coder` | `{"unrestricted_filesystem": true, "repo_context": false, "sub_agents": false}` | the file and shell tools |
 | `ask_user` | `pydantic_clai2.ask_user_menu:activate` | `{}` | the `ask_user_question` tool: multiple-choice questions answered from the terminal |
 | `repo_context` | `pydantic_clai2.repo_context` | `{}` | reads `CLAUDE.md` or `AGENTS.md` from the launch directory into the instructions |
 | `persistence` | `pydantic_clai2.sessions` | `{}` | Harness step checkpoints for interrupted session recovery |
 | `compaction` | `pydantic_clai2.compaction` | `{}` | automatic summarisation with a truncation fallback, `/compact`, and the context warning |
 
-### Optional harness capabilities
+### Other harness capabilities
 
-`/plugins` and `/plugins list` also include every other public harness capability,
-including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
-appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
-are not separate capabilities.
+`/plugins` lists only the built-ins above, plus plugins you or the repository
+declared. It does not list every public harness capability for Space-enable:
+hosted-MCP integrations such as Slack or GitHub, sandboxes, and guardrails need
+credentials, extras, or settings that a checkbox cannot supply, so they belong in
+CLAI plugins written for them.
 
-Press Space to enable an entry. Its preview shows the import path and any load
-error. Listing disabled entries does not import their modules or require their
-optional packages. Some capabilities need an extra installed in CLAI's Python
-environment, credentials, or constructor settings before they can load. Supply
-JSON constructor settings by replacing the declaration under the same id:
+To run any other capability, declare it on purpose under an id of your choice,
+with JSON constructor settings if it takes them:
 
 ```text
 /plugins add sliding_window_compaction pydantic_ai_harness.compaction:SlidingWindowCompaction '{"max_messages": 40}'
 ```
 
-For callbacks, stores, or other Python objects, use a plugin module that builds
-the capability and calls `host.add(...)`, registered under that id. The menu does
-not construct these objects or install dependencies. Avoid enabling overlapping
-tool providers together, such as `filesystem` or `shell` alongside `coder`.
-Removing an optional built-in restores its disabled declaration; enable and
-disable choices persist between launches. Project, drop-in, and saved declarations
-retain their usual precedence over built-ins.
+For callbacks, stores, or other Python objects, write a plugin module that builds
+the capability and calls `host.add(...)`. CLAI does not install the capability's
+optional dependencies. Avoid enabling overlapping tool providers together, such
+as `filesystem` or `shell` alongside `coder`.
+
+Earlier releases listed every harness capability here, disabled. If you enabled
+one of those, it was saved as your own declaration, so it keeps loading and now
+shows as a saved plugin; `/plugins remove NAME` forgets it.
 
 `/plugins disable coder` gives you a chat-only CLAI (a writing or research setup
 with `ExaSearch` instead, say); `/plugins enable coder` brings the tools back;
@@ -397,7 +419,10 @@ the same name and it takes the built-in's place:
 
 Keep `"repo_context": false` on a replacement `coder`: `Coder` bundles its own
 `RepoContext`, and with the `repo_context` plugin also on, the instruction file
-would reach the model twice.
+would reach the model twice. CLAI adds `"sub_agents": false` to any `Coder`
+declaration that does not set it: `Coder`'s delegation runs the agent again,
+which only brings along what is bound to the agent, and CLAI passes its plugins
+to each run instead, so `Coder` refuses to start with delegation on.
 
 `repo_context` wraps harness `RepoContext` with the launch directory as the
 workspace and its default filenames. Its settings:
