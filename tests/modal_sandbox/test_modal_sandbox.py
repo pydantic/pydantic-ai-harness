@@ -10,6 +10,7 @@ from typing import Any
 import anyio
 import pytest
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import PrefixTools
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -457,6 +458,13 @@ async def test_warn_if_no_tools_false_silences_the_warning(fake_modal: FakeModal
 async def test_agent_with_filesystem_does_not_warn(fake_modal: FakeModal) -> None:
     fake_modal.responder = lambda argv, timeout: ('/root\n', '', 0)
     agent = Agent(TestModel(call_tools=[]), capabilities=[ModalSandbox(), FileSystem()])
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        await agent.run('go')
+
+
+async def test_prefixed_filesystem_does_not_warn(fake_modal: FakeModal) -> None:
+    agent = Agent(TestModel(call_tools=[]), capabilities=[ModalSandbox(), PrefixTools(FileSystem(), prefix='repo')])
     with warnings.catch_warnings():
         warnings.simplefilter('error')
         await agent.run('go')

@@ -224,7 +224,11 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
         if (
             self.warn_if_no_tools
             and not _warned_no_workspace_tools
-            and _WORKSPACE_TOOL_NAMES.isdisjoint(tool.name for tool in tool_defs)
+            and not any(
+                tool.name == name or tool.name.endswith(f'_{name}')
+                for tool in tool_defs
+                for name in _WORKSPACE_TOOL_NAMES
+            )
         ):
             _warned_no_workspace_tools = True
             warnings.warn(_NO_WORKSPACE_TOOLS_MESSAGE, UserWarning, stacklevel=2)
