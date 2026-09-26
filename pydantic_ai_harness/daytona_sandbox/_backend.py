@@ -252,6 +252,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         self._client = client
         self._owns_client = client is None
         self._snapshot = snapshot
+        self._create_name: str | None = None
         self._auto_stop_interval = auto_stop_interval
         self._env = dict(env or {})
         self._network_block_all = network_block_all
@@ -436,7 +437,17 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         return True
 
     async def _create(self, client: AsyncDaytona) -> AsyncSandbox:
+        # Keep the same unique name across retries: a lost create reply must not orphan the
+        # accepted sandbox or launch a second one.
+        if self._create_name is None:
+            self._create_name = f'pydantic-ai-{uuid.uuid4().hex}'
+        name = self._create_name
+        try:
+            return await client.get(name, request_timeout=_REQUEST_TIMEOUT)
+        except daytona.DaytonaNotFoundError:
+            pass
         params = daytona.CreateSandboxFromSnapshotParams(
+            name=name,
             snapshot=self._snapshot,
             env_vars=self._env or None,
             auto_stop_interval=self._auto_stop_interval,
@@ -449,6 +460,11 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             try:
                 return await client.create(params, timeout=_LIFECYCLE_TIMEOUT)
             except Exception as error:
+                if isinstance(error, (daytona.DaytonaConnectionError, daytona.DaytonaTimeoutError, TimeoutError)):
+                    try:
+                        return await client.get(name, request_timeout=_REQUEST_TIMEOUT)
+                    except (daytona.DaytonaNotFoundError, daytona.DaytonaConnectionError, daytona.DaytonaTimeoutError):
+                        pass
                 translated = _translated(error, 'Could not start Daytona sandbox')
                 if translated is error:
                     raise

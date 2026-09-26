@@ -299,6 +299,14 @@ class TestErrorsAndFilesystem:
             assert type(exc_info.value) is expected
             assert exc_info.value.__cause__ is sdk_error
 
+    async def test_lost_creation_reply_recovers_the_accepted_sandbox(self, fake_daytona: FakeDaytona) -> None:
+        fake_daytona.lose_create_reply = True
+        backend = DaytonaSandboxBackend()
+        sandbox = await backend.get_client()
+        assert backend.ref == WorkspaceRef(provider='daytona', id=sandbox.id)
+        assert len(fake_daytona.sandboxes) == 1
+        assert fake_daytona.create_params[0].name is not None
+
     async def test_created_sandbox_has_provenance_label(self, fake_daytona: FakeDaytona) -> None:
         await DaytonaSandboxBackend().get_client()
         assert fake_daytona.create_params[0].labels == {'created-by': 'pydantic-ai'}

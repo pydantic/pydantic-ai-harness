@@ -26,10 +26,11 @@ from typing import IO, Protocol
 
 import anyio
 import anyio.lowlevel
-from daytona import DaytonaError, DaytonaNotFoundError, DaytonaValidationError, SandboxState
+from daytona import DaytonaConnectionError, DaytonaError, DaytonaNotFoundError, DaytonaValidationError, SandboxState
 
 
 class CreateParams(Protocol):
+    name: str | None
     snapshot: str | None
     auto_stop_interval: int | None
     auto_archive_interval: int | None
@@ -371,6 +372,7 @@ class FakeSandbox:
     def __init__(self, sandbox_id: str, host_root: Path | None = None) -> None:
         self.client: FakeClient | None = None
         self.id = sandbox_id
+        self.name: str | None = None
         self.started = False
         self.state = SandboxState.STARTED
         self.purged = False
@@ -450,18 +452,21 @@ class FakeClient:
         # returns: it then waits for the sandbox to start.
         sandbox = FakeSandbox(f'sb-{len(self.owner.sandboxes) + 1}', host_root=self.owner.host_root)
         sandbox.client = self
+        sandbox.name = params.name
         self.owner.sandboxes.append(sandbox)
         self.owner.create_params.append(params)
         self.owner.create_started.set()
         if self.owner.create_gate is not None:
             await self.owner.create_gate.wait()
+        if self.owner.lose_create_reply:
+            raise DaytonaConnectionError('create response lost')
         return sandbox
 
     async def get(self, sandbox_id: str, request_timeout: float | None = None) -> FakeSandbox:
         if self.owner.get_gate is not None:
             await self.owner.get_gate.wait()
         for sandbox in self.owner.sandboxes:
-            if sandbox.id == sandbox_id:
+            if sandbox.id == sandbox_id or sandbox.name == sandbox_id:
                 sandbox.client = self
                 return sandbox
         raise DaytonaNotFoundError(f'no sandbox: {sandbox_id}')
@@ -481,6 +486,7 @@ class FakeDaytona:
         self.create_params: list[CreateParams] = []
         self.closed_clients = 0
         self.create_error: Exception | None = None
+        self.lose_create_reply = False
         self.create_gate: asyncio.Event | None = None
         self.create_started = asyncio.Event()
         # Raised by successive `close` calls; closing succeeds once it is exhausted.
