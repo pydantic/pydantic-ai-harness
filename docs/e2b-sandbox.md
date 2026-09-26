@@ -174,6 +174,55 @@ agent = Agent('anthropic:claude-opus-5-5', capabilities=[E2BSandbox(), Coder(), 
 | `working_dir` | Absolute directory commands start in and relative paths resolve against. The default E2B image runs commands as `user` in `/home/user`; prefer relative paths or set `working_dir` for portable code. Created on a new sandbox; on an attached or caller-supplied sandbox it must already exist. |
 | `env` | Environment variables every command gets. Commands default to `LC_ALL=C.UTF-8` (override it with `env`); images without that locale fall back to the C locale. Nothing from your machine's environment reaches the sandbox. |
 
+## Durable execution
+
+Run a Temporal dev server on `localhost:7233` first. The agent and workflow must be defined at module level for activity registration.
+
+```python
+import asyncio
+import uuid
+
+from pydantic_ai import Agent
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, PydanticAIWorkflow, TemporalDurability
+from pydantic_ai_harness.coder import Coder
+from pydantic_ai_harness.e2b_sandbox import E2BSandbox
+from temporalio import workflow
+from temporalio.client import Client
+from temporalio.worker import Worker
+
+agent = Agent(
+    'anthropic:claude-opus-5-5',
+    name='e2b_coder',
+    capabilities=[E2BSandbox(), Coder(), TemporalDurability()],
+)
+
+
+@workflow.defn
+class SandboxWorkflow(PydanticAIWorkflow):
+    __pydantic_ai_agents__ = [agent]
+
+    @workflow.run
+    async def run(self, prompt: str) -> str:
+        return (await agent.run(prompt)).output
+
+
+async def main() -> None:
+    client = await Client.connect('localhost:7233', plugins=[PydanticAIPlugin()])
+    async with Worker(client, task_queue='sandbox', workflows=[SandboxWorkflow]):
+        print(
+            await client.execute_workflow(
+                SandboxWorkflow.run, 'Use the shell tool to run pwd.',
+                id=f'sandbox-{uuid.uuid4()}', task_queue='sandbox',
+            )
+        )
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
+```
+
+Removing a capability while workflows using it are still running changes their replay history. Drain those workflows or use [Temporal worker versioning](https://docs.temporal.io/production-deployment/worker-deployments/worker-versioning) before deploying the change.
+
 ## API reference
 
 ::: pydantic_ai_harness.e2b_sandbox.E2BSandbox
