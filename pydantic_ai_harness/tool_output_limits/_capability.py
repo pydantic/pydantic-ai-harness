@@ -193,6 +193,7 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
     _store: OverflowStore | WorkspaceStore = field(init=False, repr=False)
     _bands: list[Band] = field(init=False, repr=False)
     _per_tool: dict[str, list[Band]] = field(init=False, repr=False)
+    _toolset: AgentToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self._store = self.store if self.store is not None else WorkspaceStore()
@@ -225,7 +226,15 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
     # --- toolset ---
 
     def get_toolset(self) -> AgentToolset[AgentDepsT] | None:
-        """Register the `read_tool_result` tool for reading spilled payloads on demand."""
+        """Register the `read_tool_result` tool for reading spilled payloads on demand.
+
+        Built once, so durable execution sees the toolset it registered.
+        """
+        if self._toolset is None:
+            self._toolset = self._make_toolset()
+        return self._toolset
+
+    def _make_toolset(self) -> AgentToolset[AgentDepsT]:
 
         async def read_tool_result(
             ctx: RunContext[AgentDepsT],
@@ -254,7 +263,9 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
 
             return await _read_slice(read, handle, offset, limit, from_end, pattern)
 
-        return FunctionToolset([Tool(read_tool_result, prepare=self._offer_read_tool)])
+        return FunctionToolset(
+            [Tool(read_tool_result, prepare=self._offer_read_tool)], id=self.id or 'tool_output_limits'
+        )
 
     async def _offer_read_tool(self, ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> ToolDefinition | None:
         """Offer `read_tool_result` unless an active file tool reads this run's spills.

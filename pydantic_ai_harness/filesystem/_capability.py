@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic_ai._utils import replace_no_init  # pyright: ignore[reportPrivateUsage]
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FilteredToolset
@@ -132,8 +131,8 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     protected_patterns: Sequence[str] | None = field(default=None, kw_only=True)
     """Deprecated: renamed to `read_only_patterns`."""
 
-    _run_toolset: FileSystemToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
-    """This run's toolset, which resolves the boundary on its first operation; `None` outside a run."""
+    _toolset: FileSystemToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
+    """The one toolset, built on first use; it resolves the boundary per workspace on its first operation there."""
 
     def __post_init__(self) -> None:
         if self.cwd is not None:
@@ -158,12 +157,6 @@ class FileSystem(AbstractCapability[AgentDepsT]):
             if not isinstance(value, int) or value <= 0:
                 raise ValueError(f'{name} must be a positive integer, got {value!r}')
 
-    async def for_run(self, ctx: RunContext[AgentDepsT]) -> FileSystem[AgentDepsT]:
-        """A per-run copy with its own toolset, so the boundary it resolves stays with this run."""
-        run = replace_no_init(self)
-        run._run_toolset = run._make_toolset()
-        return run
-
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Fail without a workspace, without touching it: the boundary waits for the first file operation."""
         require_workspace(ctx.workspace, 'FileSystem')
@@ -187,28 +180,29 @@ class FileSystem(AbstractCapability[AgentDepsT]):
             or relative.startswith('../')
         ):
             return None
-        toolset = self._run_toolset or self._make_toolset()
-        return 'read_file' if toolset._is_accessible(relative) else None  # pyright: ignore[reportPrivateUsage]
+        return 'read_file' if self._file_system_toolset()._is_accessible(relative) else None  # pyright: ignore[reportPrivateUsage]
 
     def get_toolset(self) -> FileSystemToolset[AgentDepsT] | FilteredToolset[AgentDepsT]:
-        """The filesystem toolset: this run's, once `for_run` has made one."""
-        toolset = self._run_toolset or self._make_toolset()
+        """The filesystem toolset, the same one for every run, so durable execution sees the leaf it registered."""
+        toolset = self._file_system_toolset()
         if self.read_only:
             return FilteredToolset(toolset, lambda ctx, tool: tool.name in READ_ONLY_TOOL_NAMES)
         return toolset
 
-    def _make_toolset(self) -> FileSystemToolset[AgentDepsT]:
-        return FileSystemToolset[AgentDepsT](
-            root_dir=None if self.root_dir is None else Path(self.root_dir),
-            allowed_patterns=self.allowed_patterns,
-            denied_patterns=self.denied_patterns,
-            read_only_patterns=self.read_only_patterns,
-            max_read_lines=self.max_read_lines,
-            max_read_chars=self.max_read_chars,
-            max_list_results=self.max_list_results,
-            max_search_results=self.max_search_results,
-            max_find_results=self.max_find_results,
-            id=self.id or 'file_system',
-            content_hashes=self.content_hashes,
-            tools=self.tools,
-        )
+    def _file_system_toolset(self) -> FileSystemToolset[AgentDepsT]:
+        if self._toolset is None:
+            self._toolset = FileSystemToolset[AgentDepsT](
+                root_dir=None if self.root_dir is None else Path(self.root_dir),
+                allowed_patterns=self.allowed_patterns,
+                denied_patterns=self.denied_patterns,
+                read_only_patterns=self.read_only_patterns,
+                max_read_lines=self.max_read_lines,
+                max_read_chars=self.max_read_chars,
+                max_list_results=self.max_list_results,
+                max_search_results=self.max_search_results,
+                max_find_results=self.max_find_results,
+                id=self.id or 'file_system',
+                content_hashes=self.content_hashes,
+                tools=self.tools,
+            )
+        return self._toolset
