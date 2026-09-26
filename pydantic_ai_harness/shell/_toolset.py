@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
 import posixpath
 import re
@@ -197,17 +198,44 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
 
     async def _cwd_for(self, ctx: RunContext[AgentDepsT]) -> str:
         """The absolute workspace directory the next `run_command` or `start_command` command starts in."""
-        if self._cwd is not None:
+        state: str | None = None
+        recorded: str | None = None
+        if self._persist_cwd and ctx.run_id is not None:
+            state = await self._cwd_state_path(ctx)
             try:
-                entry = await ctx.workspace.stat(self._cwd)
+                recorded = (await ctx.workspace.read_bytes(state)).decode('utf-8')
+            except (FileNotFoundError, UnicodeDecodeError):
+                pass
+        else:
+            recorded = self._cwd
+        if recorded is not None:
+            try:
+                entry = await ctx.workspace.stat(recorded) if posixpath.isabs(recorded) else None
             except (FileNotFoundError, NotADirectoryError):
                 entry = None
             if entry is None or not entry.is_dir:
-                # Remote shells can report a missing cwd as a command exit rather than an OSError.
-                self._cwd = None
+                # Remote shells may report a missing cwd as an exit code; tell the model to retry elsewhere.
+                if state is not None:
+                    await ctx.workspace.remove(state)
+                else:
+                    self._cwd = None
                 raise ModelRetry(f'The previous directory was removed; now in {await ctx.workspace.working_dir()}.')
-            return self._cwd
+            return recorded
         return await ctx.workspace.working_dir()
+
+    async def _cwd_state_path(self, ctx: RunContext[AgentDepsT]) -> str:
+        # A run ID can contain path separators; hash it rather than letting it choose a filename.
+        assert ctx.run_id is not None
+        run_key = hashlib.sha256(ctx.run_id.encode('utf-8')).hexdigest()
+        return posixpath.join(await self._jobs_base(ctx), 'run-state', run_key)
+
+    async def clear_run_cwd(self, ctx: RunContext[AgentDepsT]) -> None:
+        """Remove the run's saved directory once its agent run ends."""
+        if ctx.run_id is not None:
+            try:
+                await ctx.workspace.remove(await self._cwd_state_path(ctx))
+            except FileNotFoundError:
+                pass
 
     async def _jobs_base(self, ctx: RunContext[AgentDepsT]) -> str:
         """The workspace directory holding job and capture files, looked up once per workspace."""
@@ -299,7 +327,14 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             if not posixpath.isabs(recorded):
                 return
             if (await ctx.workspace.stat(recorded)).is_dir:
-                self._cwd = posixpath.normpath(recorded)
+                if ctx.run_id is None:
+                    self._cwd = posixpath.normpath(recorded)
+                else:
+                    state = await self._cwd_state_path(ctx)
+                    await ctx.workspace.make_dir(posixpath.dirname(state))
+                    # Parallel calls in one run each use their starting cwd; last completion wins.
+                    # Workspace backends do not provide a cross-worker compare-and-swap for this state.
+                    await ctx.workspace.write_bytes(state, posixpath.normpath(recorded).encode('utf-8'))
         except (OSError, ValueError):
             return
 
@@ -407,6 +442,11 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             A message containing the unique command ID for later check/stop calls.
         """
         self._check_command(command)
+        # Activity retries share the same tool-call identity, not just the run:
+        # separate starts in one run still need distinct job directories.
+        job_id = None
+        if ctx.run_id is not None and ctx.tool_call_id is not None:
+            job_id = hashlib.sha256(f'{ctx.run_id}:{ctx.tool_call_id}'.encode()).hexdigest()[:32]
         job = await Job.launch(
             ctx.workspace,
             command,
@@ -415,6 +455,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             env=self._resolve_env(),
             combined=False,
             file_limit=self._max_file_bytes,
+            job_id=job_id,
         )
         return f'Started background command: {command!r}\nID: {posixpath.basename(job.directory)}'
 

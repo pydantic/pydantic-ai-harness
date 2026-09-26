@@ -182,10 +182,12 @@ capabilities emit.
 
 ## Durable execution
 
-`Coder` works under DBOS, Temporal and Prefect durable execution. Under Temporal its tools run
-in activities, which cannot reach the run's event stream yet ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)), so
-they emit no `FileSystem` or `Shell` events there and a `FileChangeRequestEvent` listener cannot
-refuse a change.
+`Coder` works under DBOS, Temporal and Prefect durable execution. Under Temporal,
+`FileChangeRequestEvent` listeners can refuse file changes before the durable workspace mutation.
+Read/search events from tools running in activities are not forwarded live to workflow
+listeners; file-change requests and write notifications run in the workflow.
+On replay, the workflow invokes file-change approval listeners again; make external listener effects idempotent
+([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
 
 ## Upgrading
 

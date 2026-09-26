@@ -524,7 +524,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         }
         for name in FILE_SYSTEM_TOOL_NAMES:
             if name in self._tools:
-                self.add_function(registrations[name], name=name)
+                # Approval must run in the workflow before the durable workspace write activity.
+                metadata = {'temporal': False} if name in {'write_file', 'edit_file', 'create_directory'} else None
+                self.add_function(registrations[name], name=name, metadata=metadata)
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
         """Offer only the tools the run's workspace can serve.

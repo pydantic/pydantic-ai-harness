@@ -508,6 +508,82 @@ class TestForRunIsolation:
         assert run2._cwd is None
 
 
+class TestDurableJob:
+    async def test_retry_of_same_tool_call_reuses_background_job(self, shell_dir: Path) -> None:
+        toolset = _shell_toolset(shell_dir)
+        ctx = _ctx(shell_dir)
+        ctx.run_id = 'durable-run'
+        ctx.tool_call_id = 'launch-1'
+        command = 'echo one >> side-effects.txt'
+        first = await toolset.start_command(ctx, command)
+        second = await toolset.start_command(ctx, command)
+        assert first == second
+        command_id = first.split('ID: ')[-1]
+        with anyio.fail_after(5):
+            while 'finished' not in await toolset.check_command(ctx, command_id):
+                await anyio.sleep(0.05)
+        assert (shell_dir / 'side-effects.txt').read_text().splitlines() == ['one']
+
+
+class TestDurableCwd:
+    async def test_run_cwd_rehydrates_from_workspace_without_leaking(
+        self, persist_toolset: ShellToolset[None], shell_dir: Path
+    ) -> None:
+        first = _ctx(shell_dir)
+        first.run_id = 'first'
+        await persist_toolset.run_command(first, 'cd subdir')
+
+        # A different toolset instance stands in for an activity on a new worker.
+        other = await persist_toolset.for_run(_ctx(shell_dir))
+        assert isinstance(other, ShellToolset)
+        assert str(shell_dir / 'subdir') in await other.run_command(first, 'pwd')
+        second = _ctx(shell_dir)
+        second.run_id = 'second'
+        assert str(shell_dir / 'subdir') not in await other.run_command(second, 'pwd')
+
+
+class TestCancelledRunCwd:
+    async def test_worker_interruption_retains_cwd_for_recovery(self, shell_dir: Path) -> None:
+        shell = Shell(persist_cwd=True)
+        ctx = _ctx(shell_dir)
+        ctx.run_id = 'interrupted-run'
+        toolset = shell.get_toolset()
+        await toolset.run_command(ctx, 'cd subdir')
+
+        async def interrupted() -> NoReturn:
+            await anyio.sleep_forever()
+            raise AssertionError('unreachable')
+
+        async def run() -> None:
+            await shell.wrap_run(ctx, handler=interrupted)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run)
+            await anyio.sleep(0)
+            tg.cancel_scope.cancel()
+        fresh = await toolset.for_run(ctx)
+        assert isinstance(fresh, ShellToolset)
+        assert str(shell_dir / 'subdir') in await fresh.run_command(ctx, 'pwd')
+
+
+class TestSameRunConcurrentCwd:
+    async def test_last_completed_command_wins(self, persist_toolset: ShellToolset[None], shell_dir: Path) -> None:
+        (shell_dir / 'other').mkdir()
+        ctx = _ctx(shell_dir)
+        ctx.run_id = 'parallel-run'
+        # Both commands start at the root; the slower completion publishes its cwd last.
+        results: list[str] = []
+
+        async def run(command: str) -> None:
+            results.append(await persist_toolset.run_command(ctx, command))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run, 'touch started-a; while [ ! -f started-b ]; do sleep 0.01; done; cd subdir; sleep 0.2')
+            tg.start_soon(run, 'touch started-b; while [ ! -f started-a ]; do sleep 0.01; done; cd other')
+        assert len(results) == 2 and all('[exit code:' not in result for result in results)
+        assert str(shell_dir / 'subdir') in await persist_toolset.run_command(ctx, 'pwd')
+
+
 class TestPersistCwdHardening:
     """B4: regression tests for the old stdout-sentinel footguns -- a command's
     output spoofing the cwd, and `;` silently disabling tracking."""

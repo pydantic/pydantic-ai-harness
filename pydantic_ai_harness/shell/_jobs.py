@@ -61,7 +61,11 @@ a trap with an action is reset in a child. Stopping the group therefore still re
 command ended (`143` for `SIGTERM`); only a `SIGKILL` escalation leaves `exit_code` null.
 """
 
-_LAUNCHER = """(umask 077 && mkdir -p "$dir") || exit 125
+_LAUNCHER = """if [ "$exclusive" = 1 ]; then
+  (umask 077 && mkdir "$dir") || exit 126
+else
+  (umask 077 && mkdir -p "$dir") || exit 125
+fi
 if [ "$mode" = combined ]; then : > "$dir/output.log"; else : > "$dir/stdout.log"; : > "$dir/stderr.log"; fi
 if command -v setsid > /dev/null 2>&1; then
   setsid sh -c "$wrapper" sh "$dir" "$mode" "$cmd" "$limit" < /dev/null > /dev/null 2>&1 &
@@ -121,13 +125,15 @@ class Job:
         env: Mapping[str, str] | None,
         combined: bool,
         file_limit: int | None = None,
+        job_id: str | None = None,
     ) -> Job:
-        directory = posixpath.join(base, uuid.uuid4().hex)
+        directory = posixpath.join(base, job_id or uuid.uuid4().hex)
         mode = 'combined' if combined else 'separate'
         assignments = ' '.join(
             f'{name}={shlex.quote(value)}'
             for name, value in (
                 ('dir', directory),
+                ('exclusive', '1' if job_id is not None else '0'),
                 ('mode', mode),
                 ('cmd', command),
                 ('limit', '' if file_limit is None else str(file_limit)),
@@ -137,6 +143,12 @@ class Job:
         result = await workspace.run(
             f'{assignments}\n{_LAUNCHER}', shell=True, cwd=cwd, env=env, timeout=CONTROL_TIMEOUT
         )
+        if job_id is not None and result.exit_code == 126:
+            # An existing claim can be an in-flight launch or a lost reply. Never
+            # spawn a second process in either case; a later retry can attach.
+            if existing := await cls.attach(workspace, directory, combined=combined):
+                return existing
+            raise ModelRetry('Background command launch is pending; retry with the same tool call ID.')
         fields = result.stdout.split()
         if result.exit_code != 0 or len(fields) != 2 or not fields[0].isdigit():
             detail = result.stderr.strip() or f'launcher output {result.stdout.strip()!r}'
