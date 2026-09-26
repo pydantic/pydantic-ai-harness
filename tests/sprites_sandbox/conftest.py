@@ -60,7 +60,7 @@ if _HAS_SPRITES:  # pragma: no branch - the fixture requires the SDK-backed fake
         async def create(client: AsyncSpritesClient, name: str, *, runtime: str | None = None) -> AsyncSprite:
             # Log before the request: even a lost response may have created a billable Sprite.
             with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
-                refs.write(f'sprites-adopt sprites {name}\n')
+                refs.write(f'anyio-sprites sprites {name}\n')
             return await original(client, name, runtime=runtime)
 
         monkeypatch.setattr(AsyncSpritesClient, 'create_sprite', create)

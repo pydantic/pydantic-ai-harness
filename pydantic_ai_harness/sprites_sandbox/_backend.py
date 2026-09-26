@@ -50,6 +50,7 @@ lifecycle or command transport behavior. The integration uses the SDK's native a
 
 from __future__ import annotations
 
+# Native task cancellation can interrupt an AnyIO shield; the completion task below must stay independent.
 import asyncio
 import logging
 import math
@@ -134,11 +135,12 @@ async def _run_to_completion(call: Callable[[], Awaitable[_T]]) -> _T:
     caller's cancellation is re-raised only once `call` has finished, and nothing outlives this
     await. `call` must be bounded; the caller waits for it.
     """
+    # AnyIO has no detached task: keep this native task alive and referenced until its result is recorded.
     task = asyncio.ensure_future(call())
+    # Preserve the native cancellation to re-raise after the provider call finishes.
     cancelled: asyncio.CancelledError | None = None
-    # The anyio shield holds off cancel scopes; a native `Task.cancel()` (which anyio also re-sends to
-    # a task awaited from a cancelled scope) still interrupts the wait, so it is caught and the wait
-    # resumed. Waiting on the task never cancels it.
+    # The AnyIO shield holds off cancel scopes, but native `Task.cancel()` can still interrupt the
+    # caller. `asyncio.wait` does not propagate that cancellation to the independent provider task.
     with anyio.CancelScope(shield=True):
         while not task.done():
             try:
@@ -146,7 +148,7 @@ async def _run_to_completion(call: Callable[[], Awaitable[_T]]) -> _T:
             except asyncio.CancelledError as error:
                 cancelled = error
     if cancelled is not None:
-        task.exception()  # Retrieved, so asyncio does not report it: the cancellation supersedes it.
+        task.exception()  # Retrieve a provider failure before the native cancellation takes precedence.
         raise cancelled
     return task.result()
 
