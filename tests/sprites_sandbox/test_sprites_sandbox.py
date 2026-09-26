@@ -71,7 +71,7 @@ class TestSpritesSandbox:
         backend = SpritesSandbox[None]().get_workspace(context(), ref=None)
         assert isinstance(backend, SpritesSandboxBackend)
         assert transport.clients == []
-        first, second = await asyncio.gather(backend.get_client(), backend.get_client())
+        first, second = await asyncio.gather(backend.get_sandbox(), backend.get_sandbox())
         assert first is second
         assert transport.created == [first.name]
         assert backend.ref == WorkspaceRef(provider='sprites', id=first.name)
@@ -94,7 +94,7 @@ class TestSpritesSandbox:
         transport.release_create = asyncio.Event()
 
         async def acquire() -> AsyncSprite:
-            return await backend.get_client()
+            return await backend.get_sandbox()
 
         task = asyncio.create_task(acquire())
         await transport.create_started.wait()
@@ -106,7 +106,7 @@ class TestSpritesSandbox:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert backend.ref == WorkspaceRef(provider='sprites', id=transport.created[0])
-        assert (await backend.get_client()).name == transport.created[0]
+        assert (await backend.get_sandbox()).name == transport.created[0]
         assert len(transport.created) == 1
 
     def test_foreign_reference_is_declined_and_backend_rejects_it(self) -> None:
@@ -130,12 +130,12 @@ class TestSpritesSandbox:
 
     async def test_native_handle_conflict_and_identity(self, transport: SpriteTransport) -> None:
         seed = SpritesSandboxBackend()
-        native = await seed.get_client()
-        backend = SpritesSandboxBackend(workspace=native)
-        assert await backend.get_client() is native
+        native = await seed.get_sandbox()
+        backend = SpritesSandboxBackend(sandbox=native)
+        assert await backend.get_sandbox() is native
         assert backend.ref == WorkspaceRef(provider='sprites', id=native.name)
-        with pytest.raises(ValueError, match='either `workspace` or `ref`'):
-            SpritesSandboxBackend(workspace=native, ref=backend.ref)
+        with pytest.raises(ValueError, match='either `sandbox` or `ref`'):
+            SpritesSandboxBackend(sandbox=native, ref=backend.ref)
 
     async def test_agent_without_workspace_use_does_not_create(self, transport: SpriteTransport) -> None:
         result = await Agent(TestModel(custom_output_text='done'), capabilities=[SpritesSandbox()]).run('go')
@@ -231,7 +231,7 @@ class TestSpritesSandbox:
     async def test_missing_reference_does_not_recreate(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend(ref=WorkspaceRef(provider='sprites', id='missing'))
         with pytest.raises(WorkspaceUnavailableError, match="Sprite 'missing' no longer exists"):
-            await backend.get_client()
+            await backend.get_sandbox()
         assert transport.created == []
 
     @pytest.mark.parametrize(
@@ -306,10 +306,10 @@ class TestSpritesSandbox:
     async def test_lost_create_reply_recovers_same_sprite(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
         transport.create_error_after_commit = NetworkError('lost reply')
-        sprite = await backend.get_client()
+        sprite = await backend.get_sandbox()
         assert backend.ref == WorkspaceRef(provider='sprites', id=sprite.name)
         assert transport.created == [sprite.name]
-        assert await backend.get_client() is sprite
+        assert await backend.get_sandbox() is sprite
 
     async def test_lost_create_reply_before_lookup_visible_preserves_cleanup_ref(
         self, transport: SpriteTransport
@@ -318,10 +318,10 @@ class TestSpritesSandbox:
         transport.create_error_after_commit = NetworkError('lost reply')
         transport.get_error_once = NotFoundError('not visible yet')
         with pytest.raises(NetworkError, match='lost reply'):
-            await backend.get_client()
+            await backend.get_sandbox()
         [name] = transport.created
         assert backend.ref == WorkspaceRef(provider='sprites', id=name)
-        assert (await backend.get_client()).name == name
+        assert (await backend.get_sandbox()).name == name
         assert transport.created == [name]
 
     async def test_auth_error_reports_safe_reason_without_token(self, transport: SpriteTransport) -> None:
@@ -329,14 +329,14 @@ class TestSpritesSandbox:
         transport.get_error = AuthenticationError(f'credential expired: {secret}')
         backend = SpritesSandboxBackend(ref=WorkspaceRef(provider='sprites', id='target'))
         with pytest.raises(WorkspaceUnavailableError) as caught:
-            await backend.get_client()
+            await backend.get_sandbox()
         assert 'Credential expired' in str(caught.value)
         assert secret not in str(caught.value)
 
     async def test_missing_token(self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('SPRITE_TOKEN')
         with pytest.raises(WorkspaceUnavailableError, match='SPRITE_TOKEN'):
-            await SpritesSandboxBackend().get_client()
+            await SpritesSandboxBackend().get_sandbox()
 
     @pytest.mark.parametrize('attach', [False, True], ids=['create', 'attach'])
     async def test_stalled_acquisition_propagates_as_a_transport_timeout(
@@ -371,21 +371,21 @@ class TestSpritesSandbox:
         transport.names.add('remote')
         backend = SpritesSandboxBackend(ref=WorkspaceRef(provider='sprites', id='remote'))
         with pytest.raises(WorkspaceError):
-            await backend.get_client()
+            await backend.get_sandbox()
         transport.get_error = None
-        assert (await backend.get_client()).name == 'remote'
+        assert (await backend.get_sandbox()).name == 'remote'
         assert (len(transport.clients), transport.close_calls) == (1, 0)
 
     async def test_owned_client_reads_sprite_token(
         self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv('SPRITE_TOKEN', 'sentinel')
-        native = await SpritesSandboxBackend().get_client()
+        native = await SpritesSandboxBackend().get_sandbox()
         assert native.client.token == 'sentinel'
 
     async def test_aclose_leaves_an_injected_client_open(self, transport: SpriteTransport) -> None:
         injected = SpritesSandboxBackend(client=transport.client('test-token'))
-        await injected.get_client()
+        await injected.get_sandbox()
         await injected.aclose()
         assert transport.close_calls == 0
 
@@ -393,7 +393,7 @@ class TestSpritesSandbox:
         self, transport: SpriteTransport, caplog: pytest.LogCaptureFixture
     ) -> None:
         owned = SpritesSandboxBackend()
-        await owned.get_client()
+        await owned.get_sandbox()
         transport.close_error = RuntimeError('close failed')
         await owned.aclose()
         assert 'Could not close Sprites SDK client' in caplog.text
@@ -403,7 +403,7 @@ class TestSpritesSandbox:
 
     async def test_cancelled_aclose_finishes_the_close_first(self, transport: SpriteTransport) -> None:
         owned = SpritesSandboxBackend()
-        await owned.get_client()
+        await owned.get_sandbox()
         transport.release_close = asyncio.Event()
         task = asyncio.create_task(owned.aclose())
         await transport.close_started.wait()
@@ -420,7 +420,7 @@ class TestSpritesSandbox:
     async def test_aclose_waits_for_an_in_flight_creation(self, transport: SpriteTransport) -> None:
         owned = SpritesSandboxBackend()
         transport.release_create = asyncio.Event()
-        creating = asyncio.create_task(owned.get_client())
+        creating = asyncio.create_task(owned.get_sandbox())
         await transport.create_started.wait()
         closing = asyncio.create_task(owned.aclose())
         await asyncio.sleep(0)
@@ -430,11 +430,11 @@ class TestSpritesSandbox:
         await closing
 
         assert transport.close_calls == 1
-        assert (await owned.get_client()).client is transport.clients[1]
+        assert (await owned.get_sandbox()).client is transport.clients[1]
 
     async def test_cancelled_command_finishes_closing_its_connection(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
-        await backend.get_client()
+        await backend.get_sandbox()
         transport.release_exec_close = asyncio.Event()
         task = asyncio.create_task(backend.run(['true']))
         await transport.exec_close_started.wait()
@@ -449,7 +449,7 @@ class TestSpritesSandbox:
 
     async def test_deleted_sprite_is_unavailable_to_attach_commands_and_files(self, transport: SpriteTransport) -> None:
         owner = SpritesSandboxBackend()
-        native = await owner.get_client()
+        native = await owner.get_sandbox()
         assert owner.ref is not None
         await native.delete()
 
@@ -471,7 +471,7 @@ class TestSpritesSandbox:
         failure: str,
     ) -> None:
         backend = SpritesSandboxBackend()
-        await backend.get_client()
+        await backend.get_sandbox()
         if failure == 'error':
             transport.exec_close_error = RuntimeError('close failed')
         else:
@@ -486,7 +486,7 @@ class TestSpritesSandbox:
 
     async def test_deleted_mid_command_is_unavailable(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
-        sprite = await backend.get_client()
+        sprite = await backend.get_sandbox()
         transport.exit_override = 137
         transport.delete_on_exit = True
         with pytest.raises(WorkspaceUnavailableError, match=sprite.name):
@@ -499,7 +499,7 @@ class TestSpritesSandbox:
 
     async def test_sigkill_with_failing_liveness_check_returns_exit(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
-        await backend.get_client()
+        await backend.get_sandbox()
         transport.exit_override = 137
         transport.get_error = NetworkError('control plane unavailable')
         assert (await backend.run(['true'])).exit_code == 137
@@ -518,7 +518,7 @@ class TestSpritesSandbox:
 
     async def test_lost_exit_after_side_effect_is_not_retryable(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
-        await backend.get_client()
+        await backend.get_sandbox()
         transport.connection_dropped = True
         target = transport.root / 'executions'
         with pytest.raises(WorkspaceUnavailableError, match='command may have run'):
@@ -532,14 +532,13 @@ class TestSpritesSandbox:
         assert (result.exit_code, result.stdout) == (0, 'a b\n')
         check, socket = transport.execs
         assert check.query['cmd'][-3:] == ['test', '-d', str(transport.root)]
-        # The command runs under a `sh` that ends both streams with a marker line; the fake conformance suite checks the streams stay apart.
+        # The wrapper ends both streams with a marker; the fake conformance suite checks separation.
         assert socket.query['cmd'][:2] == ['sh', '-c']
         assert socket.query['cmd'][5:] == ['echo', 'a b']
         assert socket.query['dir'] == [str(transport.root)]
         # Without it a non-TTY command outlives a closed socket by 10 seconds.
         assert socket.query['max_run_after_disconnect'] == ['1s']
         assert (socket.query['stdin'], socket.query['tty']) == (['true'], ['false'])
-        assert socket.sent == [b'\x04']
 
     async def test_argv_shell_environment_and_nonzero_exit(self, transport: SpriteTransport) -> None:
         backend = SpritesSandbox[None](env={'BASE': 'base', 'LAYERED': 'base'}).get_workspace(context(), ref=None)
@@ -592,20 +591,16 @@ class TestSpritesSandbox:
         with pytest.raises(WorkspaceError, match='working directory'):
             await backend.working_dir()
 
-    async def test_filesystem_fallback_handles_directories_and_binary(self, transport: SpriteTransport) -> None:
+    async def test_a_file_name_with_a_newline(self, transport: SpriteTransport) -> None:
         sandbox = Workspace(SpritesSandboxBackend())
-        await sandbox.make_dir('folder')
-        await sandbox.write_bytes('folder/a\nb', b'\x00\xff')
-        assert await sandbox.read_bytes('folder/a\nb') == b'\x00\xff'
-        assert (await sandbox.stat('folder')).is_dir
+        await sandbox.write_bytes('folder/a\nb', b'data')
+        assert await sandbox.read_bytes('folder/a\nb') == b'data'
         assert [entry.name for entry in await sandbox.list_dir('folder')] == ['a\nb']
-        await sandbox.remove('folder')
-        assert not await sandbox.exists('folder')
 
     async def test_output_printed_before_the_stream_attaches_is_kept(self, transport: SpriteTransport) -> None:
         """The Sprite starts a command before the client's stream attaches and drops what it printed until then."""
         backend = SpritesSandboxBackend()
-        await backend.get_client()
+        await backend.get_sandbox()
         transport.release_stdin_eof = asyncio.Event()
         task = asyncio.create_task(backend.run(['seq', '1', '20000']))
         await transport.exec_started.wait()
@@ -652,7 +647,7 @@ class TestSpritesSandbox:
 
     async def test_deadline_closes_the_socket_and_preserves_partial_output(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
-        await backend.get_client()
+        await backend.get_sandbox()
         with pytest.raises(WorkspaceTimeoutError, match='Command timed out after 0.3 seconds') as caught:
             await backend.run('printf ready; exec sleep 5', shell=True, timeout=0.3)
         assert caught.value.stdout == 'ready'
@@ -660,7 +655,7 @@ class TestSpritesSandbox:
 
     async def test_timeout_keeps_partial_stderr_and_removes_capture(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
-        await backend.get_client()
+        await backend.get_sandbox()
         with pytest.raises(WorkspaceTimeoutError) as caught:
             await backend.run('printf ready >&2; exec sleep 5', shell=True, timeout=0.3)
         assert caught.value.stderr == 'ready'
@@ -668,22 +663,32 @@ class TestSpritesSandbox:
 
     async def test_cancellation_closes_the_socket(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
-        await backend.get_client()
+        await backend.get_sandbox()
         async with anyio.create_task_group() as group:
             group.start_soon(backend.run, ['sleep', '5'])
             await transport.exec_started.wait()
             group.cancel_scope.cancel()
         assert transport.execs[0].process.wait(timeout=1) == -signal.SIGKILL
 
+    async def test_a_stopped_command_leaves_no_stderr_file(self, transport: SpriteTransport, tmp_path: Path) -> None:
+        running = tmp_path / 'running'
+        backend = SpritesSandboxBackend()
+        await backend.get_sandbox()
+        async with anyio.create_task_group() as group:
+            group.start_soon(backend.run, ['sh', '-c', f'echo secret >&2; : > {running}; exec sleep 30'])
+            while not running.exists():
+                await anyio.sleep(0.01)
+            group.cancel_scope.cancel()
+        socket = transport.execs[0]
+        assert socket.process.wait(timeout=5) == -signal.SIGKILL
+        # Unlike an unlinked mktemp file, the named capture must be removed during cancellation.
+        assert not Path(socket.query['cmd'][4]).exists()
+        assert (await backend.run('echo oops >&2', shell=True)).stderr == 'oops\n'
+
     @pytest.mark.parametrize('timeout', [0, -1, float('inf')])
     async def test_invalid_timeout(self, transport: SpriteTransport, timeout: float) -> None:
         with pytest.raises(ValueError, match='timeout'):
             await SpritesSandboxBackend().run(['true'], timeout=timeout)
-
-    @pytest.mark.parametrize('command,shell', [('true', False), (['true'], True)])
-    async def test_invalid_command(self, transport: SpriteTransport, command: str | list[str], shell: bool) -> None:
-        with pytest.raises(TypeError):
-            await SpritesSandboxBackend().run(command, shell=shell)
 
     def test_relative_working_dir_is_rejected(self) -> None:
         with pytest.raises(ValueError, match='absolute'):

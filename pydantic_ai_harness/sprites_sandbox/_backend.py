@@ -225,7 +225,8 @@ async def _check_sigkill_sprite(sprite: AsyncSprite) -> None:
 class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     """A Fly.io Sprite behind the Pydantic AI `WorkspaceBackend` protocol.
 
-    Construction does no I/O. The typed `sprites.AsyncSprite` is available through `get_client()`.
+    Pass `sandbox=` to wrap a `sprites.AsyncSprite` you already have, or `ref=` to reattach to one.
+    Construction does no I/O. The typed `sprites.AsyncSprite` is available through `get_sandbox()`.
     Without `client=`, the backend creates an `AsyncSpritesClient` from `SPRITE_TOKEN` on first use
     and closes it in `aclose()`.
     The backend does not delete the Sprite; that is the application's job, through the native
@@ -237,7 +238,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     def __init__(
         self,
         *,
-        workspace: AsyncSprite | None = None,
+        sandbox: AsyncSprite | None = None,
         client: AsyncSpritesClient | None = None,
         ref: WorkspaceRef | None = None,
         runtime: str | None = None,
@@ -246,10 +247,10 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     ) -> None:
         if ref is not None and ref.provider != 'sprites':
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'sprites'")
-        if workspace is not None and ref is not None:
-            raise ValueError('pass either `workspace` or `ref`, not both')
-        self._sandbox = workspace
-        self._ref = ref if workspace is None else WorkspaceRef(provider='sprites', id=workspace.name)
+        if sandbox is not None and ref is not None:
+            raise ValueError('pass either `sandbox` or `ref`, not both')
+        self._sandbox = sandbox
+        self._ref = ref if sandbox is None else WorkspaceRef(provider='sprites', id=sandbox.name)
         self._new_sprite_name = f'pydantic-ai-{uuid.uuid4().hex}'
         self._uncertain_create = False
         self._runtime = runtime
@@ -265,21 +266,19 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     def ref(self) -> WorkspaceRef | None:
         return self._ref
 
-    async def get_client(self) -> AsyncSprite:
+    async def get_sandbox(self) -> AsyncSprite:
         """Return the typed `sprites.AsyncSprite`, creating or attaching to it on first use.
 
         This is the Sprite handle, not the `AsyncSpritesClient` passed as `client=`. A handle
         obtained before `aclose()` belongs to the closed client; call this again for a fresh one.
 
-        The only place `_client` and `_sandbox` are read, so nothing can reach an
-        unhydrated one: both stay optional and every other method comes through here.
         The lock serializes concurrent first uses -- two callers each creating a Sprite
         would leave the loser billed and unreferenced. Attaching by `ref` to a Sprite that
         no longer exists raises `WorkspaceUnavailableError`; it does not create a replacement.
         """
         async with self._lock:
-            if (workspace := self._sandbox) is not None:
-                return workspace
+            if (sandbox := self._sandbox) is not None:
+                return sandbox
 
             client = self._client
             if client is None:
@@ -296,7 +295,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                 with anyio.move_on_after(_ACQUIRE_TIMEOUT):
                     if ref is not None:
                         try:
-                            workspace = await client.get_sprite(ref.id)
+                            sandbox = await client.get_sprite(ref.id)
                         except NotFoundError as error:
                             if self._uncertain_create:
                                 # A 404 during eventual visibility is not proof that creation failed.
@@ -304,7 +303,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                             raise
                     else:
                         try:
-                            workspace = await client.create_sprite(self._new_sprite_name, runtime=self._runtime)
+                            sandbox = await client.create_sprite(self._new_sprite_name, runtime=self._runtime)
                         except (NetworkError, TimeoutError, SpriteError) as error:
                             if isinstance(error, SpriteError) and not (
                                 isinstance(error, NetworkError) or '(status 409)' in str(error)
@@ -315,14 +314,14 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                             self._ref = WorkspaceRef(provider='sprites', id=self._new_sprite_name)
                             self._uncertain_create = True
                             try:
-                                workspace = await client.get_sprite(self._new_sprite_name)
+                                sandbox = await client.get_sprite(self._new_sprite_name)
                             except (NotFoundError, NetworkError, TimeoutError):
                                 raise error from None
                     # Recorded as soon as the SDK returns, so a cancelled caller still leaves it named.
-                    self._sandbox = workspace
-                    self._ref = WorkspaceRef(provider='sprites', id=workspace.name)
+                    self._sandbox = sandbox
+                    self._ref = WorkspaceRef(provider='sprites', id=sandbox.name)
                     self._uncertain_create = False
-                    return workspace
+                    return sandbox
                 # Only our own bound lands here; an SDK `TimeoutError` propagates as raised. A stalled
                 # control plane is a transport failure, which propagates for a retry;
                 # `WorkspaceTimeoutError` is reserved for command deadlines.
@@ -349,7 +348,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         """Close the `AsyncSpritesClient` this backend created, if it created one.
 
         The Sprite is untouched: the next operation opens a fresh client and reattaches by `ref`.
-        A caller-supplied `client=` or `workspace=` handle is never closed. `SpritesSandbox`
+        A caller-supplied `client=` or `sandbox=` handle is never closed. `SpritesSandbox`
         calls this for the backend it supplied when each run ends. A close that fails or times out
         is logged, not raised, and the client is kept so the next `aclose()` tries again.
         """
@@ -378,9 +377,9 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.removesuffix('\n')
             if result.exit_code != 0 or not posixpath.isabs(printed):
-                sprite = await self.get_client()
+                sandbox = await self.get_sandbox()
                 raise WorkspaceError(
-                    f'Could not determine the working directory of Sprite {sprite.name!r}: '
+                    f'Could not determine the working directory of Sprite {sandbox.name!r}: '
                     f'`pwd -P` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
                 )
             self._resolved_working_dir = printed
@@ -407,13 +406,13 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         args = _ending_with(marker, capture, _with_env(command_argv(command, shell), {**self._env, **(env or {})}))
 
         # Acquiring the Sprite has its own bound; the deadline is the command's alone.
-        sprite = await self.get_client()
+        sandbox = await self.get_sandbox()
         if directory is not None and _check_cwd:
             # Sprites exec silently ignores a nonexistent `dir`; reject it before running user work.
             check = await self.run(['test', '-d', directory], timeout=_INTERNAL_EXEC_TIMEOUT, _check_cwd=False)
             if check.exit_code != 0:
                 raise FileNotFoundError(directory)
-        exec_command = _ExecCommand(sprite.command(*args, cwd=directory))
+        exec_command = _ExecCommand(sandbox.command(*args, cwd=directory))
         deadline = anyio.CancelScope(deadline=math.inf if timeout is None else anyio.current_time() + timeout)
         code = -1
         interrupted = False
@@ -430,7 +429,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                             'Sprites exec connection failed; command may have run'
                         ) from error
                     await anyio.sleep(0.1)
-                    exec_command = _ExecCommand(sprite.command(*args, cwd=directory))
+                    exec_command = _ExecCommand(sandbox.command(*args, cwd=directory))
                     try:
                         await exec_command.start()
                     except (TimeoutError, InvalidMessage, InvalidHandshake) as retry_error:
@@ -458,13 +457,13 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                 await _close_command(exec_command)
                 if _capture_stderr:
                     await self._collect_stderr(capture)
-            if isinstance(error, Exception) and (mapped := _map_error(error, sprite.name)) is not None:
+            if isinstance(error, Exception) and (mapped := _map_error(error, sandbox.name)) is not None:
                 raise mapped from error
             raise
         await _close_command(exec_command)
         stdout, stderr = _split_output(exec_command.get_stdout(), exec_command.get_stderr(), marker)
         if code == 137:
-            await _check_sigkill_sprite(sprite)
+            await _check_sigkill_sprite(sandbox)
         return CommandResult(exit_code=code, stdout=stdout, stderr=stderr)
 
     async def _collect_stderr(self, path: str) -> str:
@@ -489,8 +488,8 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         # Not through a command: the exec API sends argv in the URL, which caps a command at about 40 KB.
-        sprite = await self.get_client()
-        target = sprite.filesystem() / path
+        sandbox = await self.get_sandbox()
+        target = sandbox.filesystem() / path
         try:
             mode = 0o644
             try:
@@ -546,8 +545,9 @@ def _ending_with(marker: str, capture: str, args: list[str]) -> list[str]:
     The live Sprite's stderr stream is not dependable: the same command's stderr arrived on the stderr
     stream in one run and on the stdout stream in the next, whole lines included (2026-09-25), while
     stdout arrived intact every time. So the command's stderr goes to a temporary file in the Sprite,
-    printed on stdout after the marker line, and `_split_output` separates the two again. The exit
-    status is the command's.
+    printed on stdout after the marker line, and `_split_output` separates the two again. The file is
+    unlinked as soon as it is open, so a command stopped by a timeout or a cancellation leaves no
+    stderr behind for a later command to read. The exit status is the command's.
     """
     script = (
         'cat >/dev/null; err=$1; shift; : >"$err" || exit 125; '
@@ -560,11 +560,11 @@ def _split_output(stdout: bytes, stderr: bytes, marker: str) -> tuple[str, str]:
     """The command's stdout and stderr from what `_ending_with` printed.
 
     Without the marker line (the command was stopped before it finished), stdout is all the output
-    there is, and the command's stderr stayed in the Sprite. Anything on the stderr stream itself came
+    there is, and the command's stderr is lost with its unlinked file. Anything on the stderr stream itself came
     from the wrapper and is kept.
     """
-    head, found, tail = _decode(stdout).partition(f'\n{marker}\n')
-    return head, (tail + _decode(stderr)) if found else _decode(stderr)
+    head, _, tail = _decode(stdout).partition(f'\n{marker}\n')
+    return head, tail + _decode(stderr)
 
 
 def _with_env(args: list[str], env: dict[str, str]) -> list[str]:

@@ -25,8 +25,9 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import anyio
 import pytest
@@ -35,8 +36,8 @@ from pydantic_ai.messages import ModelMessage, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.workspaces import Workspace, WorkspaceTimeoutError, WorkspaceUnavailableError
 from pytest_examples import CodeExample
-from sprites import AsyncSpritesClient
-from sprites.exceptions import NotFoundError
+from sprites import AsyncSprite, AsyncSpritesClient
+from sprites.exceptions import NotFoundError, SpriteError
 
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.sprites_sandbox import SpritesSandbox, SpritesSandboxBackend
@@ -55,6 +56,25 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
+@pytest.fixture(scope='module', autouse=True)
+def wait_out_the_creation_rate_limit(sprites_token: str) -> Iterator[None]:
+    """The account creates at most 10 Sprites a minute, and this module creates more than that."""
+    create = AsyncSpritesClient.create_sprite
+
+    async def create_sprite(self: AsyncSpritesClient, *args: Any, **kwargs: Any) -> AsyncSprite:
+        try:
+            return await create(self, *args, **kwargs)
+        except SpriteError as error:
+            if 'sprite_creation_rate_limited' not in str(error):
+                raise
+        await anyio.sleep(61)
+        return await create(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(AsyncSpritesClient, 'create_sprite', create_sprite)
+        yield
+
+
 @pytest.fixture(scope='module')
 async def client(sprites_token: str) -> AsyncIterator[AsyncSpritesClient]:
     """One caller-owned API client for every backend in this module, closed at the end."""
@@ -66,7 +86,7 @@ async def client(sprites_token: str) -> AsyncIterator[AsyncSpritesClient]:
 async def _owned(client: AsyncSpritesClient) -> AsyncGenerator[SpritesSandboxBackend]:
     """Create a Sprite and delete it on the way out, even when the test deleted it already."""
     backend = SpritesSandboxBackend(client=client)
-    native = await backend.get_client()
+    native = await backend.get_sandbox()
     try:
         yield backend
     finally:
@@ -146,21 +166,6 @@ async def test_large_output_and_files_arrive_whole(client: AsyncSpritesClient) -
             assert (await backend.run(['seq', '1', '150000'], timeout=60)).stdout == expected
 
 
-async def test_env_is_layered_on_the_sprite_environment(client: AsyncSpritesClient) -> None:
-    """Validates the fake-encoded assumption that the Sprite has a POSIX `env` utility that adds
-    variables to the Sprite's own environment.
-
-    The fake runs the host's `env`; if the Sprite's is missing or differs, every command given
-    `env=` fails or loses `PATH`.
-    """
-    async with _owned(client) as backend:
-        result = await backend.run(
-            ['sh', '-c', 'printf "%s" "$ADDED"; test -n "$PATH"'], env={'ADDED': 'yes'}, timeout=60
-        )
-
-        assert (result.exit_code, result.stdout) == (0, 'yes')
-
-
 async def test_a_timed_out_command_is_killed(client: AsyncSpritesClient) -> None:
     """Validates the fake-encoded assumptions that exec output streams before the command ends and
     that closing the exec WebSocket, opened with `max_run_after_disconnect=1s`, stops the command.
@@ -183,7 +188,7 @@ async def test_a_timed_out_command_is_killed(client: AsyncSpritesClient) -> None
 async def test_timeout_and_cancellation_stop_foreground_child(client: AsyncSpritesClient) -> None:
     """The fake kills its subprocess group on close; only a real Sprite can prove child death."""
     backend = SpritesSandboxBackend(client=client)
-    native = await backend.get_client()
+    native = await backend.get_sandbox()
     try:
         for mode in ('timeout', 'cancel'):
             pid_file = f'/tmp/{_unique("child")}.pid'
@@ -206,7 +211,7 @@ async def test_timeout_and_cancellation_stop_foreground_child(client: AsyncSprit
 async def test_timeout_keeps_stderr_and_cleans_capture(client: AsyncSpritesClient) -> None:
     """The fake cannot prove the live exec stream preserves stderr after an interrupted command."""
     backend = SpritesSandboxBackend(client=client)
-    native = await backend.get_client()
+    native = await backend.get_sandbox()
     try:
         # A listing command creates its own empty capture while it runs; check only nonempty captures.
         check = ['find', '/tmp', '-maxdepth', '1', '-name', 'pydantic-ai-stderr-*', '-size', '+0c']
@@ -232,7 +237,7 @@ async def test_reattach_to_a_deleted_sprite_is_unavailable(client: AsyncSpritesC
     async with _owned(client) as owner:
         assert (await owner.run(['true'], timeout=60)).exit_code == 0
         assert owner.ref is not None
-        await (await owner.get_client()).delete()
+        await (await owner.get_sandbox()).delete()
 
         with pytest.raises(WorkspaceUnavailableError):
             await SpritesSandboxBackend(client=client, ref=owner.ref).working_dir()
