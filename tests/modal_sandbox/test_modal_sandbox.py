@@ -351,7 +351,7 @@ async def test_agent_uses_modal_sandbox(fake_modal: FakeModal) -> None:
 
     result = await agent.run('go')
     assert 'run_command' in result.output
-    assert fake_modal.sandboxes[0].exec_calls[0].argv == ['printf', 'hello']
+    assert fake_modal.sandboxes[0].exec_calls[0].argv[-2:] == ['printf', 'hello']
 
 
 @pytest.mark.parametrize(

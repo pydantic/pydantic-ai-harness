@@ -153,30 +153,39 @@ def _unwrap_filesystem_error(error: Exception) -> Exception:
 _MAX_SYMLINK_HOPS = 40
 
 
-async def _file_entry(sandbox: modal.Sandbox, entry: modal.types.FileInfo, path: str) -> FileEntry:
-    """The protocol entry for `entry` at `path`, with `is_dir` and `size` following a symlink.
+async def _follow_symlinks(
+    sandbox: modal.Sandbox, path: str, entry: modal.types.FileInfo | None
+) -> tuple[str, modal.types.FileInfo | None]:
+    """The path a symlink at `path` finally leads to, and its entry: `None` if it doesn't exist.
 
-    Modal's `stat` and `list_files` describe a symlink itself, so a symlink entry is resolved by
-    stat-ing its target, hop by hop. A dangling or looping link is reported as a file with no size.
+    Modal's `stat` and `list_files` describe a symlink itself, so a link is resolved by stat-ing its
+    target, hop by hop. A dangling or looping link has no entry.
     """
     import modal
 
-    target: modal.types.FileInfo | None = entry
     link, hops = path, 0
-    while target is not None and target.is_symlink():
+    while entry is not None and entry.is_symlink():
         hops += 1
-        if hops > _MAX_SYMLINK_HOPS or target.symlink_target is None:
-            target = None
-            continue
+        if hops > _MAX_SYMLINK_HOPS or entry.symlink_target is None:
+            return link, None
         # A relative target is relative to the directory holding the link.
-        link = posixpath.join(posixpath.dirname(link), target.symlink_target)
+        link = posixpath.join(posixpath.dirname(link), entry.symlink_target)
         try:
-            target = await sandbox.filesystem.stat.aio(link)
+            entry = await sandbox.filesystem.stat.aio(link)
         except (
             modal.exception.SandboxFilesystemNotFoundError,
             modal.exception.SandboxFilesystemNotADirectoryError,
         ):
-            target = None
+            entry = None
+    return link, entry
+
+
+async def _file_entry(sandbox: modal.Sandbox, entry: modal.types.FileInfo, path: str) -> FileEntry:
+    """The protocol entry for `entry` at `path`, with `is_dir` and `size` following a symlink.
+
+    A dangling or looping link is reported as a file with no size.
+    """
+    _, target = await _follow_symlinks(sandbox, path, entry)
     is_dir = target is not None and target.is_dir()
     # A directory's reported size is an implementation detail of the underlying filesystem
     # rather than a content length, so report none for it, like the built-in backends.
@@ -293,9 +302,20 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         # Modal takes the data first, creates missing parents, and replaces existing contents.
+        import modal
+
         sandbox = await self.get_client()
         async with self._mapped_errors(sandbox, f'Could not write {path!r}', path):
-            await sandbox.filesystem.write_bytes.aio(data, path)
+            try:
+                entry = await sandbox.filesystem.stat.aio(path)
+            except (
+                modal.exception.SandboxFilesystemNotFoundError,
+                modal.exception.SandboxFilesystemNotADirectoryError,
+            ):
+                entry = None
+            # Modal's write replaces a symlink; write through it instead, as a native write does.
+            target, _ = await _follow_symlinks(sandbox, path, entry)
+            await sandbox.filesystem.write_bytes.aio(data, target)
 
     async def stat(self, path: str) -> FileEntry:
         sandbox = await self.get_client()
@@ -441,6 +461,9 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         # Modal executes argv and never a shell string, so shell interpretation is requested
         # explicitly through `/bin/sh -c`, the one shell every sandbox image carries.
         argv = command_argv(command, shell)
+        if not shell:
+            # Through `sh`, so a program that can't start exits 127 or 126 as it does in `sh`.
+            argv = ['/bin/sh', '-c', 'exec "$@"', 'sh', *argv]
         # Given per command, not only at creation, so an attached sandbox honors it too.
         workdir = absolute_path('cwd', cwd) or self._working_dir
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):

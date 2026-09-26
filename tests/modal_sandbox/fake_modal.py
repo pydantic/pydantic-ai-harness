@@ -445,9 +445,6 @@ class FakeSandbox:
         except subprocess.TimeoutExpired as expired:
             # Modal reports a command stopped at its deadline with exit code -1.
             return _FakeProcess(expired.stdout or b'', expired.stderr or b'', -1, None, False)
-        except FileNotFoundError:
-            # A program that doesn't exist is an ordinary exit code 127, as from `sh`.
-            return _FakeProcess(b'', b'', 127, None, False)
         return _FakeProcess(completed.stdout, completed.stderr, completed.returncode, None, False)
 
     def _exec(
@@ -466,7 +463,9 @@ class FakeSandbox:
             raise FakeConflictError('Modal Sandbox is shutting down.')
         if self._control.exec_error is not None:
             raise self._control.exec_error
-        stdout, stderr, code = self._control.responder(argv, timeout)
+        # The backend runs a program as `sh -c 'exec "$@"' sh <argv>`; answer for the program.
+        program = argv[4:] if argv[:4] == ['/bin/sh', '-c', 'exec "$@"', 'sh'] else argv
+        stdout, stderr, code = self._control.responder(program, timeout)
         return _FakeProcess(
             _stream_bytes(stdout),
             _stream_bytes(stderr),

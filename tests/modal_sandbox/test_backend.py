@@ -31,12 +31,11 @@ async def started(**settings: Any) -> ModalSandboxBackend:
 
 
 class TestRun:
-    async def test_argv_runs_without_a_shell(self, fake_modal: FakeModal) -> None:
-        fake_modal.responder = lambda argv, timeout: (' '.join(argv), '', 0)
+    async def test_argv_is_execed_by_sh(self, fake_modal: FakeModal) -> None:
+        """`sh` execs the program, so one that can't start exits 127 or 126 as it does in `sh`."""
         backend = await started()
-        result = await backend.run(['echo', 'hi'])
-        assert result.stdout == 'echo hi'
-        assert fake_modal.sandboxes[0].exec_calls[-1].argv == ['echo', 'hi']
+        await backend.run(['echo', 'hi'])
+        assert fake_modal.sandboxes[0].exec_calls[-1].argv == ['/bin/sh', '-c', 'exec "$@"', 'sh', 'echo', 'hi']
 
     async def test_shell_wraps_in_sh(self, fake_modal: FakeModal) -> None:
         backend = await started()
@@ -286,7 +285,9 @@ class TestWorkingDir:
         backend = await started()
         assert await backend.working_dir() == '/srv'
         assert await backend.working_dir() == '/srv'
-        assert [call.argv for call in fake_modal.sandboxes[0].exec_calls] == [['pwd', '-P']]
+        assert [call.argv for call in fake_modal.sandboxes[0].exec_calls] == [
+            ['/bin/sh', '-c', 'exec "$@"', 'sh', 'pwd', '-P']
+        ]
 
     async def test_the_probe_carries_a_deadline(self, fake_modal: FakeModal) -> None:
         # Modal has no per-command kill, so even the internal probe is bounded.
