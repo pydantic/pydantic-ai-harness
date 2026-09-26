@@ -36,7 +36,9 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 
+import pydantic_ai_harness
 from pydantic_ai_harness.daytona_sandbox import (
+    DaytonaSandbox,
     DaytonaSandboxBackend,
     _backend,
 )
@@ -750,6 +752,24 @@ class TestLazyOperations:
         fake_daytona.sandboxes[0].process_create_gate = asyncio.Event()
         with pytest.raises(WorkspaceTimeoutError):
             await backend.run(['true'], timeout=0.01)
+
+
+def test_root_daytona_export_is_lazy_and_has_extra_hint() -> None:
+    assert 'DaytonaSandbox' in pydantic_ai_harness.__all__
+    assert pydantic_ai_harness.DaytonaSandbox is DaytonaSandbox
+    result = subprocess.run(
+        [
+            sys.executable,
+            '-c',
+            "import sys; sys.modules['daytona'] = None; import pydantic_ai_harness; "
+            "assert 'DaytonaSandbox' in pydantic_ai_harness.__all__; pydantic_ai_harness.DaytonaSandbox",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert 'Install `pydantic-ai-harness[daytona]`' in result.stderr
 
 
 def test_missing_daytona_extra_has_an_install_hint() -> None:
