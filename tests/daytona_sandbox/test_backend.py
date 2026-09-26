@@ -265,6 +265,14 @@ class TestCommands:
             await task
         assert sandbox.process_sessions == set()
 
+    async def test_stopped_sandbox_restarts_for_held_backend(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.state = daytona.SandboxState.STOPPED
+        result = await backend.run(['true'])
+        assert result.exit_code == 0
+        assert sandbox.start_calls
+
     async def test_session_setup_timeout_is_transient(
         self, fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -71,6 +71,8 @@ class FakeProcess:
 
     async def create_session(self, session_id: str, request_timeout: float | None = None) -> None:
         self.owner.check_alive()
+        if self.owner.state == SandboxState.STOPPED:
+            raise DaytonaError('sandbox stopped')
         if self.owner.process_create_gate is not None:
             await self.owner.process_create_gate.wait()
         self.owner.process_sessions.add(session_id)
@@ -430,6 +432,7 @@ class FakeSandbox:
     async def start(self, timeout: float | None = 60) -> None:
         self.start_calls.append(timeout)
         self.started = True
+        self.state = SandboxState.STARTED
 
     async def refresh_data(self, request_timeout: float | None = None) -> None:
         if self.refresh_error is not None:

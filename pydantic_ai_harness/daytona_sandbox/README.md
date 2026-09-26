@@ -52,7 +52,7 @@ followup = agent.run_sync(
 )
 ```
 
-The follow-up run finds the sandbox in the message history and works in it, so the clone is still there. Without the history, a run starts a new sandbox. If Daytona stopped the sandbox while it was idle, it starts again. If the sandbox has been deleted, the run raises `WorkspaceUnavailableError` instead of starting over in an empty one.
+The follow-up run finds the sandbox in the message history and works in it, so the clone is still there. Without the history, a run starts a new sandbox. If Daytona stopped the sandbox while it was idle, attaching in a new run starts it again. A held backend also retries command setup once after an idle stop. If the sandbox has been deleted, the run raises `WorkspaceUnavailableError` instead of starting over in an empty one.
 
 ## Choose the tools
 

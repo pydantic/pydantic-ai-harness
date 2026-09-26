@@ -581,7 +581,14 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             return _until_marker(process.stdout, process.marker), _until_marker(process.stderr, process.marker)
 
         async with command_deadline(timeout, stop=stop, output=output):
-            process = await self._start(sandbox, argv, shell=False, cwd=checked_cwd, env=env)
+            try:
+                process = await self._start(sandbox, argv, shell=False, cwd=checked_cwd, env=env)
+            except Exception:
+                # A held handle may outlive Daytona's idle auto-stop; only retry setup,
+                # where no command was accepted, so the command cannot be duplicated.
+                if not await _restart_if_stopped(sandbox):
+                    raise
+                process = await self._start(sandbox, argv, shell=False, cwd=checked_cwd, env=env)
             result = await process.wait()
             if checked_cwd is not None and f'{process.marker}-cwd' in result.stderr:
                 raise FileNotFoundError(checked_cwd)
@@ -640,6 +647,23 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                 _logs=logs,
             )
         raise TimeoutError(f'Daytona command session setup did not complete within {_REQUEST_TIMEOUT}s.')
+
+
+async def _restart_if_stopped(sandbox: AsyncSandbox) -> bool:
+    try:
+        with anyio.fail_after(_REQUEST_TIMEOUT):
+            await sandbox.refresh_data(request_timeout=_REQUEST_TIMEOUT)
+        if sandbox.state not in (
+            daytona.SandboxState.STOPPED,
+            daytona.SandboxState.STOPPING,
+            daytona.SandboxState.ARCHIVED,
+        ):
+            return False
+        with anyio.fail_after(_LIFECYCLE_TIMEOUT):
+            await sandbox.start(timeout=_LIFECYCLE_TIMEOUT)
+        return True
+    except Exception as error:
+        raise WorkspaceUnavailableError(f'Could not restart stopped Daytona sandbox {sandbox.id!r}.') from error
 
 
 def _in_deleted_state(sandbox: AsyncSandbox) -> bool:
