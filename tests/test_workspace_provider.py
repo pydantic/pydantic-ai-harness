@@ -86,6 +86,17 @@ def test_command_argv(command: str | tuple[str, ...], shell: bool, argv: list[st
     assert command_argv(command, shell) == argv
 
 
+@pytest.mark.parametrize('command', [b'echo hello', ['echo', 7]])
+def test_command_argv_rejects_non_string_elements(command: object) -> None:
+    with pytest.raises(TypeError):
+        command_argv(command, False)  # type: ignore[arg-type]
+
+
+def test_command_argv_rejects_nul_element() -> None:
+    with pytest.raises(ValueError, match='NUL'):
+        command_argv(['echo', 'bad\x00arg'], False)
+
+
 @pytest.mark.parametrize(
     ('command', 'shell', 'message'),
     [

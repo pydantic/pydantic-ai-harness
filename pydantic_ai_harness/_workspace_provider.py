@@ -70,10 +70,17 @@ def command_argv(command: WorkspaceCommand, shell: bool) -> list[str]:
         if not shell:
             raise TypeError('a string command requires shell=True; pass an argv sequence otherwise')
         return ['/bin/sh', '-c', command]
+    if isinstance(command, bytes):
+        raise TypeError('a bytes command is not supported; pass a string or argv sequence')
     if shell:
         raise TypeError('an argv sequence cannot be combined with shell=True; pass a single command string')
     if not command:
         raise TypeError('an argv sequence needs at least the program to run')
+    for argument in command:
+        if type(argument) is not str:
+            raise TypeError('argv elements must be strings')
+        if '\x00' in argument:
+            raise ValueError('argv elements must not contain NUL bytes')
     return list(command)
 
 
