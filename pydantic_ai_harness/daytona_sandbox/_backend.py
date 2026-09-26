@@ -680,6 +680,8 @@ async def _raise_failure(sandbox: AsyncSandbox, error: Exception, context: str, 
     sandbox, a not-found answer is a missing `path`, or a refused request (such as a command
     session that no longer exists) for a call without one.
     """
+    if isinstance(error, daytona.DaytonaError) and 'client is closed' in str(error).lower():
+        raise WorkspaceError('Daytona backend was closed while an operation was in flight.') from error
     translated = _translated(error, context, path=path)
     if not isinstance(translated, WorkspaceUnavailableError) and await _is_deleted(sandbox):
         raise WorkspaceUnavailableError(_unavailable_message(sandbox.id)) from error

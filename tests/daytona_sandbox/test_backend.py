@@ -205,6 +205,13 @@ class TestCommands:
         assert exc_info.value.stdout == 'complete output'
         assert sandbox.process_sessions == set()
 
+    async def test_owned_client_closed_during_run_raises_workspace_error(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_logs_error = DaytonaError('Daytona client is closed')
+        with pytest.raises(WorkspaceError, match='backend was closed'):
+            await backend.run(['true'])
+
     async def test_session_not_found_on_a_live_sandbox_is_a_workspace_error(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         fake_daytona.sandboxes[0].process_status_error = DaytonaNotFoundError('command not found', status_code=404)
