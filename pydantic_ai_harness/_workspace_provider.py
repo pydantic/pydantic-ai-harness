@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import posixpath
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Protocol
 
 import anyio
+import sniffio
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceCommand, WorkspaceRef, WorkspaceTimeoutError
 
@@ -37,6 +39,9 @@ class SandboxProvider(Protocol):
         ...
 
 
+_pending_stops: set[asyncio.Task[None]] = set()
+
+
 async def stop_shielded(stop: Callable[[], Awaitable[object]], *, grace: float = 2.0) -> None:
     """Attempt to stop a command under cancellation without cancelling its shared sandbox."""
 
@@ -47,10 +52,23 @@ async def stop_shielded(stop: Callable[[], Awaitable[object]], *, grace: float =
             # Preserve the command timeout/cancellation if a provider's stop request fails.
             pass
 
-    # A child task owns the stop so repeated cancellation of the caller cannot interrupt cleanup.
-    with anyio.move_on_after(grace, shield=True):
-        async with anyio.create_task_group() as group:
-            group.start_soon(best_effort_stop)
+    if sniffio.current_async_library() == 'asyncio':
+
+        async def bounded_stop() -> None:
+            with anyio.move_on_after(grace, shield=True):
+                await best_effort_stop()
+
+        # Native task.cancel() bypasses AnyIO shields; the child owns its own grace
+        # even if a second cancel interrupts the caller waiting for it.
+        child = asyncio.create_task(bounded_stop())
+        _pending_stops.add(child)
+        child.add_done_callback(_pending_stops.discard)
+        with anyio.move_on_after(grace, shield=True):
+            await asyncio.shield(child)
+    else:
+        with anyio.move_on_after(grace, shield=True):
+            async with anyio.create_task_group() as group:
+                group.start_soon(best_effort_stop)
 
 
 @asynccontextmanager
