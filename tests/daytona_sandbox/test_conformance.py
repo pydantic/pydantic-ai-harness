@@ -79,6 +79,11 @@ class TestLiveDaytonaSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover 
     def anyio_backend(cls) -> str:
         return 'asyncio'
 
+    @pytest.fixture
+    def destructive_backend(self) -> Callable[[], WorkspaceBackend]:
+        # Destructive rules need their own sandbox, not the shared class-scoped fixture.
+        return lambda: DaytonaSandboxBackend(auto_stop_interval=LIVE_AUTO_STOP_INTERVAL)
+
     # Class-scoped so the rules share one sandbox instead of starting one each; the suite runs
     # its destroy rule last.
     @pytest.fixture(scope='class')

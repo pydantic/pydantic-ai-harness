@@ -350,6 +350,7 @@ class _HostProcess(FakeProcess):
         command_id: str,
         request_timeout: float | None = None,
     ) -> SimpleNamespace:
+        self.owner.check_alive()
         return SimpleNamespace(exit_code=self.commands[command_id][0].poll())
 
     async def delete_session(self, session_id: str, request_timeout: float | None = None) -> None:
@@ -476,6 +477,13 @@ class FakeSandbox:
 
     async def delete(self, timeout: float | None = 60, wait: bool = False) -> None:
         self.state = SandboxState.DESTROYING
+        if isinstance(self.process, _HostProcess):
+            # The real control plane stops command sessions when their sandbox is deleted;
+            # merely changing the fake state leaves the host subprocess running.
+            for process, _, _ in self.process.commands.values():
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
 
     def check_alive(self) -> None:
         # A sandbox handle shares its `AsyncDaytona`'s HTTP session, so it stops working with it.
