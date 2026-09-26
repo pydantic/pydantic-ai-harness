@@ -298,7 +298,19 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not list {path!r}', path):
             # `depth=1` is E2B's non-recursive listing, as the protocol asks.
             entries = await sandbox.files.list(path, depth=1)
-            return [await _file_entry(sandbox, entry) for entry in entries]
+            resolved: list[FileEntry | None] = [None] * len(entries)
+            limit = anyio.Semaphore(16)
+
+            async def resolve(index: int, entry: e2b.EntryInfo) -> None:
+                # Symlinks need an envd round trip; cap concurrent lookups without
+                # changing the order returned by the listing.
+                async with limit:
+                    resolved[index] = await _file_entry(sandbox, entry)
+
+            async with anyio.create_task_group() as group:
+                for index, entry in enumerate(entries):
+                    group.start_soon(resolve, index, entry)
+            return [entry for entry in resolved if entry is not None]
 
     async def make_dir(self, path: str) -> None:
         sandbox = await self.get_client()

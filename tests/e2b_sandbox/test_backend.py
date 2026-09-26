@@ -478,6 +478,32 @@ class TestFilesystem:
             'to-file': (False, 5),
         }
 
+    async def test_list_dir_resolves_symlinks_concurrently_in_order(
+        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        fake_e2b.host_root = tmp_path
+        (tmp_path / 'target').write_bytes(b'abc')
+        (tmp_path / 'a').symlink_to('target')
+        (tmp_path / 'b').symlink_to('target')
+        backend = await started()
+        files = fake_e2b.sandboxes[0].files
+        original = files.get_info
+        entered = 0
+        both_entered = anyio.Event()
+
+        async def delayed(path: str, user: str | None = None, request_timeout: float | None = None) -> Any:
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await both_entered.wait()
+            return await original(path, user, request_timeout)
+
+        monkeypatch.setattr(files, 'get_info', delayed)
+        with anyio.fail_after(1):
+            entries = await backend.list_dir(str(tmp_path))
+        assert [entry.name for entry in entries] == ['a', 'b', 'target']
+
     async def test_symlink_whose_target_is_gone_reads_as_dangling(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         fake_e2b.sandboxes[0].files.symlinks['/srv/link'] = '/srv/removed'
