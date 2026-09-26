@@ -2004,6 +2004,9 @@ class TestFileSystemCapability:
             '</returns>'
         )
 
+    def test_default_read_output_is_bounded(self) -> None:
+        assert FileSystem().max_read_chars == 50_000
+
     def test_read_only_defaults(self) -> None:
         fs = FileSystem()
         assert '**/.git/*' in fs.read_only_patterns

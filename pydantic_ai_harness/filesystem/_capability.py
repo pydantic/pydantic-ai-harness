@@ -14,6 +14,7 @@ from pydantic_ai.toolsets import FilteredToolset
 
 from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored, warn_argument_renamed
 from pydantic_ai_harness._workspace import require_workspace
+from pydantic_ai_harness.filesystem._reader import READ_CHARS
 from pydantic_ai_harness.filesystem._toolset import (
     DEFAULT_TOOL_NAMES,
     READ_ONLY_TOOL_NAMES,
@@ -85,14 +86,14 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     max_read_lines: int = 2000
     """Maximum number of lines returned by a single `read_file` call."""
 
-    max_read_chars: int | None = None
+    max_read_chars: int | None = READ_CHARS
     """Maximum characters in a single `read_file` result, header and hint included.
 
     The window ends on the last complete line that fits, and the continuation
     hint names the first line not shown, so a caller paging by `offset` cannot
-    skip content. Set this at or below any downstream tool-output cap; a cap
-    applied after the fact cuts mid-line and drops or strands the hint. `None`
-    leaves only `max_read_lines` in force.
+    skip content. Defaults to 50,000 characters. Set this at or below any
+    downstream tool-output cap; a cap applied after the fact cuts mid-line and
+    drops or strands the hint. `None` leaves only `max_read_lines` in force.
     """
 
     max_list_results: int = 1000

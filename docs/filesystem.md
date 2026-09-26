@@ -355,7 +355,7 @@ FileSystem(
     denied_patterns=[],            # denylist globs
     read_only_patterns=[...],      # read-only globs (defaults to secrets/.git)
     max_read_lines=2000,           # cap for a single read_file
-    max_read_chars=None,           # optional cap on a whole read_file result, ending on a complete line
+    max_read_chars=50_000,         # cap on a whole read_file result, ending on a complete line
     max_list_results=1000,         # cap for list_directory
     max_search_results=1000,       # cap for search_files and grep
     max_find_results=1000,         # cap for find_files and list_files
