@@ -625,6 +625,15 @@ class TestSpritesSandbox:
             SpritesSandboxBackend(working_dir='relative')
 
 
+def test_sprite_ripgrep_install_guidance() -> None:
+    root = Path(__file__).resolve().parents[2]
+    for page in (root / 'docs/sprites-sandbox.md', root / 'pydantic_ai_harness/sprites_sandbox/README.md'):
+        content = page.read_text()
+        assert 'not preinstalled' in content
+        assert 'apt-get install ripgrep' in content
+        assert 'ref' in content
+
+
 def test_sprite_default_user_and_relative_path_guidance() -> None:
     root = Path(__file__).resolve().parents[2]
     for page in (root / 'docs/sprites-sandbox.md', root / 'pydantic_ai_harness/sprites_sandbox/README.md'):

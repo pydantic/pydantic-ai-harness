@@ -32,7 +32,7 @@ result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summa
 
 `Coder`'s shell and file tools now run in a Sprite, not on your machine. The Sprite is created the first time a tool uses it. It has no lifetime limit: it sleeps when idle and keeps its files, and costs money, until you delete it; see [Clean up](#clean-up).
 
-A new Sprite comes with git, Python, and Node.js ([preinstalled tools](https://docs.fly.io/sprites/working-with-sprites/)). `Coder` searches faster with ripgrep installed, and a Sprite keeps what you install.
+A new Sprite comes with git, Python, and Node.js ([preinstalled tools](https://docs.fly.io/sprites/working-with-sprites/)). Ripgrep (`rg`) is not preinstalled. For faster `Coder` searches, run `sudo apt-get update && sudo apt-get install ripgrep` once in the Sprite and store its ref to reuse it on later runs. Sprites retain installed packages.
 
 ## Continue in the same sandbox
 
