@@ -23,7 +23,9 @@ pip/uv-add "pydantic-ai-harness[coder]"
 ```
 
 The extra installs `ripgrep==14.1.0` except on Android, where `rg` must be supplied separately on `PATH`.
-In a workspace without `rg`, such as a sandbox image that lacks it, `list_files` and `grep` walk the files instead.
+In a workspace without `rg`, such as a sandbox image that lacks it, `list_files` and `grep` use a single POSIX git/grep/find command instead.
+
+For remote workspaces, use file tools (`grep`, `find_files`, `read_file`) instead of sending whole files through shell `cat`. Install `rg` and `git` in the sandbox image for fast search (the Coder extra installs `rg` on the agent host, not in a remote image). For large or generated trees, run `rg -n 'pattern' path` or `rg --files` through Shell and cap its output. Without `rg`, command-capable POSIX workspaces use one in-sandbox git/grep/find command for `grep`, `list_files`, and `search_files` (after an initial `rg` probe). Backends that are filesystem-only use bounded file walks. The POSIX fallback honors nested `.gitignore` in repositories and search-root `.ignore` with git available; nested `.ignore` rules are not applied by the POSIX fallback, and rg-specific regex features require `rg`. Without git, the POSIX fallback cannot apply ignore files. Searches report output and result caps rather than presenting partial results as complete.
 Add a provider extra such as `[coder,anthropic]` when needed.
 `Coder` works in the run's [workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/). Here that is the current directory on your machine:
 
@@ -188,16 +190,24 @@ capabilities emit.
 
 ## Durable execution
 
-`Coder` works under DBOS, Temporal and Prefect durable execution. Under Temporal its tools run
-in activities, which cannot reach the run's event stream yet ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)), so
-they emit no `FileSystem` or `Shell` events there and a `FileChangeRequestEvent` listener cannot
-refuse a change.
+`Coder` works under DBOS, Temporal and Prefect durable execution. Under Temporal,
+`FileChangeRequestEvent` listeners can refuse file changes before the durable workspace mutation.
+Read/search events from tools running in activities are not forwarded live to workflow
+listeners; file-change requests and write notifications run in the workflow.
+On replay, the workflow invokes file-change approval listeners again; make external listener effects idempotent
+([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
 
 ## Upgrading
 
 This release makes the workspace the single place that decides where an agent works. Removed arguments are still accepted, emit a `HarnessDeprecationWarning` naming the fix, and are ignored.
 
 - **Attach a workspace.** `Coder`, `FileSystem`, `Shell`, `RepoContext`, and `Macroscope` fail at run start without one, as do `Skills`, `PydanticAIDocs` (with a local checkout), and `ToolOutputLimits` (when it can spill) unless given their own `workspace=` or store. Add `LocalWorkspace('.')` to the agent's capabilities, as in [Usage](#usage).
+When retaining `result.workspace` after a run with a provider backend that exposes `aclose()`, finish using it and call `await result.workspace.backend.aclose()` to release its client session. This closes the client, not necessarily the sandbox; follow that provider's deletion API for owned sandboxes.
+
+Sandbox refs identify existing environments; provider-specific cleanup should use an ID-only delete API for refs your application owns (where that provider offers one). Do not create or attach a backend merely to delete a sandbox. Directory upload and preview URLs depend on the provider SDK.
+
+With a remote sandbox such as `ModalSandbox(working_dir='/workspace')`, `Coder` loads repo instructions at run start, which creates the sandbox before the model's first tool call. Use `Coder(repo_context=False)` if the sandbox should be created lazily. Choose a working directory that exists in your image.
+
 - **Set the directory on the workspace.** `Coder('dir')`, `Shell(cwd=)`, `FileSystem(cwd=)`, `Macroscope(cwd=)`, and `RepoContext(workspace_dir=)` are ignored; use `LocalWorkspace('./dir')`.
 - **Pass the command environment.** A local workspace used to give commands the host's `PATH`, `HOME`, `LANG`, and `TMPDIR`; now they get its `PATH` and `HOME`, plus the workspace's `env` and `Shell(env=)`. Pass anything else they need, such as `LANG`, with `LocalWorkspace('.', env={...})` (see [The command environment](#the-command-environment)).
 - **`FileSystem(root_dir=)`** defaults to the working directory and resolves relative values from it. It must contain the working directory, symlinks that lead outside it are refused, and `root_dir='/'` turns the checks off.

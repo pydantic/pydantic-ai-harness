@@ -6,6 +6,7 @@ import bisect
 import hashlib
 import heapq
 import json
+import logging
 import posixpath
 import re
 import sqlite3
@@ -34,6 +35,11 @@ _HIDDEN_PREFIXES = (_OPERATIONS_NAME, _LEGACY_JOURNAL_NAME)
 _MAX_RECEIPTS = 1024
 _SQLITE_SETUP_LOCK = threading.RLock()
 _T = TypeVar('_T')
+logger = logging.getLogger(__name__)
+
+
+class MemoryPathEscapeError(ValueError):
+    """A memory path resolves outside its store directory."""
 
 
 @dataclass(frozen=True)
@@ -467,6 +473,7 @@ class FileStore:
             )
         self._own = secondary_workspace(workspace, 'FileStore')
         self._run: Workspace | None = None
+        self._real_root: tuple[str, str] | None = None
         self._lock = anyio.Lock()
 
     def bind(self, workspace: Workspace) -> FileStore:
@@ -476,8 +483,11 @@ class FileStore:
         """
         if self._own is not None:
             return self
+        if self._run is workspace:
+            return self
         bound = copy(self)
         bound._run = workspace
+        bound._real_root = None
         return bound
 
     def _workspace(self) -> Workspace:
@@ -499,15 +509,18 @@ class FileStore:
             raise ValueError(f'{path!r} is reserved for FileStore bookkeeping')
         return posixpath.join(root, path)
 
-    @staticmethod
-    async def _confine(workspace: Workspace, root: str, target: str, path: str) -> str:
+    async def _confine(self, workspace: Workspace, root: str, target: str, path: str) -> str:
         """Return `target` with symlinks resolved, refusing one that leaves the store directory."""
-        return FileStore._confined(await workspace.realpath(root), await workspace.realpath(target), path)
+        # Keep the original root boundary for this binding: if it is replaced by a
+        # symlink later, target realpaths outside it fail closed rather than following it.
+        if self._real_root is None or self._real_root[0] != root:
+            self._real_root = (root, await workspace.realpath(root))
+        return FileStore._confined(self._real_root[1], await workspace.realpath(target), path)
 
     @staticmethod
     def _confined(real_root: str, real_target: str, path: str) -> str:
         if not real_target.startswith(real_root.rstrip('/') + '/'):
-            raise ValueError(f'memory path {path!r} resolves outside the store directory')
+            raise MemoryPathEscapeError(f'memory path {path!r} resolves outside the store directory')
         return real_target
 
     @staticmethod
@@ -522,7 +535,12 @@ class FileStore:
         raw = await FileStore._content(workspace, posixpath.join(root, _OPERATIONS_NAME))
         if raw is None:
             return []
-        return [_Receipt(**item) for item in json.loads(raw)]
+        try:
+            return [_Receipt(**item) for item in json.loads(raw)]
+        except (json.JSONDecodeError, TypeError):
+            # Invalid receipts cannot establish idempotency; start a fresh journal.
+            logger.warning('Invalid FileStore operation receipts; starting with an empty journal')
+            return []
 
     @staticmethod
     async def _save(workspace: Workspace, root: str, receipts: list[_Receipt]) -> None:
@@ -672,6 +690,9 @@ class FileStore:
         workspace = self._workspace()
         root = await workspace.realpath(await self._root(workspace))
         start = posixpath.join(root, prefix.removesuffix('/')) if prefix.endswith('/') else root
+        # A scoped prefix can itself be a symlink; check it before listing its first child.
+        if start != root and await workspace.realpath(start) != start:
+            return []
         paths: list[str] = []
         pending = [start]
         while pending:

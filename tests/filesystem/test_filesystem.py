@@ -21,6 +21,7 @@ from pydantic_ai.workspaces import (
     FileEntry,
     LocalWorkspaceBackend,
     ReadOnlyWorkspace,
+    UnavailableWorkspace,
     Workspace,
     WorkspaceBackend,
     WorkspaceError,
@@ -133,8 +134,10 @@ class FilesystemOnlyWorkspace:
     Custom storage plugs in as a workspace backend; the tools need only the filesystem methods.
     """
 
-    def __init__(self, working_dir: Path) -> None:
-        self._local = LocalWorkspaceBackend(working_dir)
+    def __init__(self, working_dir: Path | LocalWorkspaceBackend) -> None:
+        self._local = (
+            working_dir if isinstance(working_dir, LocalWorkspaceBackend) else LocalWorkspaceBackend(working_dir)
+        )
 
     @property
     def ref(self) -> WorkspaceRef | None:
@@ -329,7 +332,9 @@ class TestPathSecurity:
         toolset = FileSystem[None](root_dir='/').get_toolset()
         assert isinstance(toolset, FileSystemToolset)
         assert 'escaped!' in await toolset.read_file('escape/secret.txt', workspace=ws)
-        assert await toolset.search_files('escaped', workspace=ws) == 'escape/secret.txt:1:escaped!'
+        assert (await toolset.search_files('escaped', workspace=FilesystemOnlyWorkspace(fs_root))).splitlines()[
+            0
+        ] == 'escape/secret.txt:1:escaped!'
 
     async def test_root_at_the_filesystem_root_still_matches_patterns_through_symlinks(
         self, fs_root: Path, ws: LocalWorkspaceBackend
@@ -348,8 +353,10 @@ class TestPathSecurity:
         workspace = CountingWorkspace(fs_root)
         await toolset.write_file('new.txt', 'x\n', workspace=workspace)
         assert 'x' in await toolset.read_file('new.txt', workspace=workspace)
-        assert await toolset.search_files('^x$', workspace=workspace) == 'new.txt:1:x'
-        assert workspace.realpath_calls == 0
+        assert (await toolset.search_files('^x$', workspace=workspace)).splitlines()[0] == 'new.txt:1:x'
+        assert (
+            workspace.realpath_calls == 0
+        )  # command-backed search needs no per-result realpath under an unrestricted root
 
     async def test_symlinked_working_directory_is_the_default_root(self, tmp_path: Path) -> None:
         (tmp_path / 'real').mkdir()
@@ -453,6 +460,13 @@ class TestRootDir:
     async def test_no_workspace_fails_the_run(self) -> None:
         with pytest.raises(UserError, match='`FileSystem` needs a workspace'):
             await call_tool([FileSystem[None]()], 'list_directory', {})
+
+    async def test_unavailable_workspace_names_policy_reason(self) -> None:
+        with pytest.raises(UserError, match='`FileSystem`.*disabled by policy') as error:
+            await call_tool(
+                [FileSystem[None]()], 'list_directory', {}, workspace=UnavailableWorkspace('disabled by policy')
+            )
+        assert 'Add `LocalWorkspace' not in str(error.value)
 
 
 class TestAccessPatterns:
@@ -617,19 +631,28 @@ class TestReadFile:
         assert 'line3' in result
         assert 'line1' not in result
 
+    @pytest.mark.parametrize(('offset', 'limit'), [(-1, None), (0, 0), (0, -1)])
+    async def test_read_rejects_invalid_window(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend, offset: int, limit: int | None
+    ) -> None:
+        with pytest.raises(ModelRetry, match='offset|limit'):
+            await toolset.read_file('multi.txt', offset=offset, limit=limit, workspace=ws)
+
     async def test_read_with_limit(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         result = await toolset.read_file('multi.txt', limit=2, workspace=ws)
         assert 'line1' in result
         assert 'line2' in result
         assert '... (3 more lines' in result
 
-    async def test_read_directory_raises(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
-        with pytest.raises(ModelRetry, match='is a directory'):
-            await toolset.read_file('subdir', workspace=ws)
+    async def test_read_directory_returns_plain_result(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        assert await toolset.read_file('subdir', workspace=ws) == 'Path not found: subdir'
 
-    async def test_read_missing_raises(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
-        with pytest.raises(ModelRetry, match='File not found'):
-            await toolset.read_file('nonexistent.txt', workspace=ws)
+    async def test_read_missing_returns_plain_result(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        assert await toolset.read_file('nonexistent.txt', workspace=ws) == 'Path not found: nonexistent.txt'
 
     async def test_read_binary_file(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         result = await toolset.read_file('binary.bin', workspace=ws)
@@ -970,8 +993,9 @@ class TestListDirectory:
         )
         result = await ts.list_directory('.', workspace=ws)
         lines = result.splitlines()
-        assert len(lines) == 6
-        assert lines[-1] == '[... truncated at 5 entries]'
+        assert len(lines) == 7
+        assert lines[-2] == '[... truncated at 5 entries]'
+        assert lines[-1].startswith('[3 hidden entries omitted')
 
     async def test_list_at_cap_is_not_marked_truncated(self, tmp_path: Path, ws: LocalWorkspaceBackend) -> None:
         for i in range(3):
@@ -991,6 +1015,49 @@ class TestListDirectory:
 
 
 class TestSearchFiles:
+    async def test_denied_directory_protects_descendants(self, fs_root: Path) -> None:
+        (fs_root / 'private').mkdir()
+        (fs_root / 'private' / 'secret.txt').write_text('needle\n')
+        toolset = FileSystem[None](root_dir=fs_root, denied_patterns=['private']).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        workspace = LocalWorkspaceBackend(fs_root)
+        with pytest.raises(ModelRetry, match='denied'):
+            await toolset.read_file('private/secret.txt', workspace=workspace)
+        assert 'private' not in await toolset.find_files('**/*.txt', workspace=workspace)
+        assert 'private' not in await toolset.search_files('needle', workspace=workspace)
+
+    async def test_explicit_hidden_directory_can_be_searched(self, fs_root: Path) -> None:
+        (fs_root / '.github' / 'workflows').mkdir(parents=True)
+        (fs_root / '.github' / 'workflows' / 'ci.txt').write_text('needle\n')
+        toolset = FileSystem[None](root_dir=fs_root).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        workspace = LocalWorkspaceBackend(fs_root)
+        assert await toolset.find_files('**/*.txt', path='.github', workspace=workspace) == '.github/workflows/ci.txt'
+        assert await toolset.search_files('needle', path='.github', workspace=workspace) == (
+            '.github/workflows/ci.txt:1:needle'
+        )
+        assert await toolset.list_directory('.github', workspace=workspace) == '.github/workflows/'
+
+    async def test_symlinked_directory_loop_does_not_duplicate_matches(self, fs_root: Path) -> None:
+        (fs_root / 'loop').symlink_to('.', target_is_directory=True)
+        toolset = FileSystem[None](root_dir=fs_root).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        found = await toolset.find_files('**/*.txt', workspace=LocalWorkspaceBackend(fs_root))
+        assert found.splitlines().count('hello.txt') == 1
+        assert not any('loop/' in line for line in found.splitlines())
+
+    async def test_skips_large_and_unreadable_files(self, fs_root: Path) -> None:
+        (fs_root / 'large.txt').write_text('needle' * 2_000_000)
+        (fs_root / 'unreadable.txt').write_text('needle')
+        (fs_root / 'good.txt').write_text('needle')
+        toolset = FileSystem[None](root_dir=fs_root).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        backend = FailingWorkspace(fs_root, {'read_bytes': WorkspaceError('unreadable')}, where='unreadable.txt')
+        result = await toolset.search_files('needle', workspace=FilesystemOnlyWorkspace(backend))
+        assert 'good.txt:1:needle' in result
+        assert 'large.txt' in result and 'unreadable.txt' in result
+        assert 'skipped' in result
+
     async def test_search_basic(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         result = await toolset.search_files('Hello', workspace=ws)
         assert 'hello.txt:1:Hello, world!' in result
@@ -1043,7 +1110,7 @@ class TestSearchFiles:
             max_search_results=50,
             max_find_results=1000,
         )
-        result = await ts.search_files('findme', workspace=ws)
+        result = await ts.search_files('findme', workspace=FilesystemOnlyWorkspace(fs_root))
         assert 'truncated at 50 matches' in result
 
     async def test_search_includes_protected_files(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
@@ -1109,10 +1176,10 @@ class TestSearchFiles:
             max_search_results=5,
             max_find_results=1000,
         )
-        result = await ts.search_files('findme', workspace=ws)
+        result = await ts.search_files('findme', workspace=FilesystemOnlyWorkspace(fs_root))
         lines = result.splitlines()
-        assert len(lines) == 6
-        assert lines[-1] == '[... truncated at 5 matches]'
+        assert len(lines) >= 6
+        assert lines[5] == '[... truncated at 5 matches]'
 
     async def test_search_at_cap_is_not_marked_truncated(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'exact.txt').write_text('capmarker\ncapmarker\n')
@@ -1160,8 +1227,8 @@ class TestSearchFiles:
             max_search_results=0,
             max_find_results=1000,
         )
-        result = await ts.search_files('Hello', workspace=ws)
-        assert result == '[... truncated at 0 matches]'
+        result = await ts.search_files('Hello', workspace=FilesystemOnlyWorkspace(fs_root))
+        assert result.splitlines()[0] == '[... truncated at 0 matches]'
 
     async def test_search_skips_links_leading_outside_the_root(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend, outside: Path
@@ -1197,7 +1264,8 @@ class TestFindFiles:
         (fs_root / 'inner_dir').symlink_to(fs_root / 'subdir')
         result = await toolset.find_files('**', workspace=ws)
         assert 'secret.txt' not in result
-        assert 'inner_dir/nested.py' in result
+        assert 'subdir/nested.py' in result
+        assert 'inner_dir/nested.py' not in result
 
     async def test_find_skips_dangling_symlink(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
@@ -1438,7 +1506,7 @@ class TestWalkerEntryResolution:
         )
         assert 'alias.txt' in await ts.list_directory('.', workspace=ws)
         assert 'alias.txt' in await ts.find_files('*.txt', workspace=ws)
-        assert 'alias.txt:1:Hello, world!' in await ts.search_files('Hello', workspace=ws)
+        assert 'alias.txt:1:Hello, world!' in await ts.search_files('Hello', workspace=FilesystemOnlyWorkspace(ws))
 
 
 class TestCreateDirectory:
@@ -1511,8 +1579,7 @@ class TestFileInfo:
         assert 'lines:' not in result
 
     async def test_info_not_found(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
-        with pytest.raises(ModelRetry, match='Path not found'):
-            await toolset.file_info('nonexistent', workspace=ws)
+        assert await toolset.file_info('nonexistent', workspace=ws) == 'Path not found: nonexistent'
 
     async def test_info_symlink(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
@@ -1629,13 +1696,13 @@ class TestMutationKillers:
             max_search_results=5,
             max_find_results=1000,
         )
-        result = await ts.search_files('match_this', workspace=ws)
+        result = await ts.search_files('match_this', workspace=FilesystemOnlyWorkspace(fs_root))
         lines = result.strip().split('\n')
         # Truncation check is after each file, so 5 matches + truncation msg
         # Ensure we don't get all 10 matches
         match_lines = [ln for ln in lines if ln.startswith('searchable')]
         assert len(match_lines) <= 5
-        assert 'truncated at 5 matches' in lines[-1]
+        assert any('truncated at 5 matches' in line for line in lines)
 
     async def test_find_truncation_stops_after_limit(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         for i in range(10):
@@ -2004,6 +2071,9 @@ class TestFileSystemCapability:
             '</returns>'
         )
 
+    def test_default_read_output_is_bounded(self) -> None:
+        assert FileSystem().max_read_chars == 50_000
+
     def test_read_only_defaults(self) -> None:
         fs = FileSystem()
         assert '**/.git/*' in fs.read_only_patterns
@@ -2208,24 +2278,29 @@ class TestWorkspaceBackends:
 
     async def test_unlistable_subdirectory_is_skipped(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
         workspace = FailingWorkspace(fs_root, {'list_dir': PermissionError(errno.EACCES, 'denied')}, where='/subdir')
-        assert 'hello.txt' in await toolset.search_files('Hello', workspace=workspace)
-        assert await toolset.find_files('**/*.py', workspace=workspace) == 'No matches found.'
+        assert 'hello.txt' in await toolset.search_files('Hello', workspace=FilesystemOnlyWorkspace(workspace))
+        assert (await toolset.find_files('**/*.py', workspace=workspace)).splitlines()[0] in (
+            'No matches found.',
+            '[1 hidden entries omitted; name a hidden path explicitly to include it]',
+        )
 
     async def test_unlistable_search_root_is_recoverable(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
         workspace = FailingWorkspace(
             fs_root, {'list_dir': PermissionError(errno.EACCES, 'Permission denied')}, where='/subdir'
         )
         with pytest.raises(ModelRetry, match='Permission denied'):
-            await toolset.search_files('x', path='subdir', workspace=workspace)
+            await toolset.search_files('x', path='subdir', workspace=FilesystemOnlyWorkspace(workspace))
 
     async def test_unreadable_file_is_skipped_by_search(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
         workspace = FailingWorkspace(
             fs_root, {'read_bytes': PermissionError(errno.EACCES, 'denied')}, where='hello.txt'
         )
-        assert await toolset.search_files('Hello', workspace=workspace) == 'No matches found.'
+        assert (await toolset.search_files('Hello', workspace=FilesystemOnlyWorkspace(workspace))).splitlines()[
+            0
+        ] == '[1 files skipped (too large or unreadable): hello.txt]'
 
     @pytest.mark.parametrize('operation', ['list_dir', 'read_bytes'])
-    async def test_workspace_failure_during_a_walk_fails_the_call(
+    async def test_workspace_failure_during_a_walk_is_reported(
         self, toolset: FileSystemToolset[None], operation: str, fs_root: Path
     ) -> None:
         workspace = FailingWorkspace(
@@ -2233,8 +2308,11 @@ class TestWorkspaceBackends:
             {operation: WorkspaceError('backend refused')},
             where='nested.py' if operation == 'read_bytes' else '/subdir',
         )
-        with pytest.raises(ToolFailed, match='backend refused'):
-            await toolset.search_files('x', workspace=workspace)
+        if operation == 'list_dir':
+            with pytest.raises(ToolFailed, match='backend refused'):
+                await toolset.search_files('x', workspace=FilesystemOnlyWorkspace(workspace))
+        else:
+            assert 'nested.py' in await toolset.search_files('x', workspace=FilesystemOnlyWorkspace(workspace))
 
     async def test_read_only_refusal_of_a_read_is_not_a_permission_retry(
         self, fs_root: Path, anyio_backend: object
@@ -2278,7 +2356,7 @@ class TestWorkspaceBackends:
 
 
 class TestWalkBounds:
-    """Symlinked directories are followed, so two links back to the root would grow a walk exponentially."""
+    """A walk deduplicates symlink loops, while directory/entry caps still bound large trees."""
 
     @pytest.fixture
     def loop_root(self, tmp_path: Path) -> Path:
@@ -2291,13 +2369,15 @@ class TestWalkBounds:
     async def test_symlink_loop_walk_is_cut_short(
         self, loop_root: Path, monkeypatch: pytest.MonkeyPatch, cap: str, ws: LocalWorkspaceBackend
     ) -> None:
+        for index in range(21):
+            (loop_root / f'dir{index}').mkdir()
         monkeypatch.setattr(f'pydantic_ai_harness.filesystem._toolset.{cap}', 20)
         toolset = FileSystem[None](root_dir=loop_root).get_toolset()
         assert isinstance(toolset, FileSystemToolset)
-        found = await toolset.find_files('**/*.txt', workspace=ws)
+        found = await toolset.find_files('**/*.txt', workspace=FilesystemOnlyWorkspace(loop_root))
         assert found.splitlines()[0] == 'a.txt'
         assert found.splitlines()[-1].startswith('[... walk cut short after ')
-        searched = await toolset.search_files('needle', workspace=ws)
+        searched = await toolset.search_files('needle', workspace=FilesystemOnlyWorkspace(loop_root))
         assert searched.splitlines()[0] == 'a.txt:1:needle'
         assert searched.splitlines()[-1].startswith('[... walk cut short after ')
 
@@ -2306,11 +2386,13 @@ class TestWalkBounds:
         assert isinstance(toolset, FileSystemToolset)
         with anyio.fail_after(30):
             found = await toolset.find_files('**/*.txt', workspace=ws)
-        assert 'walk cut short' in found.splitlines()[-1]
+        assert found == 'a.txt'  # aliases are deduplicated without consuming the walk cap
 
     async def test_cut_walk_with_no_matches_still_says_so(
         self, loop_root: Path, monkeypatch: pytest.MonkeyPatch, ws: LocalWorkspaceBackend
     ) -> None:
+        for index in range(6):
+            (loop_root / f'dir{index}').mkdir()
         monkeypatch.setattr('pydantic_ai_harness.filesystem._toolset._MAX_WALK_DIRECTORIES', 5)
         toolset = FileSystem[None](root_dir=loop_root).get_toolset()
         assert isinstance(toolset, FileSystemToolset)
@@ -2330,13 +2412,15 @@ class TestWalkBounds:
             async def searched(self, ctx: RunContext[None], event: FilesSearchedEvent) -> None:
                 seen.append(event)
 
+        for index in range(6):
+            (loop_root / f'dir{index}').mkdir()
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr('pydantic_ai_harness.filesystem._toolset._MAX_WALK_DIRECTORIES', 5)
             await call_tool(
                 [FileSystem[None](root_dir=loop_root), Recorder()],
                 'search_files',
                 {'pattern': 'needle'},
-                workspace=ws,
+                workspace=FilesystemOnlyWorkspace(loop_root),
             )
         assert [event.truncated for event in seen] == [True]
 
