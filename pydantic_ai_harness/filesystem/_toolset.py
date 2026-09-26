@@ -9,6 +9,7 @@ import hashlib
 import os
 import posixpath
 import re
+import shlex
 import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import KW_ONLY, dataclass
@@ -1282,12 +1283,22 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
     ) -> str:
         cwd = resolved if entry.is_dir else posixpath.dirname(resolved)
         target = '.' if entry.is_dir else posixpath.basename(resolved)
+        prepare, permitted = self._batch_authorizer(scope, cwd)
+        prefix = posixpath.relpath(cwd, scope.root)
+        command_glob = include_glob.removeprefix(prefix + '/') if include_glob and prefix != '.' else include_glob
 
         async def accept(record: Record) -> str | None:
-            if include_glob and not fnmatch.fnmatch(record.path, include_glob):
+            if include_glob and not (
+                fnmatch.fnmatch(record.path, include_glob)
+                or fnmatch.fnmatch(posixpath.join(prefix, record.path), include_glob)
+            ):
                 return None
             return await self._authorized_match(
-                scope, cwd, record, include_hidden=bool(include_glob and _explicit_hidden(include_glob))
+                scope,
+                cwd,
+                record,
+                include_hidden=bool(include_glob and _explicit_hidden(include_glob)),
+                permitted=permitted,
             )
 
         try:
@@ -1303,7 +1314,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                     '--max-columns',
                     str(_MAX_MATCH_COLUMNS),
                     '--max-columns-preview',
-                    *(['--glob', include_glob] if include_glob else []),
+                    *(['--glob', command_glob] if command_glob else []),
                     '--regexp',
                     pattern,
                     '--',
@@ -1311,9 +1322,14 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 ],
                 cwd=cwd,
                 limit=self._max_search_results,
-                accept=lambda record: self._match_line(
-                    scope, cwd, record, include_hidden=bool(include_glob and _explicit_hidden(include_glob))
+                accept=lambda record: (
+                    self._match_line(
+                        scope, cwd, record, include_hidden=bool(include_glob and _explicit_hidden(include_glob))
+                    )
+                    if permitted(record)
+                    else None
                 ),
+                prepare=prepare,
             )
         except RipgrepMissing:
             scope.lacks_ripgrep = True
@@ -1325,6 +1341,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 include_hidden=bool(include_glob and _explicit_hidden(include_glob)),
                 limit=self._max_search_results,
                 accept=accept,
+                prepare=prepare,
             )
         if ctx is not None:
             await ctx.emit(
@@ -1454,6 +1471,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         entry = await self._stat(scope, resolved)
         if entry is None or not entry.is_dir:
             raise NotADirectoryError(f'Path {path!r} is not a directory.')
+        prepare, permitted = self._batch_authorizer(scope, resolved)
         arguments = ['--files', '--sort', 'path', *(['--glob', glob] if glob is not None else [])]
         try:
             if scope.lacks_ripgrep:
@@ -1464,9 +1482,12 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 cwd=resolved,
                 limit=self._max_find_results,
                 listing=True,
-                accept=lambda record: self._ripgrep_entry(
-                    scope, resolved, record, include_hidden=bool(glob and _explicit_hidden(glob))
+                accept=lambda record: (
+                    self._ripgrep_entry(scope, resolved, record, include_hidden=bool(glob and _explicit_hidden(glob)))
+                    if permitted(record)
+                    else None
                 ),
+                prepare=prepare,
             )
         except RipgrepMissing:
             scope.lacks_ripgrep = True
@@ -1479,7 +1500,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 if glob is not None and not fnmatch.fnmatch(posixpath.normpath(record.path), glob):
                     return None
                 return await self._authorized_entry(
-                    scope, resolved, record, include_hidden=bool(glob and _explicit_hidden(glob))
+                    scope, resolved, record, include_hidden=bool(glob and _explicit_hidden(glob)), permitted=permitted
                 )
 
             results, capped = await run_posix_search(
@@ -1487,6 +1508,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 cwd=resolved,
                 limit=self._max_find_results,
                 accept=accept,
+                prepare=prepare,
             )
         if ctx is not None:
             await ctx.emit(
@@ -1584,6 +1606,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             cwd, target = resolved, '.'
         else:
             cwd, target = posixpath.dirname(resolved), posixpath.join('.', posixpath.basename(resolved))
+        prepare, permitted = self._batch_authorizer(scope, cwd)
         arguments = [
             '--line-number',
             '--with-filename',
@@ -1612,9 +1635,12 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 arguments,
                 cwd=cwd,
                 limit=self._max_search_results,
-                accept=lambda record: self._match_line(
-                    scope, cwd, record, include_hidden=bool(glob and _explicit_hidden(glob))
+                accept=lambda record: (
+                    self._match_line(scope, cwd, record, include_hidden=bool(glob and _explicit_hidden(glob)))
+                    if permitted(record)
+                    else None
                 ),
+                prepare=prepare,
             )
         except RipgrepMissing:
             scope.lacks_ripgrep = True
@@ -1630,7 +1656,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 if glob is not None and not fnmatch.fnmatch(posixpath.normpath(record.path), glob):
                     return None
                 return await self._authorized_match(
-                    scope, cwd, record, include_hidden=bool(glob and _explicit_hidden(glob))
+                    scope, cwd, record, include_hidden=bool(glob and _explicit_hidden(glob)), permitted=permitted
                 )
 
             results, capped = await run_posix_search(
@@ -1643,6 +1669,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 context=context,
                 limit=self._max_search_results,
                 accept=accept,
+                prepare=prepare,
             )
         if ctx is not None:
             await ctx.emit(
@@ -1652,18 +1679,67 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             results.append(f'[... truncated at {self._max_search_results} lines]')
         return '\n'.join(results) if results else 'No matches found.'
 
+    def _batch_authorizer(
+        self, scope: _Scope, cwd: str
+    ) -> tuple[Callable[[list[Record]], Awaitable[None]], Callable[[Record], bool]]:
+        allowed: set[str] = set()
+
+        async def prepare(records: list[Record]) -> None:
+            paths = list(dict.fromkeys(posixpath.normpath(posixpath.join(cwd, record.path)) for record in records))
+            if not scope.checks_realpath:
+                allowed.update(paths)
+                return
+            # Resolve all candidates in the workspace in one command; never trust a lexical
+            # path alone, since an in-root symlink can expose an out-of-root target.
+            for offset in range(0, len(paths), 500):
+                chunk = paths[offset : offset + 500]
+                result = await scope.workspace.run(
+                    'sh -c \'for file do real=$(realpath -- "$file" && printf .) || exit 2; '
+                    'real=${real%.}; real=${real%?}; printf "%s\\\\0" "$real"; done\' sh ' + shlex.join(chunk),
+                    shell=True,
+                    cwd=cwd,
+                    timeout=120,
+                )
+                if result.exit_code != 0:
+                    raise ModelRetry(f'Could not resolve search paths: {result.stderr.strip()}')
+                realpaths = result.stdout.split('\0')
+                if len(realpaths) != len(chunk) + 1 or realpaths[-1]:
+                    raise ModelRetry('Could not resolve search paths.')
+                allowed.update(
+                    path
+                    for path, real in zip(chunk, realpaths)
+                    if _contains(scope.root, real) and self._is_accessible(posixpath.relpath(real, scope.root))
+                )
+
+        def permitted(record: Record) -> bool:
+            return posixpath.normpath(posixpath.join(cwd, record.path)) in allowed
+
+        return prepare, permitted
+
     async def _authorized_entry(
-        self, scope: _Scope, cwd: str, record: Record, *, include_hidden: bool = False
+        self,
+        scope: _Scope,
+        cwd: str,
+        record: Record,
+        *,
+        include_hidden: bool = False,
+        permitted: Callable[[Record], bool] | None = None,
     ) -> str | None:
         path = posixpath.normpath(posixpath.join(cwd, record.path))
-        if not await self._readable_entry(scope, path):
+        if not (permitted(record) if permitted is not None else await self._readable_entry(scope, path)):
             return None
         return self._ripgrep_entry(scope, cwd, record, include_hidden=include_hidden)
 
     async def _authorized_match(
-        self, scope: _Scope, cwd: str, record: Record, *, include_hidden: bool = False
+        self,
+        scope: _Scope,
+        cwd: str,
+        record: Record,
+        *,
+        include_hidden: bool = False,
+        permitted: Callable[[Record], bool] | None = None,
     ) -> str | None:
-        if await self._authorized_entry(scope, cwd, record, include_hidden=include_hidden) is None:
+        if await self._authorized_entry(scope, cwd, record, include_hidden=include_hidden, permitted=permitted) is None:
             return None
         return self._match_line(scope, cwd, record, include_hidden=include_hidden)
 

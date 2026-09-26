@@ -18,6 +18,7 @@ class CountingBackend(LocalWorkspaceBackend):
         super().__init__(root, env={'PATH': '/usr/bin:/bin'})
         self.commands = 0
         self.reads = 0
+        self.realpaths = 0
 
     async def run(
         self,
@@ -30,6 +31,10 @@ class CountingBackend(LocalWorkspaceBackend):
     ) -> CommandResult:
         self.commands += 1
         return await super().run(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
+
+    async def realpath(self, path: str) -> str:
+        self.realpaths += 1
+        return await super().realpath(path)
 
     async def read_bytes(self, path: str) -> bytes:
         self.reads += 1
@@ -49,10 +54,10 @@ async def test_no_rg_uses_one_command_and_preserves_ignores(tmp_path: Path) -> N
     tools = FileSystem[None](tools=['grep', 'list_files']).get_toolset()
     assert isinstance(tools, FileSystemToolset)
     assert await tools.grep('needle', workspace=workspace) == 'src/visible.py:1:needle'
-    assert backend.commands == 2  # the first call discovers that rg is missing
+    assert backend.commands == 3  # probe, search and one batch of path checks
     assert backend.reads == 0
     assert await tools.list_files(glob='*.py', workspace=workspace) == 'src/visible.py'
-    assert backend.commands == 3
+    assert backend.commands == 5
     assert backend.reads == 0
 
 
@@ -81,13 +86,32 @@ async def test_no_rg_search_files_is_one_command_and_confines_symlinks(tmp_path:
         outside.unlink()
 
 
+async def test_many_search_results_use_batched_path_checks(tmp_path: Path) -> None:
+    for index in range(20):
+        (tmp_path / f'{index:02}.txt').write_text('needle\n')
+    backend = CountingBackend(tmp_path)
+    tools = FileSystem[None](root_dir=tmp_path, max_search_results=25, max_find_results=25).get_toolset()
+    assert isinstance(tools, FileSystemToolset)
+    await tools.search_files('absent', workspace=backend)
+    for call in (
+        lambda: tools.search_files('needle', workspace=backend),
+        lambda: tools.grep('needle', workspace=backend),
+        lambda: tools.list_files(workspace=backend),
+    ):
+        backend.commands = 0
+        backend.realpaths = 0
+        assert len((await call()).splitlines()) == 20
+        assert backend.commands <= 3
+        assert backend.realpaths <= 2
+
+
 async def test_first_search_files_uses_command_not_walker(tmp_path: Path) -> None:
     (tmp_path / 'visible.txt').write_text('needle\n')
     backend = CountingBackend(tmp_path)
     tools = FileSystem[None](root_dir=tmp_path).get_toolset()
     assert isinstance(tools, FileSystemToolset)
     assert await tools.search_files('needle', workspace=backend) == 'visible.txt:1:needle'
-    assert backend.commands == 2  # probe rg, then search in the workspace
+    assert backend.commands == 3  # probe rg, search, then batch path checks
     assert backend.reads == 0
 
 

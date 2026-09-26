@@ -40,6 +40,7 @@ async def run_posix_search(
     include_hidden: bool = False,
     limit: int,
     accept: Callable[[Record], Awaitable[_T | None]],
+    prepare: Callable[[list[Record]], Awaitable[None]] | None = None,
 ) -> tuple[list[_T], bool]:
     """Enumerate sorted files and optionally grep them without transferring their contents to the host."""
     if pattern is not None and not literal:
@@ -94,6 +95,7 @@ async def run_posix_search(
     output = result.stdout
     cut = len(output.encode('utf-8', errors='surrogateescape')) >= _MAX_OUTPUT_BYTES
     results: list[_T] = []
+    records: list[Record] = []
     start = 0
     while (end := output.find('\0', start)) >= 0:
         path = output[start:end]
@@ -110,12 +112,16 @@ async def run_posix_search(
         if start - end > _MAX_RECORD_BYTES:
             cut = True
             break
-        kept = await accept(Record(path=path, text=text))
+        records.append(Record(path=path, text=text))
+    if start < len(output):
+        cut = True
+    if prepare is not None:
+        await prepare(records)
+    for record in records:
+        kept = await accept(record)
         if kept is not None:
             if len(results) >= limit:
                 cut = True
                 break
             results.append(kept)
-    if start < len(output):
-        cut = True
     return results, cut
