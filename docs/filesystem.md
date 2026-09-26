@@ -29,10 +29,13 @@ Add `FileSystem` to your agent's `capabilities`, together with a workspace for
 the files to live in:
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import FileSystem
 
+Path('./workspace').mkdir(exist_ok=True)
 agent = Agent(
     'anthropic:claude-opus-5-5',
     capabilities=[LocalWorkspace('./workspace'), FileSystem()],

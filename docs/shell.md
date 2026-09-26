@@ -33,10 +33,13 @@ Pass `Shell` to an `Agent` via the `capabilities` parameter, together with a
 workspace for the commands to run in:
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import Shell
 
+Path('./workspace').mkdir(exist_ok=True)
 agent = Agent(
     'anthropic:claude-opus-5-5',
     capabilities=[
