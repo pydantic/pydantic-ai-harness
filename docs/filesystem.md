@@ -397,10 +397,11 @@ or a workspace capability in Python).
 
 ## Durable execution
 
-`FileSystem` works under DBOS, Temporal and Prefect durable execution. Under Temporal its tools
-run in activities, which cannot reach the run's event stream yet
-([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)), so they emit no events there and a
-`FileChangeRequestEvent` listener cannot refuse a change.
+`FileSystem` works under DBOS, Temporal and Prefect durable execution. Under Temporal,
+file changes ask `FileChangeRequestEvent` listeners for approval in the workflow before
+workspace mutations run as durable activities. Read and post-write events from tools running
+in activities are not forwarded to workflow listeners yet
+([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
 
 ## Further reading
 
