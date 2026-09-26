@@ -636,7 +636,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             return False
         return True
 
-    def _walk_entry(self, scope: _Scope, path: str) -> str | None:
+    def _walk_entry(self, scope: _Scope, path: str, start: str) -> str | None:
         """Authorize one entry of a directory walk: its root-relative path, or `None` to skip it.
 
         Hidden entries are skipped, matching `list_directory`, `search_files`,
@@ -648,7 +648,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             # backend or `rg` build that reports an entry elsewhere.
             return None
         relative = posixpath.relpath(path, scope.root)
-        if _is_hidden(relative) or not self._is_accessible(relative):
+        # The caller explicitly named `start`; only hidden components below it are omitted.
+        if _is_hidden(posixpath.relpath(path, start)) or not self._is_accessible(relative):
             return None
         return relative
 
@@ -1112,7 +1113,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         for entry in sorted(children, key=lambda child: child.name):
             # Skip dotfiles and dot-directories, matching search_files and
             # find_files so the three walkers agree on what exists.
-            if self._walk_entry(scope, entry.path) is None:
+            if self._walk_entry(scope, entry.path, resolved) is None:
                 continue
             rel = posixpath.relpath(entry.path, scope.cwd)
             if entry.is_dir:
@@ -1197,7 +1198,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         capped = False
         for file in sorted(files, key=lambda child: _sort_key(child.path)):
             file_path = file.path
-            rel_str = self._walk_entry(scope, file_path)
+            rel_str = self._walk_entry(scope, file_path, resolved)
             if rel_str is None:
                 continue
             if include_glob and not fnmatch.fnmatch(rel_str, include_glob):
@@ -1302,7 +1303,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         matches: list[str] = []
         capped = False
         for match in sorted(found, key=lambda child: _sort_key(child.path)):
-            if self._walk_entry(scope, match.path) is None:
+            if self._walk_entry(scope, match.path, resolved) is None:
                 continue
             if not match.is_dir and match.size is None and not await scope.workspace.exists(match.path):
                 # A dangling symlink is inside the root but names nothing.
@@ -1543,7 +1544,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         pure-Python ones, which skip dotfiles regardless of patterns.
         """
         target = posixpath.normpath(posixpath.join(cwd, record.path))
-        if self._walk_entry(scope, target) is None:
+        if self._walk_entry(scope, target, cwd) is None:
             return None
         return posixpath.relpath(target, scope.cwd)
 

@@ -998,6 +998,18 @@ class TestListDirectory:
 
 
 class TestSearchFiles:
+    async def test_explicit_hidden_directory_can_be_searched(self, fs_root: Path) -> None:
+        (fs_root / '.github' / 'workflows').mkdir(parents=True)
+        (fs_root / '.github' / 'workflows' / 'ci.txt').write_text('needle\n')
+        toolset = FileSystem[None](root_dir=fs_root).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        workspace = LocalWorkspaceBackend(fs_root)
+        assert await toolset.find_files('**/*.txt', path='.github', workspace=workspace) == '.github/workflows/ci.txt'
+        assert await toolset.search_files('needle', path='.github', workspace=workspace) == (
+            '.github/workflows/ci.txt:1:needle'
+        )
+        assert await toolset.list_directory('.github', workspace=workspace) == '.github/workflows/'
+
     async def test_symlinked_directory_loop_does_not_duplicate_matches(self, fs_root: Path) -> None:
         (fs_root / 'loop').symlink_to('.', target_is_directory=True)
         toolset = FileSystem[None](root_dir=fs_root).get_toolset()

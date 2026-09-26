@@ -94,7 +94,7 @@ FileSystem(tools=['read_file', 'edit_file', 'list_files', 'grep'])
 Both respect ripgrep's defaults: `.gitignore` inside a git repository and
 `.ignore` files anywhere. As in ripgrep, an explicit `glob` takes precedence
 over those ignore files; unlike ripgrep, dotfiles and dot-directories stay
-hidden even then, as with the other walkers. Output is sorted by path, so a capped
+hidden even then, as with the other walkers, unless a hidden directory is explicitly named as the search path. Output is sorted by path, so a capped
 result is a deterministic prefix rather than a random subset. `grep` reports
 matches as `path:line:text` and context lines as `path-line-text`, paths relative
 to the working directory; a pattern uses ripgrep's regex syntax unless `literal` is set. A
