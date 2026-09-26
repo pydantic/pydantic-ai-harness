@@ -65,6 +65,9 @@ async def client() -> AsyncIterator[daytona.AsyncDaytona]:
     require_live_credentials()
     async with daytona.AsyncDaytona() as client:
         yield client
+    # aiohttp closes SSL transports on the next loop ticks after ClientSession.close().
+    # Let them finish before pytest tears down this module's event loop.
+    await asyncio.sleep(0.25)
 
 
 @pytest.fixture(autouse=True)
@@ -84,7 +87,7 @@ def record_created_sandboxes(monkeypatch: pytest.MonkeyPatch) -> None:
         else:
             native = await original(client, params, timeout=timeout, on_snapshot_create_logs=on_snapshot_create_logs)
         with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as log:
-            log.write(f'anyio-daytona daytona {native.id}\n')
+            log.write(f'anyio-daytona2 daytona {native.id}\n')
         return native
 
     monkeypatch.setattr(daytona.AsyncDaytona, 'create', create)
