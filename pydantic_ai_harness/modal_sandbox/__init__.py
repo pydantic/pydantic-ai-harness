@@ -16,7 +16,7 @@ __all__ = ['ModalSandbox', 'ModalSandboxBackend']
 # one raises an `ImportError` that says where to go, instead of Python's bare "cannot import name".
 _REMOVED_NAMES: dict[str, str] = {
     'ModalSandboxSession': (
-        'To share a sandbox you own across runs, pass `ModalSandboxBackend(workspace=<modal.Sandbox>)` '
+        'To share a sandbox you own across runs, pass `ModalSandboxBackend(sandbox=<modal.Sandbox>)` '
         'as `workspace=` to `agent.run()`.'
     ),
     'ModalSandboxExecResult': '`backend.run(...)` returns a `pydantic_ai.workspaces.CommandResult`.',

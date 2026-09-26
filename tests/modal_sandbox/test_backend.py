@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 
-from pydantic_ai_harness.modal_sandbox import ModalSandbox, ModalSandboxBackend
+from pydantic_ai_harness.modal_sandbox import ModalSandbox, ModalSandboxBackend, _backend
 
 from .fake_modal import FakeImage, FakeModal, FileInfo
 
@@ -35,7 +36,7 @@ def test_modal_guides_describe_best_effort_stop() -> None:
 
 async def started(**settings: Any) -> ModalSandboxBackend:
     backend = ModalSandboxBackend(**settings)
-    await backend.get_client()
+    await backend.get_sandbox()
     return backend
 
 
@@ -57,7 +58,7 @@ async def test_auth_failure_classifies_reason_without_echoing_secret(fake_modal:
     secret = 'modal-secret-value-123'
     fake_modal.create_error = fake_modal.exception('AuthError')(f'token {secret} expired')
     with pytest.raises(WorkspaceUnavailableError, match='Credential expired') as exc:
-        await ModalSandboxBackend().get_client()
+        await ModalSandboxBackend().get_sandbox()
     assert secret not in str(exc.value)
     assert 'MODAL_TOKEN_ID' in str(exc.value)
 
@@ -69,23 +70,16 @@ async def test_destroy_rejects_foreign_ref_without_sdk_call(fake_modal: FakeModa
 
 
 class TestRun:
-    async def test_argv_runs_without_a_shell(self, fake_modal: FakeModal) -> None:
-        fake_modal.responder = lambda argv, timeout: (' '.join(argv), '', 0)
+    async def test_argv_is_execed_by_sh(self, fake_modal: FakeModal) -> None:
+        """`sh` execs the program, so one that can't start exits 127 or 126 as it does in `sh`."""
         backend = await started()
-        result = await backend.run(['echo', 'hi'])
-        assert result.stdout == 'echo hi'
-        assert fake_modal.sandboxes[0].exec_calls[-1].argv == ['echo', 'hi']
+        await backend.run(['echo', 'hi'])
+        assert fake_modal.sandboxes[0].exec_calls[-1].argv == ['/bin/sh', '-c', 'exec "$@"', 'sh', 'echo', 'hi']
 
     async def test_shell_wraps_in_sh(self, fake_modal: FakeModal) -> None:
         backend = await started()
         await backend.run('echo hi | wc -c', shell=True)
         assert fake_modal.sandboxes[0].exec_calls[-1].argv == ['/bin/sh', '-c', 'echo hi | wc -c']
-
-    async def test_reports_streams_and_exit_code(self, fake_modal: FakeModal) -> None:
-        fake_modal.responder = lambda argv, timeout: ('out', 'err', 2)
-        backend = await started()
-        result = await backend.run(['false'])
-        assert (result.stdout, result.stderr, result.exit_code) == ('out', 'err', 2)
 
     async def test_cwd_and_env_reach_the_command(self, fake_modal: FakeModal) -> None:
         backend = await started()
@@ -170,12 +164,18 @@ class TestRun:
         backend = await started()
         assert (await backend.run(['x'])).exit_code == -1
 
-    async def test_server_side_deadline_kill_is_a_timeout(self, fake_modal: FakeModal) -> None:
+    async def test_server_side_deadline_kill_is_a_timeout(
+        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # The server enforces the deadline before the client's own clock fires, so its
         # SIGKILL (exit 137) can beat Modal's -1 sentinel; a 137 that consumed the whole
         # deadline window is a timeout, not a mysterious ordinary exit.
+        now = 0.0
+        monkeypatch.setattr(_backend, 'time', types.SimpleNamespace(monotonic=lambda: now))
+
         def deadline_kill(argv: list[str], timeout: int | None) -> tuple[str, str, int]:
-            time.sleep(1.05)  # the deadline is consumed inside the exec RPC, before `wait()`
+            nonlocal now
+            now += 1.05  # the deadline is consumed inside the exec RPC, before `wait()`
             return '', '', 137
 
         fake_modal.responder = deadline_kill
@@ -207,6 +207,21 @@ class TestRun:
         backend = await started()
         fake_modal.sandboxes[0].poll_error = ValueError('control plane unavailable')
         assert (await backend.run(['kill-self'])).exit_code == 137
+
+    async def test_early_sigkill_with_slow_output_is_a_real_exit(self, fake_modal: FakeModal) -> None:
+        # A delayed output drain should not make an early exit look like a deadline kill.
+        fake_modal.responder = lambda argv, timeout: ('', '', 137)
+        fake_modal.stdout_delay = 1.1
+        backend = await started()
+        assert (await backend.run(['kill-self'], timeout=1)).exit_code == 137
+
+    @pytest.mark.parametrize('stage', ['exec_error', 'wait_error'])
+    async def test_an_sdk_timeout_error_is_not_a_command_timeout(self, fake_modal: FakeModal, stage: str) -> None:
+        setattr(fake_modal, stage, TimeoutError('transport'))
+        backend = await started()
+        with pytest.raises(TimeoutError, match='transport') as exc:
+            await backend.run(['x'])
+        assert not isinstance(exc.value, WorkspaceTimeoutError)
 
     async def test_invalid_utf8_output_uses_replacement_characters(self, fake_modal: FakeModal) -> None:
         # Modal's text mode decodes strictly; reading bytes and decoding with replacement
@@ -393,7 +408,9 @@ class TestWorkingDir:
         backend = await started()
         assert await backend.working_dir() == '/srv'
         assert await backend.working_dir() == '/srv'
-        assert [call.argv for call in fake_modal.sandboxes[0].exec_calls] == [['pwd', '-P']]
+        assert [call.argv for call in fake_modal.sandboxes[0].exec_calls] == [
+            ['/bin/sh', '-c', 'exec "$@"', 'sh', 'pwd', '-P']
+        ]
 
     async def test_the_probe_carries_a_deadline(self, fake_modal: FakeModal) -> None:
         # Modal has no per-command kill, so even the internal probe is bounded.
@@ -431,10 +448,10 @@ class TestCreate:
     async def test_lost_create_reply_recovers_sandbox_by_name(self, fake_modal: FakeModal) -> None:
         fake_modal.create_reply_error = fake_modal.exception('ConnectionError')('reply lost')
         backend = ModalSandboxBackend()
-        sandbox = await backend.get_client()
+        sandbox = await backend.get_sandbox()
         assert backend.ref == WorkspaceRef(provider='modal', id=sandbox.object_id)
         assert fake_modal.owned_creates == 1
-        assert await backend.get_client() is sandbox
+        assert await backend.get_sandbox() is sandbox
 
     async def test_lost_create_reply_at_local_deadline_recovers_ref(
         self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
@@ -442,14 +459,14 @@ class TestCreate:
         fake_modal.create_gate = anyio.Event()
         monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._CREATE_TIMEOUT', 0.01)
         backend = ModalSandboxBackend()
-        sandbox = await backend.get_client()
+        sandbox = await backend.get_sandbox()
         assert backend.ref == WorkspaceRef(provider='modal', id=sandbox.object_id)
         assert fake_modal.owned_creates == 1
 
     async def test_native_task_cancellation_records_in_flight_creation(self, fake_modal: FakeModal) -> None:
         backend = ModalSandboxBackend()
         fake_modal.create_gate = anyio.Event()
-        task = asyncio.create_task(backend.get_client())
+        task = asyncio.create_task(backend.get_sandbox())
         with anyio.fail_after(2):
             while not fake_modal.create_started:
                 await anyio.sleep(0)
@@ -461,7 +478,7 @@ class TestCreate:
             while backend.ref is None:
                 await anyio.sleep(0)
         assert backend.ref == WorkspaceRef(provider='modal', id='sb-owned')
-        assert await backend.get_client() is fake_modal.sandboxes[0]
+        assert await backend.get_sandbox() is fake_modal.sandboxes[0]
         assert fake_modal.owned_creates == 1
 
     @pytest.mark.parametrize('operation', ['run', 'write_bytes'])
@@ -539,7 +556,7 @@ class TestCreate:
         fake_modal.create_before_gate = True
         monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._CREATE_TIMEOUT', 0.01)
         with pytest.raises(TimeoutError, match='image build or pull may still be running'):
-            await ModalSandboxBackend().get_client()
+            await ModalSandboxBackend().get_sandbox()
 
     async def test_image_build_error_is_unavailable(self, fake_modal: FakeModal) -> None:
         fake_modal.create_error = fake_modal.exception('ImageBuildError')('bad image')
@@ -653,7 +670,6 @@ class TestFilesystem:
         assert (entry.is_dir, entry.size) == (True, None)
 
     async def test_list_dir_returns_absolute_paths(self, fake_modal: FakeModal) -> None:
-        fake_modal.sandboxes.clear()
         backend = await started()
         fake_modal.sandboxes[0].listing = [FileInfo('a.py', False, size=7), FileInfo('pkg', True)]
         entries = await backend.list_dir('/srv')
@@ -734,12 +750,6 @@ class TestFilesystem:
         await backend.make_dir('/tmp/pkg')
         await backend.remove('/tmp/pkg')
         assert fake_modal.sandboxes[0].removals == [('/tmp/pkg', True)]
-
-    async def test_exists(self, fake_modal: FakeModal) -> None:
-        backend = await started()
-        await backend.write_bytes('/tmp/a.txt', b'body')
-        assert await backend.exists('/tmp/a.txt') is True
-        assert await backend.exists('/tmp/missing.txt') is False
 
     async def test_exists_is_false_through_a_non_directory(self, fake_modal: FakeModal) -> None:
         # Modal splits "there is nothing at that path" in two, and a non-leaf path component

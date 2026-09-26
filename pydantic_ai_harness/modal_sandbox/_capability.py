@@ -37,7 +37,7 @@ _LEGACY_ARGUMENTS: Mapping[str, str] = {
     ),
     'session': (
         '`ModalSandboxSession` no longer exists. To share a sandbox you own across runs, pass '
-        '`ModalSandboxBackend(workspace=<modal.Sandbox>)` (or its `WorkspaceRef`) as `workspace=` to '
+        '`ModalSandboxBackend(sandbox=<modal.Sandbox>)` (or its `WorkspaceRef`) as `workspace=` to '
         '`agent.run()`. The backend never terminates a sandbox; that stays your job.'
     ),
     'default_command_timeout': (
@@ -142,7 +142,9 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
     """Environment variables every command in the sandbox gets; a command's own `env` is layered on top."""
 
     warn_if_no_tools: bool = True
-    """Warn once when a run has no `Shell` or `FileSystem` tool to reach the sandbox.
+    """Warn once per process when none of a run's tools has a `Shell` or `FileSystem` tool name.
+
+    Only tool names are checked, so custom tools that reach the sandbox under other names do not count.
 
     Set it to `False` for agents that reach the sandbox only from their own tools or hooks.
     This flag and its warning go away in the stable harness release.

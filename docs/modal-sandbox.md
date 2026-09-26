@@ -103,7 +103,7 @@ The ref holds no credentials, so the process that reattaches needs your Modal cr
 
 `image`, `app_name`, `create_app_if_missing`, `sandbox_timeout`, and `idle_timeout` only shape a new sandbox; `working_dir` and `env` apply to every command, including after you reattach.
 
-Already have a `modal.Sandbox`? Pass `workspace=ModalSandboxBackend(workspace=sandbox)` to a run, with `ModalSandboxBackend` from `pydantic_ai_harness.modal_sandbox`. `ModalSandbox`'s settings don't apply to it; pass `working_dir=` and `env=` to the backend.
+Already have a `modal.Sandbox`? Pass `workspace=ModalSandboxBackend(sandbox=sandbox)` to a run, with `ModalSandboxBackend` from `pydantic_ai_harness.modal_sandbox`. `ModalSandbox`'s settings don't apply to it; pass `working_dir=` and `env=` to the backend.
 
 ## Clean up
 
@@ -126,7 +126,7 @@ async def terminate_sandbox(ref: WorkspaceRef) -> None:
 
 File reads refuse FIFOs rather than waiting indefinitely for a writer. Writes through symlinks update the target, including when the target was created by a shell command.
 
-`get_client()` returns the `modal.Sandbox`. A sandbox you don't terminate ends when its `sandbox_timeout` runs out, or after `idle_timeout` seconds without activity if you set one. See [Modal's timeouts](https://modal.com/docs/guide/sandbox#timeouts).
+`get_sandbox()` returns the `modal.Sandbox`. A sandbox you don't terminate ends when its `sandbox_timeout` runs out, or after `idle_timeout` seconds without activity if you set one. See [Modal's timeouts](https://modal.com/docs/guide/sandbox#timeouts).
 
 A failed run returns no result, so there is no ref to store. To terminate its sandbox, clean up in an `on_run_error` hook; `after_run` doesn't run when a run fails:
 
@@ -185,7 +185,7 @@ The previous `ModalSandbox` registered its own `run_command`, `read_file`, `writ
 | `sandbox_timeout` | Unchanged name. The default is now `86_400` (24 hours) instead of `300`. |
 | `workdir` | Renamed `working_dir`. `workdir=` still works, with a deprecation warning. |
 | `sandbox_id` | Removed. Use `agent.run(..., workspace=WorkspaceRef(provider='modal', id=sandbox_id))`. |
-| `session`, `ModalSandboxSession` | Removed. Use `agent.run(..., workspace=ModalSandboxBackend(workspace=<modal.Sandbox>))`. |
+| `session`, `ModalSandboxSession` | Removed. Use `agent.run(..., workspace=ModalSandboxBackend(sandbox=<modal.Sandbox>))`. |
 | `default_command_timeout` | Removed. Use `Shell(default_timeout=...)`. |
 | `max_command_timeout` | Removed. Set a command timeout on `Shell`; `sandbox_timeout` limits the lifetime of a new sandbox and does not apply to attached sandboxes. |
 | `max_output_bytes`, `max_output_lines` | Removed. Use `Shell(max_output_chars=...)` or `ToolOutputLimits`. |

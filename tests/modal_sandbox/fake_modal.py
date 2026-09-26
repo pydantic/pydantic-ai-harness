@@ -121,17 +121,34 @@ class _HangingAioCall:
         await anyio.sleep_forever()
 
 
+class _DelayedAioCall(_AioCallable):
+    """An `.aio` that returns after `delay` seconds, like output still draining after the process exited."""
+
+    def __init__(self, fn: Callable[..., Any], delay: float) -> None:
+        super().__init__(fn)
+        self._delay = delay
+
+    async def aio(self, *args: Any, **kwargs: Any) -> Any:
+        await anyio.sleep(self._delay)
+        return self._fn(*args, **kwargs)
+
+
 class _FakeStream:
     """Mimics the whole-output `.read.aio()` surface used by the backend."""
 
-    def __init__(self, data: bytes, hangs: bool = False) -> None:
+    def __init__(self, data: bytes, hangs: bool = False, delay: float = 0.0) -> None:
         self._data = data
         self._hangs = hangs
-        self.read = _HangingAioCall() if hangs else _AioCallable(self._read)
+        self._delay = delay
+        self.read = (
+            _HangingAioCall() if hangs else _DelayedAioCall(self._read, delay) if delay else _AioCallable(self._read)
+        )
 
     async def __aiter__(self) -> AsyncGenerator[bytes, None]:
         if self._hangs:
             await anyio.sleep_forever()
+        if self._delay:
+            await anyio.sleep(self._delay)
         await anyio.lowlevel.checkpoint()
         yield self._data
 
@@ -148,8 +165,9 @@ class _FakeProcess:
         wait_error: Exception | None,
         wait_hangs: bool,
         stdout_hangs: bool = False,
+        stdout_delay: float = 0.0,
     ) -> None:
-        self.stdout = _FakeStream(stdout, stdout_hangs)
+        self.stdout = _FakeStream(stdout, stdout_hangs, stdout_delay)
         self.stderr = _FakeStream(stderr)
         self._returncode = returncode
         self._wait_error = wait_error
@@ -183,7 +201,7 @@ class FakeInvalidError(FakeModalError):
 
 
 class FakeConflictError(FakeInvalidError):
-    """Stand-in for `modal.exception.ConflictError` (first exec on a dead workspace, or a transient abort)."""
+    """Stand-in for `modal.exception.ConflictError` (first exec on a dead sandbox, or a transient abort)."""
 
 
 class FakeSandboxFilesystemError(FakeModalError):
@@ -254,10 +272,10 @@ class FileInfo:
 
 
 class _FakeFilesystem:
-    """Mirrors `workspace.filesystem`: an in-memory store the tests can drive and inspect."""
+    """Mirrors `sandbox.filesystem`: an in-memory store the tests can drive and inspect."""
 
-    def __init__(self, workspace: FakeSandbox) -> None:
-        self._workspace = workspace
+    def __init__(self, sandbox: FakeSandbox) -> None:
+        self._sandbox = sandbox
         self.read_bytes = _AioCallable(self._read_bytes)
         self.write_bytes = _AioCallable(self._write_bytes)
         self.list_files = _AioCallable(self._list_files)
@@ -267,51 +285,47 @@ class _FakeFilesystem:
 
     def _read_bytes(self, remote_path: str) -> bytes:
         self._check(remote_path)
-        if remote_path in self._workspace.directories:
-            raise FakeSandboxFilesystemIsADirectoryError(f'Is a directory: {remote_path}')
-        data = self._workspace.files.get(remote_path)
+        data = self._sandbox.files.get(remote_path)
         if data is None:
             raise FakeSandboxFilesystemNotFoundError(f'No such file or directory: {remote_path}')
         return data
 
     def _stat(self, remote_path: str) -> FileInfo:
         self._check(remote_path)
-        if remote_path in self._workspace.directories:
+        if remote_path in self._sandbox.directories:
             return FileInfo(posixpath.basename(remote_path), True)
-        if remote_path not in self._workspace.files and remote_path not in self._workspace.stat_sizes:
+        data = self._sandbox.files.get(remote_path)
+        if data is None:
             raise FakeSandboxFilesystemNotFoundError(f'No such file or directory: {remote_path}')
-        # Size comes from the stored bytes, or an override the test set for this path.
-        size = self._workspace.stat_sizes.get(remote_path, len(self._workspace.files.get(remote_path, b'')))
         # Real Modal reports the entry's basename, not the full path.
-        return FileInfo(posixpath.basename(remote_path), False, size=size)
+        return FileInfo(posixpath.basename(remote_path), False, size=len(data))
 
     def _write_bytes(self, data: bytes, remote_path: str) -> None:
         self._check(remote_path)
-        self._workspace.files[remote_path] = data
+        self._sandbox.files[remote_path] = data
 
     def _list_files(self, remote_path: str) -> list[FileInfo]:
         self._check(remote_path)
-        self._workspace.list_paths.append(remote_path)
-        return self._workspace.listing
+        return self._sandbox.listing
 
     def _make_directory(self, remote_path: str, *, create_parents: bool = True) -> None:
-        # Closed keyword signature on purpose, like `workspace_create`: `create_parents` is the
+        # Closed keyword signature on purpose, like `sandbox_create`: `create_parents` is the
         # real API's `mkdir -p` switch and defaults to True there too.
         self._check(remote_path)
-        self._workspace.directories.add(remote_path)
+        self._sandbox.directories.add(remote_path)
 
     def _remove(self, remote_path: str, *, recursive: bool = False) -> None:
         self._check(remote_path)
-        self._workspace.removals.append((remote_path, recursive))
-        self._workspace.directories.discard(remote_path)
-        self._workspace.files.pop(remote_path, None)
+        self._sandbox.removals.append((remote_path, recursive))
+        self._sandbox.directories.discard(remote_path)
+        self._sandbox.files.pop(remote_path, None)
 
     def _check(self, remote_path: str) -> None:
         # Real Modal's filesystem API only accepts absolute paths; assert it here so a
         # regression that let a relative path through unresolved fails in the fake the way it
         # would in prod, instead of silently keying the in-memory store on a relative path.
         assert posixpath.isabs(remote_path), f'Modal filesystem requires an absolute path, got {remote_path!r}'
-        error = self._workspace.fs_error
+        error = self._sandbox.fs_error
         if isinstance(error, FakeSandboxFilesystemError):
             # What the filesystem tool itself reported; Modal raises these as they are.
             raise error
@@ -352,7 +366,7 @@ def _host_errors(remote_path: str) -> Generator[None]:
 
 
 class _HostFilesystem:
-    """Mirrors `workspace.filesystem` on the real host filesystem, for the conformance suite.
+    """Mirrors `sandbox.filesystem` on the real host filesystem, for the conformance suite.
 
     The suite checks that commands and filesystem methods see one environment, which the
     in-memory store cannot show; here both act on the same host paths.
@@ -421,14 +435,10 @@ class FakeSandbox:
         self.files: dict[str, bytes] = {}
         self.directories: set[str] = set()
         self.removals: list[tuple[str, bool]] = []
-        # Lets a test report a large size for a path without allocating the bytes.
-        self.stat_sizes: dict[str, int] = {}
-        self.list_paths: list[str] = []
         self.listing: list[FileInfo] = []
         self.fs_error: Exception | None = None
         self.poll_result: int | None = None
         self.poll_error: Exception | None = None
-        self.poll_calls = 0
         self.shutting_down = False
         self.terminate = _AioCallable(self._terminate)
         self.workdir: str | None = None
@@ -535,20 +545,22 @@ class FakeSandbox:
             raise FakeConflictError('Modal Sandbox is shutting down.')
         if self._control.exec_error is not None:
             raise self._control.exec_error
-        # In-memory fake stores only regular files; its generic echo responder would
-        # otherwise report that every path is a FIFO.
-        stdout, stderr, code = ('', '', 1) if argv[:2] == ['test', '-p'] else self._control.responder(argv, timeout)
+        # The command wrapper runs argv through sh; answer for the actual program.
+        program = argv[4:] if argv[:4] == ['/bin/sh', '-c', 'exec "$@"', 'sh'] else argv
+        # In-memory fake stores only regular files; its generic responder does not know FIFOs.
+        probing_fifo = program[:2] == ['test', '-p']
+        stdout, stderr, code = ('', '', 1) if probing_fifo else self._control.responder(program, timeout)
         return _FakeProcess(
             _stream_bytes(stdout),
             _stream_bytes(stderr),
             code,
             self._control.wait_error,
-            self._control.wait_hangs and argv[:2] != ['test', '-p'],
-            self._control.stdout_hangs and argv[:2] != ['test', '-p'],
+            self._control.wait_hangs and not probing_fifo,
+            self._control.stdout_hangs and not probing_fifo,
+            self._control.stdout_delay,
         )
 
     def _poll(self) -> int | None:
-        self.poll_calls += 1
         if self.poll_error is not None:
             raise self.poll_error
         if self.poll_result is not None:
@@ -564,9 +576,6 @@ class FakeModal:
         self.sandboxes: list[FakeSandbox] = []
         self.create_kwargs: list[dict[str, object]] = []
         self.app_lookups: list[dict[str, object]] = []
-        # The marker objects `App.lookup` returned, so a test can assert the looked-up app
-        # is the one passed to `Sandbox.create`.
-        self.apps: list[object] = []
         self.image_tags: list[str] = []
         self.attach_ids: list[str] = []
         self.owned_creates = 0
@@ -582,6 +591,8 @@ class FakeModal:
         self.wait_error: Exception | None = None
         self.wait_hangs = False
         self.stdout_hangs = False
+        # Seconds stdout takes to drain after the process has exited.
+        self.stdout_delay = 0.0
         # When set, sandboxes run commands and file operations on the host under this directory.
         self.host_root: Path | None = None
         self.module = self._build_module()
@@ -596,17 +607,15 @@ class FakeModal:
 
         def app_lookup(name: str, *, create_if_missing: bool = False) -> object:
             control.app_lookups.append({'name': name, 'create_if_missing': create_if_missing})
-            app = object()
-            control.apps.append(app)
-            return app
+            return object()
 
         def image_from_registry(tag: str) -> object:
-            # Closed signature on purpose, like `workspace_create` below: signature drift in
+            # Closed signature on purpose, like `sandbox_create` below: signature drift in
             # the backend should fail here, not only in production.
             control.image_tags.append(tag)
             return object()
 
-        def workspace_create(
+        def sandbox_create(
             *,
             app: object,
             image: object,
@@ -636,17 +645,17 @@ class FakeModal:
             control.sandboxes.append(workspace)
             return workspace
 
-        def workspace_from_id(id: str) -> FakeSandbox:
+        def sandbox_from_id(id: str) -> FakeSandbox:
             control.attach_ids.append(id)
             if control.attach_error is not None:
                 raise control.attach_error
             existing = next((s for s in control.sandboxes if s.object_id == id), None)
             if existing is not None:
                 return existing
-            workspace = FakeSandbox(control, id)
-            workspace.poll_result = control.attach_poll_result
-            control.sandboxes.append(workspace)
-            return workspace
+            sandbox = FakeSandbox(control, id)
+            sandbox.poll_result = control.attach_poll_result
+            control.sandboxes.append(sandbox)
+            return sandbox
 
         def workspace_from_name(app_name: str, name: str) -> FakeSandbox:
             existing = next((sandbox for sandbox in control.sandboxes if sandbox.name == name), None)
@@ -665,8 +674,8 @@ class FakeModal:
             debian_slim = staticmethod(image_debian_slim)
 
         class Sandbox:
-            create = _GatedCreate(workspace_create, control)
-            from_id = _AioCallable(workspace_from_id)
+            create = _GatedCreate(sandbox_create, control)
+            from_id = _AioCallable(sandbox_from_id)
             from_name = _AioCallable(workspace_from_name)
 
         module.App = App  # type: ignore[attr-defined]

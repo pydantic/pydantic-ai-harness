@@ -16,7 +16,7 @@ from pydantic_ai.workspaces.testing import WorkspaceBackendSuite
 
 from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
 
-from .conftest import LIVE_IDLE_TIMEOUT, LIVE_SANDBOX_TIMEOUT
+from .conftest import LIVE_IDLE_TIMEOUT, LIVE_SANDBOX_TIMEOUT, skip_or_fail_live_tier
 from .fake_modal import FakeModal
 
 
@@ -26,7 +26,7 @@ def _attach(ref: WorkspaceRef) -> WorkspaceBackend:
 
 async def _terminate(backend: WorkspaceBackend) -> None:
     assert isinstance(backend, ModalSandboxBackend)
-    sandbox = await backend.get_client()
+    sandbox = await backend.get_sandbox()
     await sandbox.terminate.aio()
 
 
@@ -61,10 +61,12 @@ class TestLiveModalSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover - 
     @pytest.fixture(scope='class')
     @classmethod
     async def backend(cls) -> AsyncIterator[ModalSandboxBackend]:
+        # Class fixtures run before the function-scoped live gate in conftest.
+        skip_or_fail_live_tier()
         backend = ModalSandboxBackend(
             image='python:3.12-slim', sandbox_timeout=LIVE_SANDBOX_TIMEOUT, idle_timeout=LIVE_IDLE_TIMEOUT
         )
-        await backend.get_client()
+        await backend.get_sandbox()
         try:
             yield backend
         finally:

@@ -79,18 +79,6 @@ _PARTIAL_OUTPUT_LIMIT = 65_536
 logger = logging.getLogger(__name__)
 
 
-def _is_shutting_down(e: BaseException) -> bool:
-    """Whether Modal refused an exec because the sandbox has been terminated.
-
-    For up to about 30 seconds after `terminate()`, Modal still reports the sandbox as running
-    from `poll()` while refusing exec with this `ConflictError`. Only the message separates it
-    from a transient conflict.
-    """
-    import modal
-
-    return isinstance(e, modal.exception.ConflictError) and 'shutting down' in str(e).lower()
-
-
 def _translate(error: Exception, *, context: str, unavailable: str, path: str | None = None) -> Exception | None:
     """Map a Modal SDK exception onto the workspace protocol's typed failures.
 
@@ -107,8 +95,10 @@ def _translate(error: Exception, *, context: str, unavailable: str, path: str | 
         return WorkspaceUnavailableError(f'{safe_credential_reason(error)}. {_AUTH_MESSAGE}')
     # `SandboxTimeoutError` is the sandbox reaching its lifetime (`sandbox_timeout`), not a
     # command timing out; a command's own deadline is handled in `run()`.
+    # For about 30 seconds after `terminate()`, Modal still polls the sandbox as running while
+    # refusing exec with a `ConflictError`; only its message separates it from a transient conflict.
     if isinstance(error, (exc.NotFoundError, exc.SandboxTerminatedError, exc.SandboxTimeoutError)) or (
-        _is_shutting_down(error)
+        isinstance(error, exc.ConflictError) and 'shutting down' in str(error).lower()
     ):
         return WorkspaceUnavailableError(unavailable)
     if path is not None:
@@ -163,36 +153,45 @@ def _unwrap_filesystem_error(error: Exception) -> Exception:
 _MAX_SYMLINK_HOPS = 40
 
 
-async def _file_entry(sandbox: modal.Sandbox, entry: modal.types.FileInfo, path: str) -> FileEntry:
-    """The protocol entry for `entry` at `path`, with `is_dir` and `size` following a symlink.
+async def _follow_symlinks(
+    sandbox: modal.Sandbox, path: str, entry: modal.types.FileInfo | None
+) -> tuple[str, modal.types.FileInfo | None]:
+    """The path a symlink at `path` finally leads to, and its entry: `None` if it doesn't exist.
 
-    Modal's `stat` and `list_files` describe a symlink itself, so a symlink entry is resolved by
-    stat-ing its target, hop by hop. A dangling or looping link is reported as a file with no size.
+    Modal's `stat` and `list_files` describe a symlink itself, so a link is resolved by stat-ing its
+    target, hop by hop. A dangling or looping link has no entry.
     """
     import modal
 
-    target: modal.types.FileInfo | None = entry
     link, hops = path, 0
     visited = {posixpath.normpath(path)}
-    while target is not None and target.is_symlink():
+    while entry is not None and entry.is_symlink():
         hops += 1
-        if hops > _MAX_SYMLINK_HOPS or target.symlink_target is None:
-            target = None
-            continue
+        if hops > _MAX_SYMLINK_HOPS or entry.symlink_target is None:
+            return link, None
         # A relative target is relative to the directory holding the link.
-        link = posixpath.normpath(posixpath.join(posixpath.dirname(link), target.symlink_target))
+        link = posixpath.normpath(posixpath.join(posixpath.dirname(link), entry.symlink_target))
         if link in visited:
             # Modal does not detect all cycles in its symlink metadata; skip repeated RPCs.
-            target = None
+            entry = None
             continue
         visited.add(link)
         try:
-            target = await sandbox.filesystem.stat.aio(link)
+            entry = await sandbox.filesystem.stat.aio(link)
         except (
             modal.exception.SandboxFilesystemNotFoundError,
             modal.exception.SandboxFilesystemNotADirectoryError,
         ):
-            target = None
+            entry = None
+    return link, entry
+
+
+async def _file_entry(sandbox: modal.Sandbox, entry: modal.types.FileInfo, path: str) -> FileEntry:
+    """The protocol entry for `entry` at `path`, with `is_dir` and `size` following a symlink.
+
+    A dangling or looping link is reported as a file with no size.
+    """
+    _, target = await _follow_symlinks(sandbox, path, entry)
     is_dir = target is not None and target.is_dir()
     # A directory's reported size is an implementation detail of the underlying filesystem
     # rather than a content length, so report none for it, like the built-in backends.
@@ -204,7 +203,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     """A Modal sandbox implementing Pydantic AI's `WorkspaceBackend` protocol.
 
     Construction performs no I/O. The first operation creates or attaches to a sandbox, and the
-    typed `modal.Sandbox` is available through `get_client()`. The backend does not terminate the
+    typed `modal.Sandbox` is available through `get_sandbox()`. The backend does not terminate the
     sandbox; terminating it is the application's job.
 
     Commands run in isolated process groups. Cancellation and command deadlines attempt to stop
@@ -214,7 +213,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     check on this class instead of at a distant `WorkspaceBackend` call.
 
     Args:
-        workspace: A live `modal.Sandbox` you already have. Whoever created it owns terminating it.
+        sandbox: A live `modal.Sandbox` you already have. Whoever created it owns terminating it.
         ref: Identity of an existing sandbox to attach to on first use.
         image: Registry tag, or a `modal.Image`, a newly created sandbox runs. `None` (the default)
             is Debian slim with Python 3.12, `git`, and `ripgrep`.
@@ -231,8 +230,8 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
 
     def __init__(
         self,
-        workspace: modal.Sandbox | None = None,
         *,
+        sandbox: modal.Sandbox | None = None,
         ref: WorkspaceRef | None = None,
         image: str | modal.Image | None = None,
         app_name: str = DEFAULT_APP_NAME,
@@ -244,8 +243,8 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     ) -> None:
         if ref is not None and ref.provider != 'modal':
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'modal'")
-        if workspace is not None and ref is not None:
-            raise ValueError('pass either `workspace` or `ref`, not both')
+        if sandbox is not None and ref is not None:
+            raise ValueError('pass either `sandbox` or `ref`, not both')
         if type(sandbox_timeout) is not int or not 10 <= sandbox_timeout <= 86_400:
             raise ValueError('sandbox_timeout must be an integer between 10 and 86400 seconds')
         if image is not None and not isinstance(image, str):
@@ -254,8 +253,8 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                 raise TypeError('image must be a registry tag or modal.Image')
         if env is not None and any(type(key) is not str or type(value) is not str for key, value in env.items()):
             raise TypeError('env keys and values must be strings')
-        self._ref = ref if workspace is None else WorkspaceRef(provider='modal', id=workspace.object_id)
-        self._sandbox: modal.Sandbox | None = workspace
+        self._ref = ref if sandbox is None else WorkspaceRef(provider='modal', id=sandbox.object_id)
+        self._sandbox: modal.Sandbox | None = sandbox
         self._image = image
         self._app_name = app_name
         self._create_app_if_missing = create_app_if_missing
@@ -271,10 +270,10 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         self._acquisition: asyncio.Task[modal.Sandbox] | None = None
         self._create_name: str | None = None
         # The default Debian image includes setsid; custom and attached images need a probe.
-        self._setsid_available: bool | None = True if image is None and ref is None and workspace is None else None
+        self._setsid_available: bool | None = True if image is None and ref is None and sandbox is None else None
         self._setsid_lock = anyio.Lock()
 
-    async def get_client(self) -> modal.Sandbox:
+    async def get_sandbox(self) -> modal.Sandbox:
         """Return the typed `modal.Sandbox`, creating or attaching to it on first use.
 
         The lock serializes concurrent first uses -- two callers each creating a sandbox would
@@ -329,7 +328,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
 
     async def read_bytes(self, path: str) -> bytes:
         absolute_path('path', path)
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         # Modal's filesystem read opens FIFOs in blocking mode and its FileInfo omits the
         # file kind. Probe through the sandbox shell before entering that unbounded SDK read.
         if (await self.run(['test', '-p', path], timeout=_INTERNAL_EXEC_TIMEOUT)).exit_code == 0:
@@ -342,7 +341,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         # Modal takes the data first, creates missing parents, and replaces existing contents.
         import modal
 
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._mapped_errors(sandbox, f'Could not write {path!r}', path):
             # Modal replaces a symlink on write, unlike open(2). Resolve the leaf
             # explicitly so writes through links update the same file the shell sees.
@@ -366,7 +365,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
 
     async def stat(self, path: str) -> FileEntry:
         absolute_path('path', path)
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._mapped_errors(sandbox, f'Could not stat {path!r}', path):
             info = await sandbox.filesystem.stat.aio(path)
             entry = await _file_entry(sandbox, info, path)
@@ -377,7 +376,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
         absolute_path('path', path)
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._mapped_errors(sandbox, f'Could not list {path!r}', path):
             entries = await sandbox.filesystem.list_files.aio(path)
             # Limit simultaneous SDK requests without making large link-heavy listings serial.
@@ -395,13 +394,13 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
 
     async def make_dir(self, path: str) -> None:
         absolute_path('path', path)
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._mapped_errors(sandbox, f'Could not create directory {path!r}', path):
             await sandbox.filesystem.make_directory.aio(path)
 
     async def remove(self, path: str) -> None:
         absolute_path('path', path)
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._mapped_errors(sandbox, f'Could not remove {path!r}', path):
             await sandbox.filesystem.remove.aio(path, recursive=True)
 
@@ -425,7 +424,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         name = self._create_name
         try:
             # Shielded so that a caller cancelled mid-create still gets the sandbox Modal made:
-            # `get_client` records it before the cancellation is delivered, so `ref` names it and
+            # `get_sandbox` records it before the cancellation is delivered, so `ref` names it and
             # a retry reuses it. Only the local deadline interrupts the call; a sandbox created
             # after it fires is reaped at its `sandbox_timeout`.
             with anyio.CancelScope(shield=True), anyio.move_on_after(_CREATE_TIMEOUT):
@@ -525,7 +524,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         # idempotent read: overlapping first calls may each run their own `pwd`, get the same
         # answer, and the cache converges. No lock needed.
         if self._resolved_working_dir is None:
-            sandbox = await self.get_client()
+            sandbox = await self.get_sandbox()
             result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.removesuffix('\n')
             # Only an absolute path is an answer. Caching whatever else the sandbox printed
@@ -555,7 +554,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                     self._setsid_available = await probe.wait.aio() == 0
             return self._setsid_available
 
-    async def run(
+    async def run(  # noqa: C901 - deadline, cancellation and Modal exit classification share the same process state
         self,
         command: WorkspaceCommand,
         *,
@@ -572,21 +571,23 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         # Modal executes argv and never a shell string, so shell interpretation is requested
         # explicitly through `/bin/sh -c`, the one shell every sandbox image carries.
         argv = command_argv(command, shell)
+        if not shell:
+            # Through `sh`, so a program that can't start exits 127 or 126 as it does in `sh`.
+            argv = ['/bin/sh', '-c', 'exec "$@"', 'sh', *argv]
         # Given per command, not only at creation, so an attached sandbox honors it too.
         workdir = absolute_path('cwd', cwd) or self._working_dir
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
-        merged = {**self._env, **(env or {})}
-        variables: dict[str, str | None] | None = dict(merged) if merged else None
+        variables: dict[str, str | None] | None = {**self._env, **(env or {})} or None
         # Acquiring the sandbox has its own bound; the timeout is the command's alone.
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         if cwd is not None:
             await self.stat(cwd)
+        started_at = time.monotonic()
         # Modal takes whole seconds and reads 0 as no deadline, so round up. The client
         # deadline below includes exec-start, collection, and stream drain.
         deadline = None if timeout is None else max(1, math.ceil(timeout))
         timed_out = f'Command timed out after {timeout} seconds.'
-        server_started_at = time.monotonic()
         token = uuid4().hex
         pid_file = f'/tmp/.pydantic-modal-{token}.pid'
         cancel_file = f'/tmp/.pydantic-modal-{token}.cancel'
@@ -649,20 +650,55 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         def captured() -> tuple[str, str]:
             return snapshots[0], snapshots[1]
 
+        exit_event = anyio.Event()
+        done_event = anyio.Event()
+        results: list[tuple[str, str, int, float]] = []
+        errors: list[Exception] = []
         async with command_deadline(timeout, stop=stop, output=captured):
             async with self._mapped_errors(sandbox, 'Command could not run in the workspace'):
                 process = await sandbox.exec.aio(*wrapped, timeout=deadline, workdir=workdir, env=variables, text=False)
-            try:
-                stdout, stderr, exit_code = await _collect_output(process, snapshots)
-            except Exception as error:
-                mapped = await _failure(sandbox, error, 'Could not read the command result')
-                if mapped is not None:
-                    raise mapped from error
-                raise
+        command_error: WorkspaceTimeoutError | None = None
+        async with anyio.create_task_group() as group:
 
-        elapsed = time.monotonic() - server_started_at
+            async def collect() -> None:
+                try:
+                    results.append(await _collect_output(process, snapshots, exit_event))
+                except Exception as error:
+                    errors.append(error)
+                    exit_event.set()
+                finally:
+                    done_event.set()
+
+            group.start_soon(collect)
+            try:
+                async with command_deadline(
+                    None if timeout is None else max(0.001, timeout - (time.monotonic() - started_at)),
+                    stop=stop,
+                    output=captured,
+                ):
+                    await exit_event.wait()
+            except WorkspaceTimeoutError as error:
+                command_error = error
+                group.cancel_scope.cancel()
+            else:
+                # Once the process exits, output can drain past its command deadline.
+                with anyio.move_on_after(None if timeout is None else max(2, timeout)) as drain_scope:
+                    await done_event.wait()
+                if drain_scope.cancelled_caught:
+                    group.cancel_scope.cancel()
+                    stdout, stderr = captured()
+                    command_error = WorkspaceTimeoutError(timed_out, stdout=stdout, stderr=stderr)
+        if command_error is not None:
+            raise command_error
+        if errors:
+            mapped = await _failure(sandbox, errors[0], 'Could not read the command result')
+            if mapped is not None:
+                raise mapped from errors[0]
+            raise errors[0]
+        stdout, stderr, exit_code, exited_at = results[0]
+
         if deadline is not None and (
-            exit_code == _CLIENT_DEADLINE_EXIT or (exit_code == _SIGKILL_EXIT and elapsed >= deadline)
+            exit_code == _CLIENT_DEADLINE_EXIT or (exit_code == _SIGKILL_EXIT and exited_at - started_at >= deadline)
         ):
             raise WorkspaceTimeoutError(timed_out, stdout=stdout, stderr=stderr)
         if exit_code == _SIGKILL_EXIT:
@@ -680,8 +716,8 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
 
 
 async def _collect_output(
-    process: modal.container_process.ContainerProcess[bytes], snapshots: list[str]
-) -> tuple[str, str, int]:
+    process: modal.container_process.ContainerProcess[bytes], snapshots: list[str], exit_event: anyio.Event
+) -> tuple[str, str, int, float]:
     """Drain both streams and wait as one owned operation."""
 
     async def read(reader: modal.io_streams.StreamReader[bytes], index: int) -> str:
@@ -698,6 +734,7 @@ async def _collect_output(
         return ''.join(pieces)
 
     stdout, stderr, exit_code = '', '', 0
+    exited_at = math.inf
     read_error: Exception | None = None
 
     async with anyio.create_task_group() as group:
@@ -717,9 +754,12 @@ async def _collect_output(
                 group.cancel_scope.cancel()
 
         async def wait() -> None:
-            nonlocal exit_code, read_error
+            nonlocal exit_code, exited_at, read_error
             try:
                 exit_code = await process.wait.aio()
+                # Output can drain later; classify a deadline kill by the process exit time.
+                exited_at = time.monotonic()
+                exit_event.set()
             except Exception as error:
                 read_error = error
                 group.cancel_scope.cancel()
@@ -730,7 +770,7 @@ async def _collect_output(
     if read_error is not None:
         raise read_error
 
-    return stdout, stderr, exit_code
+    return stdout, stderr, exit_code, exited_at
 
 
 async def _check_stop(process: modal.container_process.ContainerProcess[bytes], sandbox_id: str) -> None:
