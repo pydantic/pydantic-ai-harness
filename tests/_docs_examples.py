@@ -14,7 +14,8 @@ Then it answers in text. Each run the model finishes is returned as a `ScriptedR
 
 Sandboxes a block creates keep running after it, so `run_block` passes every workspace ref
 the model saw to the provider's `cleanup`, even when the block fails. `documented_cleanup` takes
-that cleanup from the page itself.
+that cleanup from the page itself. A block that connects to Temporal at `localhost:7233` runs
+against a local dev server started for it.
 """
 
 from __future__ import annotations
@@ -22,13 +23,15 @@ from __future__ import annotations
 import inspect
 import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from unittest import mock
 
 import anyio
+from anyio.from_thread import start_blocking_portal
 from pydantic_ai import models
 from pydantic_ai.messages import (
     ModelMessage,
@@ -101,7 +104,7 @@ def run_block(
         return model
 
     try:
-        with mock.patch.object(models, 'infer_model', infer_model):
+        with _temporal_server_for(example), mock.patch.object(models, 'infer_model', infer_model):
             exec(code, namespace)
     finally:
         if refs:
@@ -113,6 +116,26 @@ def run_block(
                     # A thread of its own: the calling test may already have an event loop running.
                     pool.submit(anyio.run, cleanup, ref).result()
     return namespace, runs
+
+
+@contextmanager
+def _temporal_server_for(example: CodeExample) -> Generator[None]:
+    """Serve Temporal on `localhost:7233` while `example` runs, if it connects there."""
+    if 'localhost:7233' not in example.source:
+        yield
+        return
+    from temporalio.testing import WorkflowEnvironment  # noqa: PLC0415 - only Temporal examples need it
+
+    # The block runs its own `asyncio.run(main())`, so the server lives on a portal thread's loop.
+    async def start() -> WorkflowEnvironment:
+        return await WorkflowEnvironment.start_local(port=7233)  # pyright: ignore[reportUnknownMemberType]
+
+    with start_blocking_portal() as portal:
+        env = portal.call(start)
+        try:
+            yield
+        finally:
+            portal.call(env.shutdown)
 
 
 def documented_cleanup(examples: list[CodeExample], name: str) -> Callable[[WorkspaceRef], Awaitable[None]]:
