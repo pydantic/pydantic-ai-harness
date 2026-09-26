@@ -322,6 +322,32 @@ class TestCommands:
             await task
         assert sandbox.process_sessions == set()
 
+    async def test_cancellation_during_successful_session_delete_waits_for_cleanup(
+        self, fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+        entered = anyio.Event()
+        release = anyio.Event()
+        original = sandbox.process.delete_session
+
+        async def delayed_delete(session_id: str, request_timeout: float | None = None) -> None:
+            entered.set()
+            await release.wait()
+            await original(session_id, request_timeout=request_timeout)
+
+        monkeypatch.setattr(sandbox.process, 'delete_session', delayed_delete)
+        task = asyncio.create_task(backend.run(['true']))
+        with anyio.fail_after(5):
+            await entered.wait()
+            task.cancel()
+            assert not backend._runs_drained.is_set()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert sandbox.process_sessions == set()
+        assert backend._runs_drained.is_set()
+
     async def test_stopped_sandbox_restarts_for_held_backend(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         sandbox = fake_daytona.sandboxes[0]

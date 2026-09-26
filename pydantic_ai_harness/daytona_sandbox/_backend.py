@@ -721,8 +721,20 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                 result = await process.wait()
                 if checked_cwd is not None and f'{process.marker}-cwd' in result.stderr:
                     raise FileNotFoundError(checked_cwd)
-            # A finished command still needs its session removed without killing the sandbox.
-            await stop()
+            # Native Task.cancel() pierces AnyIO shields. Keep the bounded stop in a child
+            # and wait for it before reporting runs drained or releasing the HTTP client.
+            cleanup = asyncio.create_task(stop_shielded(stop))
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(cleanup)
+                    break
+                except asyncio.CancelledError:
+                    cancelled = True
+                    if cleanup.done():
+                        break
+            if cancelled:
+                raise asyncio.CancelledError
             return result
         finally:
             self._active_runs -= 1
