@@ -108,6 +108,30 @@ async def test_cancel_stops_foreground_descendants_without_destroying_sandbox() 
             await native.detach.aio()  # pyright: ignore[reportUnknownMemberType]
 
 
+async def test_cancel_kills_term_ignoring_child() -> None:
+    marker = uuid.uuid4().hex
+    async with owned_backend() as backend:
+        script = (
+            'import signal,time,pathlib; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+            f'pathlib.Path("/tmp/{marker}.ready").touch(); time.sleep(4); '
+            f'pathlib.Path("/tmp/{marker}.late").touch()'
+        )
+        task = asyncio.create_task(backend.run(['python', '-c', script], timeout=None))
+        try:
+            with anyio.fail_after(30):
+                while not await backend.exists(f'/tmp/{marker}.ready'):
+                    await anyio.sleep(0.1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await anyio.sleep(5)
+            assert not await backend.exists(f'/tmp/{marker}.late')
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_real_command_and_filesystem() -> None:
     async with owned_backend() as backend:
         result = await backend.run(['sh', '-c', 'printf out; printf err >&2; exit 3'], timeout=30)
