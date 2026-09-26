@@ -39,6 +39,7 @@ class SandboxProvider(Protocol):
         ...
 
 
+# asyncio holds only weak references to tasks, so a detached stop needs a strong one until it ends.
 _pending_stops: set[asyncio.Task[None]] = set()
 # Extra wait past the stop grace so a stop cut off at the deadline can finish its cleanup.
 _STOP_SETTLE = 0.5
@@ -60,8 +61,9 @@ async def stop_shielded(stop: Callable[[], Awaitable[object]], *, grace: float =
             with anyio.move_on_after(grace, shield=True):
                 await best_effort_stop()
 
-        # Native task.cancel() bypasses AnyIO shields; the child owns its own grace
-        # even if a second cancel interrupts the caller waiting for it.
+        # asyncio-only on purpose: a native task.cancel() bypasses AnyIO shields and would cancel an
+        # AnyIO task-group child with its caller, and AnyIO has no detached task. This child owns
+        # its own grace even if a second cancel interrupts the caller waiting for it.
         child = asyncio.create_task(bounded_stop())
         _pending_stops.add(child)
         child.add_done_callback(_pending_stops.discard)
