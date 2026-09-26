@@ -21,7 +21,10 @@ External assumptions last verified 2026-09-08 against Daytona Python SDK 0.198.0
 * `auto_stop_interval` is a creation-time setting; left unset, Daytona stops an idle sandbox after
   15 minutes, archives it after 7 days stopped, and never deletes it:
   https://www.daytona.io/docs/en/python-sdk/async/async-daytona/
-* `FileInfo` has `is_dir`, and the SDK does not say whether it follows a symlink.
+* `FileInfo` has `is_dir`, and the SDK does not say whether it follows a symlink; `get_file_info`
+  and `list_files` follow one, and `upload_file` writes through one (observed live 2026-09-25).
+* the toolbox answers a wrong entry type (reading or writing a directory, listing a file, making a
+  directory over a file) with a 400 whose text is all that tells it apart (observed live 2026-09-25).
 * SDK errors are typed by HTTP status (`DaytonaNotFoundError` 404, `DaytonaAuthenticationError`
   401, `DaytonaAuthorizationError` 403, `DaytonaValidationError` 400, `DaytonaConflictError` 409,
   `DaytonaRateLimitError` 429); transport failures become `DaytonaConnectionError` or
@@ -350,11 +353,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             try:
                 return await sandbox.fs.download_file(path, _REQUEST_TIMEOUT)
             except daytona.DaytonaError as error:
-                if isinstance(error, daytona.DaytonaNotFoundError):
-                    raise
-                # The toolbox's answer for reading a directory is not a documented error type; the
-                # entry type tells it apart from other failures.
-                if (await sandbox.fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)).is_dir:
+                if await _entry_is_dir(sandbox, path, error):
                     raise IsADirectoryError(f'Is a directory in the Daytona sandbox: {path!r}') from error
                 raise
 
@@ -369,7 +368,13 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             if mkdir.exit_code != 0:
                 raise _mkdir_error(mkdir.result, parent)
         async with _translated_filesystem_error(sandbox, path):
-            await sandbox.fs.upload_file(data, path, timeout=_REQUEST_TIMEOUT)
+            # The toolbox opens the path for writing, so a write goes through a symlink.
+            try:
+                await sandbox.fs.upload_file(data, path, timeout=_REQUEST_TIMEOUT)
+            except daytona.DaytonaError as error:
+                if await _entry_is_dir(sandbox, path, error):
+                    raise IsADirectoryError(f'Is a directory in the Daytona sandbox: {path!r}') from error
+                raise
 
     async def stat(self, path: str) -> FileEntry:
         sandbox = await self.get_client()
@@ -385,7 +390,12 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
         sandbox = await self.get_client()
         async with _translated_filesystem_error(sandbox, path):
-            entries = await sandbox.fs.list_files(path, request_timeout=_REQUEST_TIMEOUT)
+            try:
+                entries = await sandbox.fs.list_files(path, request_timeout=_REQUEST_TIMEOUT)
+            except daytona.DaytonaError as error:
+                if await _entry_is_dir(sandbox, path, error) is False:
+                    raise NotADirectoryError(f'Not a directory in the Daytona sandbox: {path!r}') from error
+                raise
         return [
             FileEntry(
                 name=entry.name,
@@ -399,7 +409,14 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     async def make_dir(self, path: str) -> None:
         sandbox = await self.get_client()
         async with _translated_filesystem_error(sandbox, path):
-            await sandbox.fs.create_folder(path, '755', request_timeout=_REQUEST_TIMEOUT)
+            try:
+                await sandbox.fs.create_folder(path, '755', request_timeout=_REQUEST_TIMEOUT)
+            except daytona.DaytonaError as error:
+                # Go's `MkdirAll` reports a file in the way as `not a directory`, like a file among
+                # the parents, so the entry type tells the two apart.
+                if await _entry_is_dir(sandbox, path, error) is False:
+                    raise FileExistsError(f'File exists in the Daytona sandbox: {path!r}') from error
+                raise
 
     async def remove(self, path: str) -> None:
         sandbox = await self.get_client()
@@ -508,7 +525,6 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             f'Command timed out after {timeout:g} seconds.',
             stdout=_until_marker(process.stdout, process.marker) if process is not None else '',
             stderr=_until_marker(process.stderr, process.marker) if process is not None else '',
-            timeout=timeout,
         )
 
     async def _start(
@@ -642,6 +658,22 @@ async def _is_deleted(sandbox: AsyncSandbox) -> bool:
     return _in_deleted_state(sandbox)
 
 
+async def _entry_is_dir(sandbox: AsyncSandbox, path: str, error: daytona.DaytonaError) -> bool | None:
+    """Whether `path` is a directory, asked after `error` failed an operation on it.
+
+    The toolbox answers a wrong entry type (reading or writing a directory, listing a file, making
+    a directory over a file) with a 400 whose text is all that tells it apart, so the entry type is
+    looked up instead. `None` when the failure was a missing path or the lookup fails too, leaving
+    `error` to decide.
+    """
+    if isinstance(error, daytona.DaytonaNotFoundError):
+        return None
+    try:
+        return (await sandbox.fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)).is_dir
+    except Exception:
+        return None
+
+
 def _mkdir_error(output: str, parent: str) -> Exception:
     """Classify a failed `mkdir -p` by the `strerror` text GNU and BusyBox `mkdir` print."""
     if 'Not a directory' in output or 'File exists' in output:
@@ -656,7 +688,7 @@ async def _translated_filesystem_error(sandbox: AsyncSandbox, path: str) -> Asyn
     """Map Daytona's filesystem errors onto the ones the protocol promises."""
     try:
         yield
-    except IsADirectoryError:
+    except (IsADirectoryError, NotADirectoryError, FileExistsError):
         raise
     except Exception as error:
         await _raise_failure(sandbox, error, f'Could not access {path!r} in the sandbox', path=path)

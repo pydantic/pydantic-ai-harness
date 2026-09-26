@@ -140,7 +140,6 @@ async def test_timeout_raises_with_the_partial_output(client: daytona.AsyncDayto
             await backend.run(f'echo DIAGNOSTIC; sleep 20; touch {marker}', shell=True, timeout=5)
 
         assert 'DIAGNOSTIC' in exc_info.value.stdout
-        assert exc_info.value.timeout == 5
         assert (await backend.run(['sleep', '20'], timeout=60)).exit_code == 0
         assert await backend.exists(marker) is False
 
