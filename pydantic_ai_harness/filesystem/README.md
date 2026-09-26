@@ -18,10 +18,13 @@ and containment-checked before any I/O, and access is filtered through allow, de
 and read-only glob patterns.
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import FileSystem
 
+Path('./workspace').mkdir(exist_ok=True)
 agent = Agent(
     'anthropic:claude-opus-5-5',
     capabilities=[LocalWorkspace('./workspace'), FileSystem()],

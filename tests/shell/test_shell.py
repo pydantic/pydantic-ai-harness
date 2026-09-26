@@ -541,6 +541,18 @@ class TestDurableCwd:
         second.run_id = 'second'
         assert str(shell_dir / 'subdir') not in await other.run_command(second, 'pwd')
 
+    async def test_missing_state_after_cd_reports_reset(
+        self, persist_toolset: ShellToolset[None], shell_dir: Path
+    ) -> None:
+        ctx = _ctx(shell_dir)
+        ctx.run_id = 'lost-state-run'
+        await persist_toolset.run_command(ctx, 'cd subdir')
+        state_dir = shell_dir / '.pydantic-ai-harness/shell/run-state'
+        for state_file in state_dir.iterdir():
+            state_file.unlink()
+        with pytest.raises(ModelRetry, match='saved working directory was lost'):
+            await persist_toolset.run_command(ctx, 'pwd')
+
     async def test_removed_run_cwd_retries_and_clears_workspace_state(
         self, persist_toolset: ShellToolset[None], shell_dir: Path
     ) -> None:

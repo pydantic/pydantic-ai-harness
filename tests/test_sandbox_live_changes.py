@@ -42,6 +42,7 @@ BASE_LOCK = _lock(**{'pydantic-ai-slim': '2.0.0', 'modal': '1.5.2', 'e2b': '2.48
     [
         pytest.param(['pydantic_ai_harness/modal_sandbox/_backend.py'], ['modal'], id='provider package'),
         pytest.param(['tests/e2b_sandbox/test_e2b_live.py'], ['e2b'], id='provider tests'),
+        pytest.param(['tests/filesystem/test_search_live.py'], ['e2b'], id='shared filesystem E2B test'),
         pytest.param(['pydantic_ai_harness/shell/_toolset.py'], ALL, id='shared capability'),
         pytest.param(['pydantic_ai_harness/_workspace.py'], ALL, id='shared module'),
         pytest.param(['scripts/sandbox_live_changes.py'], ALL, id='this script'),
@@ -97,6 +98,11 @@ def test_present_providers_follow_the_package_layout(tmp_path: Path) -> None:
 def test_the_uv_lock_in_this_repo_parses() -> None:
     lock = (Path(__file__).parents[1] / 'uv.lock').read_text()
     assert 'pydantic-ai-slim' in script.moved_lock_packages('', lock)
+
+
+def test_e2b_live_workflow_selects_shared_filesystem_test() -> None:
+    workflow = (Path(__file__).parents[1] / '.github/workflows/sandbox-live.yml').read_text()
+    assert 'tests/filesystem' in workflow
 
 
 def test_all_prints_the_providers_in_this_tree() -> None:
