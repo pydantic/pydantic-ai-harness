@@ -31,11 +31,11 @@ from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
-agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(), Coder()])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(working_dir='/workspace'), Coder()])
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
 ```
 
-`Coder`'s shell and file tools now run in the sandbox, not on your machine. The sandbox is created the first time a tool uses it, and it keeps running, and billing, after the run ends; see [Clean up](#clean-up).
+`Coder`'s shell and file tools now run in the sandbox, not on your machine. With `Coder`, `RepoContext` creates the sandbox when the run starts, even without a tool call. Use `Coder(repo_context=False)` for lazy creation. It keeps running, and billing, after the run ends; see [Clean up](#clean-up).
 
 A new sandbox lives for up to 24 hours, Modal's maximum; pass `ModalSandbox(sandbox_timeout=3600)` to end it sooner. If Modal can't start the sandbox, for example because the image doesn't exist, the first tool call raises an error that says why.
 
@@ -46,7 +46,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
-agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(), Coder()])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(working_dir='/workspace'), Coder()])
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
 
 followup = agent.run_sync(
@@ -92,7 +92,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
-agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(), Coder()])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(working_dir='/workspace'), Coder()])
 
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
 ref = result.workspace.ref  # store this, e.g. in your database
@@ -143,7 +143,7 @@ async def terminate_failed_run(ctx: RunContext[None], *, error: BaseException) -
     raise error
 
 
-agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(), Coder(), hooks])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(working_dir='/workspace'), Coder(), hooks])
 ```
 
 ## Configuration
