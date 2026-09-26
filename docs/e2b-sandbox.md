@@ -84,6 +84,8 @@ async def run_python(ctx: RunContext, code: str) -> str:
 
 File operations run with elevated privileges in E2B, even when shell commands run as the `user` account. File tools may access paths the shell cannot; do not use Unix permissions alone as a file-tool policy.
 
+A command killed by a signal may return `exit_code=-1` in E2B; the SDK does not identify the signal, so this is not converted to `128+signal`.
+
 Concurrent writes to the same path are not atomic on E2B: uploads may interleave, and a reader can see a partial file. Coordinate writers or write to separate paths when using `FileSystem` or `Coder`.
 
 See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for more.

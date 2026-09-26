@@ -668,6 +668,12 @@ async def test_acquisition_errors_map_to_protocol_failures(
         assert exc.value is error
 
 
+def test_signal_exit_code_limitation_is_documented() -> None:
+    docs = (Path(__file__).parents[2] / 'docs/e2b-sandbox.md').read_text()
+    assert 'exit_code=-1' in docs
+    assert 'signal' in docs
+
+
 def test_file_api_privileges_are_documented() -> None:
     docs = (Path(__file__).parents[2] / 'docs/e2b-sandbox.md').read_text()
     assert 'File operations run with elevated privileges' in docs
