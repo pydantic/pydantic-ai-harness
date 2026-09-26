@@ -109,7 +109,9 @@ async def delete_sandbox(ref: WorkspaceRef) -> None:
     await DaytonaSandbox().destroy(ref)
 ```
 
-`destroy(ref)` deletes by ref without starting a stopped sandbox. If you pass `client=`, you own and must close that client (including after a cancelled run). Without one, the capability closes the client it opened when the run ends, including its current event socket. Daytona SDK 0.198.0 can leave an aiohttp session open after a failed event-socket reconnect: its previous socket is no longer exposed for cleanup. This SDK leak can affect both owned and caller-supplied clients; callers supplying `client=` must close their client themselves.
+`destroy(ref)` deletes by ref without starting a stopped sandbox. If you pass `client=`, you own and must close that client, including after a cancelled run; otherwise the capability closes the client it opened when the run ends.
+
+Daytona SDK 0.198.0 can leave one HTTP connection open after its event socket reconnects, which Python reports as an `Unclosed connector` `ResourceWarning`. The harness cannot close it; it is a Daytona SDK issue.
 
 By default, Daytona stops a sandbox after 15 idle minutes (a later run starts it again); set `auto_stop_interval=` to a smaller number of minutes to stop it sooner. A stopped sandbox keeps its disk, is archived after 7 days, and is never deleted. See [Daytona's SDK docs](https://www.daytona.io/docs/en/python-sdk/async/async-daytona/).
 

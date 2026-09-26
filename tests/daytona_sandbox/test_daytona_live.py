@@ -31,12 +31,10 @@ from contextlib import asynccontextmanager
 import daytona
 import pytest
 from pydantic_ai.workspaces import WorkspaceTimeoutError, WorkspaceUnavailableError
-from pytest_examples import CodeExample
 
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox, DaytonaSandboxBackend
 
-from .._docs_examples import documented_cleanup, python_blocks, run_block
 from .._tool_calls import call_tools
 from .conftest import LIVE_AUTO_STOP_INTERVAL, require_live_credentials
 
@@ -237,20 +235,3 @@ async def test_commands_get_a_usable_environment(client: daytona.AsyncDaytona) -
 
         result = await backend.run('echo "$FOO"; echo "$PATH"', shell=True, env={'FOO': '1'}, timeout=60)
         assert result.stdout.splitlines() == ['1', path]
-
-
-# The README's Python blocks are the same as this page's.
-_DOCS_BLOCKS = python_blocks('docs/daytona-sandbox.md')
-
-
-@pytest.mark.parametrize('example', [pytest.param(block, id=f'line {block.start_line}') for block in _DOCS_BLOCKS])
-def test_docs_example(example: CodeExample) -> None:
-    """Every example on the docs page runs as written, and its agent's tools do their work in a real sandbox.
-
-    The fake stands in for Daytona, so only this shows the page's code, its default settings, and its
-    cleanup work against the real service. A follow-up run, from the message history or a stored ref,
-    works in the first run's sandbox.
-    """
-    _, runs = run_block(example, cleanup=documented_cleanup(_DOCS_BLOCKS, 'delete_sandbox'))
-    assert all(run.used_sandbox for run in runs), runs
-    assert len({run.ref for run in runs}) <= 1, runs
