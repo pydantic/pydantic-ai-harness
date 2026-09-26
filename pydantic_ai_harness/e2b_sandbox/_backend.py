@@ -43,7 +43,7 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 
-from pydantic_ai_harness._workspace_provider import absolute_path, command_argv, stop_shielded
+from pydantic_ai_harness._workspace_provider import absolute_path, command_argv, safe_credential_reason, stop_shielded
 
 if TYPE_CHECKING:
     from pydantic_ai.workspaces import WorkspaceCommand
@@ -64,6 +64,7 @@ _PATH_ERRORS: tuple[tuple[str, type[OSError]], ...] = (
     ('already exists', FileExistsError),
     ('permission denied', PermissionError),
     ('not a directory', NotADirectoryError),
+    ('path is a file', NotADirectoryError),
     ('is a directory', IsADirectoryError),
 )
 
@@ -267,8 +268,10 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         anything E2B does not type come back unchanged to propagate as transient, for durable
         engines to retry.
         """
+        if isinstance(error, e2b.InvalidArgumentException) and 'cwd ' in str(error) and 'does not exist' in str(error):
+            return FileNotFoundError(str(error))
         if isinstance(error, e2b.AuthenticationException):
-            return WorkspaceUnavailableError(_AUTH_MESSAGE)
+            return WorkspaceUnavailableError(f'{_AUTH_MESSAGE} {safe_credential_reason(error)}.')
         if isinstance(error, e2b.SandboxNotFoundException) and sandbox_id is not None:
             return WorkspaceUnavailableError(_unavailable_message(sandbox_id))
         if isinstance(error, e2b.FileNotFoundException):
@@ -291,6 +294,11 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     async def read_bytes(self, path: str) -> bytes:
         sandbox = await self.get_client()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not read {path!r}', path):
+            # envd reports FIFOs as files and its read blocks indefinitely without a writer.
+            # Probe via the shell before asking envd to open the path (also follows links).
+            probe = await self.run(f'test -p {shlex.quote(path)}', shell=True, timeout=_INTERNAL_EXEC_TIMEOUT)
+            if probe.exit_code == 0:
+                raise OSError(f'Could not read {path!r}: FIFO reads are not supported')
             return bytes(await sandbox.files.read(path, 'bytes'))
 
     async def write_bytes(self, path: str, data: bytes) -> None:

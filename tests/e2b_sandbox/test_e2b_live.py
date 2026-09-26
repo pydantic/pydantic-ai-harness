@@ -63,7 +63,7 @@ async def _owned(**settings: object) -> AsyncGenerator[E2BSandboxBackend]:
     native = await backend.get_client()
     # Keep an audit record before using the live sandbox, even if the test fails.
     with open('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log', 'a') as refs:
-        refs.write(f'e2b-r e2b {native.sandbox_id}\n')
+        refs.write(f'e2b-adopt e2b {native.sandbox_id}\n')
     try:
         yield backend
     finally:
@@ -85,6 +85,15 @@ async def sandbox() -> AsyncIterator[E2BSandboxBackend]:
     """
     async with _owned(sandbox_timeout=600) as live:
         yield live
+
+
+async def test_destroy_by_ref_without_connecting() -> None:
+    async with _owned() as backend:
+        assert backend.ref is not None
+        from pydantic_ai_harness.e2b_sandbox import E2BSandbox  # noqa: PLC0415 - live SDK
+
+        await E2BSandbox().destroy(backend.ref)
+        assert not await (await backend.get_client()).is_running()
 
 
 class TestRealExecution:

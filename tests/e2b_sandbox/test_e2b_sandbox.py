@@ -25,6 +25,25 @@ from .fake_e2b import FakeE2B
 pytestmark = pytest.mark.anyio
 
 
+def test_env_is_not_shown_in_repr() -> None:
+    secret = 'sensitive-credential-value'
+    capability = E2BSandbox(env={'TOKEN': secret})
+    assert secret not in repr(capability)
+    assert secret not in str(capability)
+    assert secret not in repr(E2BSandboxBackend(env={'TOKEN': secret}))
+
+
+async def test_destroy_ref_without_attaching(fake_e2b: FakeE2B) -> None:
+    provider = E2BSandbox()
+    fake_e2b.new_sandbox('sbx-keep')
+    backend = provider.backend(WorkspaceRef(provider='e2b', id='sbx-keep'))
+    assert isinstance(backend, E2BSandboxBackend)
+    assert backend.ref is not None
+    await provider.destroy(backend.ref)
+    assert fake_e2b.sandboxes[0].killed
+    assert not fake_e2b.connect_calls
+
+
 def test_capability_uses_workspace_contract() -> None:
     capability = E2BSandbox()
     ctx = RunContext(deps=None, model=TestModel(), usage=RunUsage())

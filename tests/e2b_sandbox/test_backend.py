@@ -881,6 +881,15 @@ async def test_acquisition_errors_map_to_protocol_failures(
         assert exc.value is error
 
 
+async def test_auth_error_classifies_expired_key_without_leaking_it(fake_e2b: FakeE2B) -> None:
+    fake_e2b.create_error = AuthenticationException('expired credential sensitive-credential-value')
+    with pytest.raises(WorkspaceUnavailableError) as exc:
+        await E2BSandboxBackend().get_client()
+    assert 'Credential expired' in str(exc.value)
+    assert 'E2B_API_KEY' in str(exc.value)
+    assert 'sensitive-credential-value' not in str(exc.value)
+
+
 def test_preview_recipe_names_port_api_and_cleanup() -> None:
     docs = (Path(__file__).parents[2] / 'docs/e2b-sandbox.md').read_text()
     assert 'start_command' in docs and 'get_host(3000)' in docs

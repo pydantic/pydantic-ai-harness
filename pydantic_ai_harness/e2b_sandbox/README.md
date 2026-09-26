@@ -126,20 +126,22 @@ Already have an `e2b.AsyncSandbox`? Pass `workspace=E2BSandboxBackend(workspace=
 
 With `Shell`, ask the agent to use `start_command` for `npm run dev -- --host 0.0.0.0 --port 3000`, then poll `check_command` and `curl http://localhost:3000/health` until ready. Save the returned command ID. Given the workspace ref, connect with `e2b.AsyncSandbox.connect(ref.id)` and use `sandbox.get_host(3000)` for the public hostname (prefix with `https://` for the preview URL). When done, call `stop_command` with the ID while the workspace is attached, then `kill_sandbox(ref)` as below. Do not leave a public preview running longer than necessary.
 
+E2B file reads reject FIFOs rather than waiting for a writer. An ordinary read performs a shell FIFO check before downloading the file. E2B's file API runs with elevated privileges independent of shell permissions and omits looping symlinks from directory listings.
+
 ## Clean up
 
 The sandbox keeps running, and billing, after the run ends. Pydantic AI never kills it. Kill it with the ref you stored:
 
 ```python {names="defined"}
-import e2b
 from pydantic_ai.workspaces import WorkspaceRef
+from pydantic_ai_harness.e2b_sandbox import E2BSandbox
 
 
 async def kill_sandbox(ref: WorkspaceRef) -> None:
-    await e2b.AsyncSandbox.kill(ref.id)
+    await E2BSandbox().destroy(ref)
 ```
 
-This kills a paused sandbox too, without resuming it. A sandbox you don't kill is paused when its `sandbox_timeout` runs out. See [E2B's sandbox lifecycle](https://docs.e2b.dev/sandbox).
+`E2BSandbox.backend(ref)` constructs an attached backend without I/O; `destroy(ref)` kills by ID without attaching. This kills a paused sandbox too, without resuming it. A sandbox you don't kill is paused when its `sandbox_timeout` runs out. See [E2B's sandbox lifecycle](https://docs.e2b.dev/sandbox).
 
 A failed run returns no result, so there is no ref to store. To terminate its sandbox, clean up in an `on_run_error` hook; `after_run` doesn't run when a run fails:
 

@@ -54,13 +54,37 @@ class TestLiveE2BSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover - li
     @pytest.fixture(scope='class')
     @classmethod
     def backend(cls) -> Iterator[E2BSandboxBackend]:
-        backend = E2BSandboxBackend(sandbox_timeout=600)
+        import e2b  # noqa: PLC0415 - live-only SDK
+
+        class LoggedBackend(E2BSandboxBackend):
+            async def get_client(self) -> e2b.AsyncSandbox:
+                had_ref = self.ref is not None
+                client = await super().get_client()
+                if not had_ref:
+                    with open('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log', 'a') as refs:
+                        refs.write(f'e2b-adopt e2b {client.sandbox_id}\n')
+                return client
+
+        backend = LoggedBackend(sandbox_timeout=600)
         yield backend
         if backend.ref is not None:
             import e2b  # noqa: PLC0415 - optional extra, absent on slim installs
 
             # Returns False when the destroy rule already killed it.
             e2b.Sandbox.kill(backend.ref.id)
+
+    async def test_symlink_loop_does_not_break_listing(
+        self, backend: WorkspaceBackend, has_real_posix_shell: bool
+    ) -> None:
+        # envd's list omits a looping symlink entirely (live probe, 2026-09-26);
+        # get_info cannot restore an entry the SDK never returns.
+        pytest.skip('E2B envd omits looping symlinks from directory listings')
+
+    @pytest.fixture
+    def filesystem_honors_shell_permissions(self) -> bool:
+        # Live envd file operations run with elevated privileges despite the non-root shell user.
+        # Verified by the live conformance chmod-000 test (2026-09-26).
+        return False
 
     @pytest.fixture
     def attach_backend(self) -> Callable[[WorkspaceRef], WorkspaceBackend]:

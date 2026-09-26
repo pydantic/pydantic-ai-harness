@@ -199,7 +199,12 @@ class FakeCommands:
             self.group_stops.append(cmd)
             if self._control.kill_command_error is not None:
                 raise self._control.kill_command_error
-        stdout, stderr, exit_code = self._control.responder(_user_command(cmd), timeout)
+        user_command = _user_command(cmd)
+        # The in-memory fake has no FIFO objects; `test -p` must report false rather
+        # than inheriting a generic test responder's success status.
+        stdout, stderr, exit_code = (
+            ('', '', 1) if 'test -p ' in user_command else self._control.responder(user_command, timeout)
+        )
         handle = FakeCommandHandle(
             self._control,
             self._sandbox,
@@ -490,6 +495,8 @@ def _host_errors(path: str) -> Generator[None]:
         raise FileNotFoundException(f"path '{path}' does not exist") from e
     except IsADirectoryError as e:
         raise InvalidArgumentException(f"path '{path}' is a directory") from e
+    except (NotADirectoryError, FileExistsError) as e:
+        raise InvalidArgumentException(f"path '{path}' is not a directory") from e
 
 
 class _HostFilesystem(FakeFilesystem):
@@ -518,8 +525,9 @@ class _HostFilesystem(FakeFilesystem):
     ) -> WriteInfo:
         del user, request_timeout
         await self._check(path)
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_bytes(data.encode() if isinstance(data, str) else data)
+        with _host_errors(path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(data.encode() if isinstance(data, str) else data)
         return WriteInfo(name=posixpath.basename(path), type=FileType.FILE, path=path)
 
     async def get_info(self, path: str, user: str | None = None, request_timeout: float | None = None) -> FakeEntryInfo:
@@ -653,6 +661,10 @@ class FakeAsyncSandboxFactory:
         if self._control.create_response_held is not None:
             await self._control.create_response_held.wait()
         return sandbox
+
+    async def kill(self, id: str) -> bool:
+        existing = next((sandbox for sandbox in self._control.sandboxes if sandbox.id == id), None)
+        return await existing.kill() if existing is not None else False
 
     async def connect(self, id: str, timeout: int | None = None) -> FakeSandbox:
         self._control.connect_calls.append((id, timeout))
