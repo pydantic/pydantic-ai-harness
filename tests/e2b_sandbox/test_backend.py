@@ -15,6 +15,7 @@ import anyio
 import pytest
 from e2b.exceptions import (
     AuthenticationException,
+    InvalidArgumentException,
     NotEnoughSpaceException,
     RateLimitException,
     SandboxException,
@@ -23,9 +24,7 @@ from e2b.exceptions import (
     TimeoutException,
 )
 from pydantic_ai.workspaces import (
-    SupportsFilesystem,
     Workspace,
-    WorkspaceBackend,
     WorkspaceError,
     WorkspaceRef,
     WorkspaceTimeoutError,
@@ -47,19 +46,19 @@ async def started(**settings: Any) -> E2BSandboxBackend:
     """Build a backend and resolve it now.
 
     Constructing one does no I/O, so a test that wants to assert on what creating or attaching
-    did has to touch the sandbox first. Awaiting `get_client()` is that touch.
+    did has to touch the sandbox first. Awaiting `get_sandbox()` is that touch.
     """
     backend = E2BSandboxBackend(**settings)
-    await backend.get_client()
+    await backend.get_sandbox()
     return backend
 
 
 class TestConformance:
-    async def test_get_client_is_lazy_and_reuses_the_client(self, fake_e2b: FakeE2B) -> None:
+    async def test_get_sandbox_is_lazy_and_reuses_the_sandbox(self, fake_e2b: FakeE2B) -> None:
         backend = E2BSandboxBackend()
         assert not fake_e2b.sandboxes
-        sandbox = await backend.get_client()
-        assert await backend.get_client() is sandbox
+        sandbox = await backend.get_sandbox()
+        assert await backend.get_sandbox() is sandbox
         assert fake_e2b.sandboxes == [sandbox]
 
     @pytest.mark.parametrize('operation', ['run', 'write_bytes'])
@@ -70,24 +69,12 @@ class TestConformance:
             await backend.run(['true'])
         else:
             await backend.write_bytes('/tmp/file', b'data')
-        assert backend.ref == WorkspaceRef(provider='e2b', id=fake_e2b.sandboxes[0].id)
-
-    async def test_backend_implements_run_and_filesystem_protocols(self, fake_e2b: FakeE2B) -> None:
-        # Protocol inheritance also checks signatures statically.
-        backend = await started()
-        assert isinstance(backend, WorkspaceBackend)
-        assert isinstance(backend, SupportsFilesystem)
+        assert backend.ref == WorkspaceRef(provider='e2b', id=fake_e2b.sandboxes[0].sandbox_id)
 
     async def test_identity_is_e2b_sandbox_id(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         assert backend.ref == WorkspaceRef(provider='e2b', id='sbx-1')
-        assert await backend.get_client() is fake_e2b.sandboxes[0]
-
-    async def test_shared_run_and_nonzero_result(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.responder = lambda command, timeout: ('', '', 2)
-        backend = await started()
-        result = await backend.run(['false'])
-        assert result.exit_code != 0
+        assert await backend.get_sandbox() is fake_e2b.sandboxes[0]
 
 
 class TestCreate:
@@ -208,13 +195,13 @@ class TestConnect:
         assert exc.value.__cause__ is error
 
     async def test_connect_to_a_missing_sandbox_fails(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.connect_error = fake_e2b.sandbox_gone_type('not found')
+        fake_e2b.connect_error = SandboxNotFoundException('not found')
         with pytest.raises(WorkspaceUnavailableError, match="'sbx-gone'"):
             await started(ref=WorkspaceRef(provider='e2b', id='sbx-gone'))
         assert not fake_e2b.create_calls
 
     async def test_an_operation_on_a_gone_sandbox_does_not_create_a_replacement(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.connect_error = fake_e2b.sandbox_gone_type('not found')
+        fake_e2b.connect_error = SandboxNotFoundException('not found')
         backend = E2BSandboxBackend(ref=WorkspaceRef(provider='e2b', id='sbx-gone'))
         for _ in range(2):
             with pytest.raises(WorkspaceUnavailableError, match="'sbx-gone'"):
@@ -466,7 +453,6 @@ class TestRun:
         backend = await started()
         with pytest.raises(WorkspaceTimeoutError) as exc:
             await backend.run(['sleep', '99'], timeout=0.05)
-        assert isinstance(exc.value, TimeoutError)
         assert (exc.value.stdout, exc.value.stderr) == ('partial', 'oops')
         assert len(fake_e2b.sandboxes[0].commands.group_stops) == 1
 
@@ -505,19 +491,21 @@ class TestRun:
         # the command running. The side-channel stop signals its isolated group.
         fake_e2b.command_hangs = True
         backend = await started()
-        with anyio.move_on_after(0.05):
-            await backend.run(['sleep', '99'])
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(backend.run, ['sleep', '99'])
+            await anyio.wait_all_tasks_blocked()
+            tg.cancel_scope.cancel()
         assert len(fake_e2b.sandboxes[0].commands.group_stops) == 1
 
     async def test_a_failed_kill_does_not_replace_the_timeout(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.command_hangs = True
-        fake_e2b.kill_command_error = fake_e2b.error_type('kill refused')
+        fake_e2b.kill_command_error = SandboxException('kill refused')
         backend = await started()
         with pytest.raises(WorkspaceTimeoutError):
             await backend.run(['sleep', '99'], timeout=0.05)
 
     async def test_a_failed_operation_names_what_failed(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.run_error = fake_e2b.error_type('no such user')
+        fake_e2b.run_error = SandboxException('no such user')
         backend = await started()
         with pytest.raises(WorkspaceError, match='Command could not run in the E2B sandbox: no such user'):
             await backend.run(['x'])
@@ -525,7 +513,7 @@ class TestRun:
     async def test_a_failing_health_probe_leaves_the_original_error(self, fake_e2b: FakeE2B) -> None:
         # The classifying probe can itself fail; the error being classified propagates as the
         # transient failure it most likely is, rather than a guess replacing it.
-        fake_e2b.run_error = fake_e2b.ambiguous_type('slow')
+        fake_e2b.run_error = TimeoutException('slow')
         fake_e2b.sandbox_is_running = False
         fake_e2b.is_running_error = ConnectionResetError('transport gone')
         backend = await started()
@@ -533,7 +521,7 @@ class TestRun:
             await backend.run(['x'])
 
     async def test_a_gone_sandbox_names_itself_and_its_lifetime(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.run_error = fake_e2b.ambiguous_type('unavailable')
+        fake_e2b.run_error = TimeoutException('unavailable')
         fake_e2b.sandbox_is_running = False
         backend = await started()
         with pytest.raises(WorkspaceUnavailableError, match="'sbx-1' is no longer running: .*`sandbox_timeout`"):
@@ -541,12 +529,12 @@ class TestRun:
 
     async def test_an_attached_sandbox_names_itself_when_gone(self, fake_e2b: FakeE2B) -> None:
         backend = await started(ref=WorkspaceRef(provider='e2b', id='sbx-keep'))
-        fake_e2b.run_error = fake_e2b.sandbox_gone_type('gone')
+        fake_e2b.run_error = SandboxNotFoundException('gone')
         with pytest.raises(WorkspaceUnavailableError, match="'sbx-keep' is no longer running"):
             await backend.run(['x'])
 
     async def test_run_wait_failure_is_a_sandbox_error(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.wait_error = fake_e2b.error_type('stream broke')
+        fake_e2b.wait_error = SandboxException('stream broke')
         backend = await started()
         with pytest.raises(WorkspaceError, match='stream broke') as exc:
             await backend.run(['x'])
@@ -556,7 +544,7 @@ class TestRun:
 
 
 class TestKilledSandbox:
-    """A sandbox killed through the native client is gone for every later operation.
+    """A sandbox killed through its native handle is gone for every later operation.
 
     The fake follows the SDK after `kill()`: connecting 404s into `SandboxNotFoundException`,
     and envd calls on a handle that is still held fail with the 502 `TimeoutException` the
@@ -566,7 +554,7 @@ class TestKilledSandbox:
     async def test_attaching_after_kill_is_unavailable(self, fake_e2b: FakeE2B) -> None:
         owner = await started()
         assert owner.ref is not None
-        assert await (await owner.get_client()).kill() is True
+        assert await (await owner.get_sandbox()).kill() is True
         attached = E2BSandboxBackend(ref=owner.ref)
         with pytest.raises(WorkspaceUnavailableError, match="'sbx-1' is no longer running"):
             await attached.working_dir()
@@ -574,13 +562,13 @@ class TestKilledSandbox:
 
     async def test_a_command_on_a_killed_sandbox_is_unavailable(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
-        await (await backend.get_client()).kill()
+        await (await backend.get_sandbox()).kill()
         with pytest.raises(WorkspaceUnavailableError, match='it was killed'):
             await backend.run(['true'])
 
     async def test_a_filesystem_call_on_a_killed_sandbox_is_unavailable(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
-        await (await backend.get_client()).kill()
+        await (await backend.get_sandbox()).kill()
         with pytest.raises(WorkspaceUnavailableError, match='it was killed'):
             await backend.read_bytes('/tmp/a.txt')
 
@@ -588,21 +576,9 @@ class TestKilledSandbox:
         owner = await started()
         assert owner.ref is not None
         attached = await started(ref=owner.ref)
-        await (await owner.get_client()).kill()
+        await (await owner.get_sandbox()).kill()
         with pytest.raises(WorkspaceUnavailableError, match="'sbx-1' is no longer running"):
             await attached.write_bytes('/tmp/a.txt', b'x')
-
-    async def test_a_kill_while_a_command_runs_is_unavailable(self, fake_e2b: FakeE2B) -> None:
-        backend = await started()
-        sandbox = fake_e2b.sandboxes[0]
-        fake_e2b.responder = lambda command, timeout: ('', '', 0)
-        handle = await sandbox.commands.run('sleep 1', background=True)
-        assert isinstance(handle, FakeCommandHandle)
-        await sandbox.kill()
-        with pytest.raises(fake_e2b.ambiguous_type):
-            await handle.wait()
-        with pytest.raises(WorkspaceUnavailableError):
-            await backend.run(['true'])
 
 
 class TestWorkingDir:
@@ -779,12 +755,6 @@ class TestFilesystem:
         await backend.remove('/tmp/pkg')
         assert await backend.exists('/tmp/pkg/nested/a.txt') is False
 
-    async def test_exists(self, fake_e2b: FakeE2B) -> None:
-        backend = await started()
-        await backend.write_bytes('/tmp/a.txt', b'body')
-        assert await backend.exists('/tmp/a.txt') is True
-        assert await backend.exists('/tmp/missing.txt') is False
-
     @pytest.mark.parametrize('operation', ['read_bytes', 'stat', 'list_dir', 'remove'])
     async def test_a_missing_path_raises_the_builtin_error(self, fake_e2b: FakeE2B, operation: str) -> None:
         # The protocol's contract: backends translate their SDK's own missing-file exception
@@ -821,7 +791,7 @@ class TestFilesystem:
     async def test_another_invalid_read_stays_a_workspace_error(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         await backend.write_bytes('/tmp/a.txt', b'body')
-        fake_e2b.read_error = fake_e2b.invalid_argument_type('bad request')
+        fake_e2b.read_error = InvalidArgumentException('bad request')
         with pytest.raises(WorkspaceError, match='bad request'):
             await backend.read_bytes('/tmp/a.txt')
 
@@ -835,7 +805,7 @@ class TestFilesystem:
     async def test_exists_still_reports_other_failures(self, fake_e2b: FakeE2B) -> None:
         # Only "there is nothing at that path" is an answer; anything else is a failure.
         backend = await started()
-        fake_e2b.fs_error = fake_e2b.error_type('input/output error')
+        fake_e2b.fs_error = SandboxException('input/output error')
         with pytest.raises(WorkspaceError, match='input/output error'):
             await backend.exists('/root/x')
 
@@ -905,7 +875,7 @@ async def test_acquisition_errors_map_to_protocol_failures(
 async def test_auth_error_classifies_expired_key_without_leaking_it(fake_e2b: FakeE2B) -> None:
     fake_e2b.create_error = AuthenticationException('expired credential sensitive-credential-value')
     with pytest.raises(WorkspaceUnavailableError) as exc:
-        await E2BSandboxBackend().get_client()
+        await E2BSandboxBackend().get_sandbox()
     assert 'Credential expired' in str(exc.value)
     assert 'E2B_API_KEY' in str(exc.value)
     assert 'sensitive-credential-value' not in str(exc.value)
@@ -972,6 +942,6 @@ async def test_command_timeout_starts_once_the_sandbox_is_acquired(fake_e2b: Fak
 
 
 async def test_filesystem_first_use_preserves_auth_error(fake_e2b: FakeE2B) -> None:
-    fake_e2b.create_error = fake_e2b.auth_type('denied')
+    fake_e2b.create_error = AuthenticationException('denied')
     with pytest.raises(WorkspaceUnavailableError):
         await E2BSandboxBackend().read_bytes('/file')

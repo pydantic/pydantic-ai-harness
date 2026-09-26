@@ -85,15 +85,6 @@ _INTERNAL_EXEC_TIMEOUT = 10
 _SDK_STREAM_UNBOUNDED = 0
 
 
-def _command_line(command: WorkspaceCommand, shell: bool) -> str:
-    """The single string E2B runs: `commands.run` takes only a string, which it hands to `/bin/bash -l -c`.
-
-    The argv is joined with `shlex.join` so each element stays one word. A `shell=True` string
-    becomes `/bin/sh -c <string>`, so it runs under `sh` as on every other backend.
-    """
-    return shlex.join(command_argv(command, shell))
-
-
 def _path_error(error: Exception, path: str) -> OSError | None:
     """The builtin path error an untyped envd failure describes, or `None` if it is not one."""
     message = str(error).lower()
@@ -153,7 +144,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     Commands and file operations run inside an E2B microVM, so the host is never exposed.
 
     Building one does no I/O. The first operation creates or attaches to a workspace, and the
-    typed `e2b.AsyncSandbox` is available through `get_client()`. The backend does not kill the
+    typed `e2b.AsyncSandbox` is available through `get_sandbox()`. The backend does not kill the
     sandbox; killing it is the application's job.
 
     Commands run as one-shot operations, with complete output returned after they finish.
@@ -162,15 +153,12 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     shell word string first and login startup files run before the command does; a
     `shell=True` string runs under `/bin/sh -c` inside that login shell. E2B's own
     command `timeout` abandons the output stream and leaves the command running, so the
-    deadline is enforced client-side instead. On timeout or cancellation, a separate command
-    signals the foreground process group when `setsid` is available. Custom templates without
-    `setsid` fall back to stopping the command leader only.
-
-    The protocol is structural, but subclassing it here makes a signature drift fail the type
-    check on this class instead of at a distant workspace call.
+    deadline is enforced client-side instead. On timeout or cancellation (including while
+    starting), a separate command signals the process group when `setsid` is available.
+    Custom templates without `setsid` fall back to stopping the command leader only.
 
     Args:
-        workspace: A live `e2b.AsyncSandbox` you already have. Whoever created it owns killing it.
+        sandbox: A live `e2b.AsyncSandbox` you already have. Whoever created it owns killing it.
         ref: Identity of an existing sandbox to attach to on first use.
         template: E2B template name or ID a newly created sandbox runs; E2B's default when `None`.
             An unknown template raises `WorkspaceUnavailableError` on first use. Custom templates
@@ -190,8 +178,8 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
 
     def __init__(
         self,
-        workspace: e2b.AsyncSandbox | None = None,
         *,
+        sandbox: e2b.AsyncSandbox | None = None,
         ref: WorkspaceRef | None = None,
         template: str | None = None,
         sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
@@ -201,10 +189,10 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     ) -> None:
         if ref is not None and ref.provider != 'e2b':
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'e2b'")
-        if workspace is not None and ref is not None:
-            raise ValueError('pass either `workspace` or `ref`, not both')
-        self._ref = ref if workspace is None else WorkspaceRef(provider='e2b', id=workspace.sandbox_id)
-        self._sandbox = workspace
+        if sandbox is not None and ref is not None:
+            raise ValueError('pass either `sandbox` or `ref`, not both')
+        self._ref = ref if sandbox is None else WorkspaceRef(provider='e2b', id=sandbox.sandbox_id)
+        self._sandbox = sandbox
         self._working_dir = absolute_path('working_dir', working_dir)
         # `working_dir()` must return a canonical absolute path: the configured one, or the
         # sandbox's default, resolved once with `pwd -P`.
@@ -215,11 +203,11 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         self._sandbox_timeout = sandbox_timeout
         self._env = dict(env) if env is not None else None
         self._allow_internet_access = allow_internet_access
-        self._probe_setsid = template is not None or workspace is not None or ref is not None
+        self._probe_setsid = template is not None or sandbox is not None or ref is not None
         self._setsid: bool | None = None
         self._setsid_lock = anyio.Lock()
 
-    async def get_client(self) -> e2b.AsyncSandbox:
+    async def get_sandbox(self) -> e2b.AsyncSandbox:
         """Return the typed `e2b.AsyncSandbox`, creating or attaching to it on first use.
 
         Every operation takes the handle from here, so none reaches an unacquired one. The lock
@@ -313,7 +301,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         return error
 
     async def read_bytes(self, path: str) -> bytes:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not read {path!r}', path):
             # envd reports FIFOs as files and its read blocks indefinitely without a writer.
             # Probe via the shell before asking envd to open the path (also follows links).
@@ -323,18 +311,18 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             return bytes(await sandbox.files.read(path, 'bytes'))
 
     async def write_bytes(self, path: str, data: bytes) -> None:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not write {path!r}', path):
             # The SDK's default 60s request bound can interrupt a valid large upload.
             await sandbox.files.write(path, data, request_timeout=0)  # pyright: ignore[reportUnknownMemberType]
 
     async def stat(self, path: str) -> FileEntry:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not stat {path!r}', path):
             return await _file_entry(sandbox, await sandbox.files.get_info(path))
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not list {path!r}', path):
             # `depth=1` is E2B's non-recursive listing, as the protocol asks.
             entries = await sandbox.files.list(path, depth=1)
@@ -367,12 +355,12 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             return [entry for entry in resolved if entry is not None]
 
     async def make_dir(self, path: str) -> None:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not create directory {path!r}', path):
             await sandbox.files.make_dir(path)
 
     async def remove(self, path: str) -> None:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not remove {path!r}', path):
             # envd removes with `os.RemoveAll`, which succeeds on a missing path; the protocol
             # reports that as `FileNotFoundError`.
@@ -381,7 +369,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             await sandbox.files.remove(path)
 
     async def exists(self, path: str) -> bool:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not check {path!r}', path):
             return await sandbox.files.exists(path)
 
@@ -418,7 +406,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             'the E2B control plane may be unreachable.'
         )
 
-    async def _attach(self, id: str) -> e2b.AsyncSandbox:
+    async def _attach(self, sandbox_id: str) -> e2b.AsyncSandbox:
         """Attach to an E2B sandbox that already exists, without taking over its lifecycle.
 
         E2B resumes a paused sandbox on connect, so attaching to one that was paused restarts
@@ -427,24 +415,24 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         must be told they are gone, not handed an empty workspace. A lifetime over the plan's
         limit is refused like on create, as `WorkspaceUnavailableError`.
         """
-        context = f'Could not connect to E2B sandbox {id!r}'
-        async with self._sdk_errors(id, context):
+        context = f'Could not connect to E2B sandbox {sandbox_id!r}'
+        async with self._sdk_errors(sandbox_id, context):
             try:
                 # Without `timeout`, a resumed sandbox gets E2B's 300 seconds; a running one keeps
                 # the longer of its current and the given lifetime.
-                return await e2b.AsyncSandbox.connect(id, timeout=self._sandbox_timeout)
+                return await e2b.AsyncSandbox.connect(sandbox_id, timeout=self._sandbox_timeout)
             except e2b.SandboxException as error:
                 if type(error) is not e2b.SandboxException or not _is_lifetime_refusal(error):
                     raise
                 raise WorkspaceUnavailableError(_refused_message(context, error)) from error
 
     async def working_dir(self) -> str:
-        """The sandbox's default working directory (absolute POSIX path)."""
+        """The canonical absolute directory commands start in."""
         if self._resolved_working_dir is None:
             result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.removesuffix('\n')
             if result.exit_code != 0 or not posixpath.isabs(printed):
-                sandbox = await self.get_client()
+                sandbox = await self.get_sandbox()
                 raise WorkspaceError(
                     f'Could not determine the working directory of E2B sandbox {sandbox.sandbox_id}: '
                     f'`pwd -P` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
@@ -474,12 +462,14 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         timeout: float | None = None,
     ) -> CommandResult:
         """Run a command, killing it on timeout, cancellation, or a failed result read."""
-        line = _command_line(command, shell)
+        # `commands.run` takes only a string, which E2B hands to `/bin/bash -l -c`; `shlex.join`
+        # keeps each argv element one word, and a `shell=True` string runs under `/bin/sh -c`.
+        line = shlex.join(command_argv(command, shell))
         cwd = absolute_path('cwd', cwd)
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         # Acquiring the sandbox has its own bound; the timeout is the command's alone.
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         handle: e2b.AsyncCommandHandle | None = None
         result: e2b.CommandResult | None = None
         # The token is allocated before the start RPC: a lost ACK must not make the
@@ -517,13 +507,11 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
 
         try:
             with anyio.move_on_after(timeout):
-                # The rendezvous file lets stop find a committed start even when its SDK
-                # acknowledgement has not returned; do not shield the start RPC itself.
+                # A lost start ACK must not hide a launched command from the side-channel stop.
                 handle = await sandbox.commands.run(
                     launch,
                     background=True,
-                    # C.UTF-8 needs no locale package on the default image; libc falls back to C
-                    # on images without it. Explicit caller settings take precedence.
+                    # Explicit caller settings take precedence over the portable UTF-8 default.
                     envs={'LC_ALL': 'C.UTF-8', **(self._env or {}), **(env or {})},
                     cwd=cwd if cwd is not None else self._working_dir,
                     timeout=_SDK_STREAM_UNBOUNDED,

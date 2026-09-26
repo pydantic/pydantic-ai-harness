@@ -25,7 +25,7 @@ def _attach(ref: WorkspaceRef) -> WorkspaceBackend:
 
 async def _kill(backend: WorkspaceBackend) -> None:
     assert isinstance(backend, E2BSandboxBackend)
-    sandbox = await backend.get_client()
+    sandbox = await backend.get_sandbox()
     await sandbox.kill()
 
 

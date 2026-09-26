@@ -8,6 +8,7 @@ from pathlib import Path
 
 import anyio
 import pytest
+from e2b.exceptions import SandboxException
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
@@ -79,14 +80,14 @@ def test_capability_declines_foreign_reference() -> None:
 
 async def test_native_handle_is_exposed_without_creation(fake_e2b: FakeE2B) -> None:
     seed_backend = E2BSandboxBackend()
-    native = await seed_backend.get_client()
+    native = await seed_backend.get_sandbox()
     fake_e2b.create_calls.clear()
-    backend = E2BSandboxBackend(workspace=native)
+    backend = E2BSandboxBackend(sandbox=native)
     assert backend.ref == WorkspaceRef(provider='e2b', id='sbx-1')
-    assert await backend.get_client() is native
+    assert await backend.get_sandbox() is native
     assert not fake_e2b.create_calls
-    with pytest.raises(ValueError, match='either `workspace` or `ref`'):
-        E2BSandboxBackend(workspace=native, ref=WorkspaceRef(provider='e2b', id='other'))
+    with pytest.raises(ValueError, match='either `sandbox` or `ref`'):
+        E2BSandboxBackend(sandbox=native, ref=WorkspaceRef(provider='e2b', id='other'))
 
 
 async def test_agent_without_workspace_use_does_not_create(fake_e2b: FakeE2B) -> None:
@@ -101,7 +102,7 @@ async def test_concurrent_first_use_creates_once(fake_e2b: FakeE2B) -> None:
     results: list[object] = []
 
     async def acquire() -> None:
-        results.append(await backend.get_client())
+        results.append(await backend.get_sandbox())
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(acquire)
@@ -134,7 +135,7 @@ async def test_capability_forwards_creation_options_and_run_does_not_kill(fake_e
     assert isinstance(result.workspace, Workspace)
     backend = result.workspace.backend
     assert isinstance(backend, E2BSandboxBackend)
-    native = await backend.get_client()
+    native = await backend.get_sandbox()
     await native.kill()
     assert fake_e2b.sandboxes[0].killed is True
 
@@ -144,14 +145,14 @@ async def test_explicit_ref_uses_attach_even_with_creation_options(fake_e2b: Fak
     ctx = RunContext(deps=None, model=TestModel(), usage=RunUsage())
     backend = capability.get_workspace(ctx, ref=WorkspaceRef(provider='e2b', id='existing'))
     assert isinstance(backend, E2BSandboxBackend)
-    await backend.get_client()
+    await backend.get_sandbox()
     assert fake_e2b.connect_calls == [('existing', 3_600)]
     assert not fake_e2b.create_calls
 
 
 async def test_post_acquisition_operations_overlap(fake_e2b: FakeE2B) -> None:
     backend = E2BSandboxBackend()
-    await backend.get_client()
+    await backend.get_sandbox()
     fake_e2b.command_hangs = True
 
     async def run_command() -> None:
@@ -160,9 +161,8 @@ async def test_post_acquisition_operations_overlap(fake_e2b: FakeE2B) -> None:
     async with anyio.create_task_group() as tg:
         tg.start_soon(run_command)
         tg.start_soon(run_command)
-        with anyio.fail_after(1):
-            while len(fake_e2b.sandboxes[0].commands.calls) < 2:
-                await anyio.sleep(0)
+        await anyio.wait_all_tasks_blocked()
+        assert len(fake_e2b.sandboxes[0].commands.calls) == 2
         tg.cancel_scope.cancel()
     calls = fake_e2b.sandboxes[0].commands.calls
     assert len([call for call in calls if call.command.startswith('setsid sh -c ')]) == 2
@@ -189,11 +189,11 @@ async def test_agent_preserves_explicit_read_only_workspace(fake_e2b: FakeE2B) -
 
 async def test_failed_acquisition_can_retry(fake_e2b: FakeE2B) -> None:
     backend = E2BSandboxBackend()
-    fake_e2b.create_error = fake_e2b.error_type('temporary')
+    fake_e2b.create_error = SandboxException('temporary')
     with pytest.raises(WorkspaceError, match='temporary'):
-        await backend.get_client()
+        await backend.get_sandbox()
     fake_e2b.create_error = None
-    assert await backend.get_client() is fake_e2b.sandboxes[0]
+    assert await backend.get_sandbox() is fake_e2b.sandboxes[0]
     assert len(fake_e2b.create_calls) == 2
 
 
@@ -207,7 +207,7 @@ async def test_cancelled_creation_keeps_the_sandbox_it_made(fake_e2b: FakeE2B, a
 
     async def acquire() -> None:
         try:
-            await backend.get_client()
+            await backend.get_sandbox()
         except anyio.get_cancelled_exc_class():
             cancelled.append(True)
             raise
@@ -222,14 +222,14 @@ async def test_cancelled_creation_keeps_the_sandbox_it_made(fake_e2b: FakeE2B, a
 
     assert cancelled == [True]
     assert backend.ref == WorkspaceRef(provider='e2b', id='sbx-1')
-    assert await backend.get_client() is fake_e2b.sandboxes[0]
+    assert await backend.get_sandbox() is fake_e2b.sandboxes[0]
     assert len(fake_e2b.create_calls) == 1
 
 
 async def test_native_cancellation_during_creation_retains_sandbox(fake_e2b: FakeE2B) -> None:
     fake_e2b.create_response_held = held = anyio.Event()
     backend = E2BSandboxBackend()
-    first = asyncio.create_task(backend.get_client())
+    first = asyncio.create_task(backend.get_sandbox())
     with anyio.fail_after(5):
         while not fake_e2b.sandboxes:
             await anyio.sleep(0)
@@ -238,7 +238,7 @@ async def test_native_cancellation_during_creation_retains_sandbox(fake_e2b: Fak
         with pytest.raises(asyncio.CancelledError):
             await first
         held.set()
-        assert await backend.get_client() is fake_e2b.sandboxes[0]
+        assert await backend.get_sandbox() is fake_e2b.sandboxes[0]
     assert backend.ref == WorkspaceRef(provider='e2b', id='sbx-1')
     assert len(fake_e2b.create_calls) == 1
 

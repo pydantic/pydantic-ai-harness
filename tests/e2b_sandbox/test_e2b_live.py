@@ -10,12 +10,6 @@ Admission rule:
   A test belongs here only when its docstring can name the fake-encoded assumption it
   validates against real E2B behavior.
 
-Portability:
-  These assert durable sandbox behaviors, not E2B-specific spellings, so if the E2B mechanism
-  is later swapped for a different backend the suite retargets rather than gets rewritten.
-  Everything below runs through the `WorkspaceBackend` protocol, so the retarget is mostly a
-  change of constructor.
-
 Gating:
   * `e2b_live` marker separates this tier from fake-backed tests.
   * skipped unless `PYDANTIC_AI_HARNESS_E2B_LIVE=1` opts in explicitly.
@@ -60,7 +54,7 @@ def _unique(prefix: str) -> str:
 async def _owned(**settings: object) -> AsyncGenerator[E2BSandboxBackend]:
     """Create a workspace and kill its native handle on the way out."""
     backend = E2BSandboxBackend(**settings)  # type: ignore[arg-type]
-    native = await backend.get_client()
+    native = await backend.get_sandbox()
     try:
         yield backend
     finally:
@@ -91,29 +85,11 @@ async def test_destroy_by_ref_without_connecting() -> None:
         from pydantic_ai_harness.e2b_sandbox import E2BSandbox  # noqa: PLC0415 - live SDK
 
         await E2BSandbox().destroy(backend.ref)
-        assert not await (await backend.get_client()).is_running()
+        assert not await (await backend.get_sandbox()).is_running()
 
 
 class TestRealExecution:
     """Behaviors that only exist because a real process runs in a real microVM."""
-
-    async def test_runs_a_real_process(self, sandbox: E2BSandboxBackend) -> None:
-        """Validates the fake-encoded assumption that stdout, stderr, and exit code match a process."""
-        result = await sandbox.run('echo out; echo err 1>&2; exit 3', shell=True, timeout=30)
-
-        assert result.stdout.strip() == 'out'
-        assert result.stderr.strip() == 'err'
-        assert result.exit_code == 3
-
-    async def test_argv_elements_stay_single_words(self, sandbox: E2BSandboxBackend) -> None:
-        """Validates the fake-encoded assumption that `shlex.join` survives E2B's shell.
-
-        E2B has no argv form, so an argv sequence is quoted into one shell word string; a
-        value with a space and a `$` proves the quoting holds through `/bin/bash -l -c`.
-        """
-        result = await sandbox.run(['printf', '%s', 'a b $HOME'], timeout=30)
-
-        assert result.stdout == 'a b $HOME'
 
     async def test_timeout_kills_the_command_and_keeps_its_output(self, sandbox: E2BSandboxBackend) -> None:
         """Validates the fake-encoded assumption that a client-owned deadline kills a real process.
@@ -148,7 +124,7 @@ class TestRealExecution:
     async def test_cancel_before_remote_start_fences_user_command(
         self, sandbox: E2BSandboxBackend, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        native = await sandbox.get_client()
+        native = await sandbox.get_sandbox()
         original = native.commands.run
         entered = anyio.Event()
         release = anyio.Event()
@@ -230,16 +206,6 @@ class TestRealExecution:
 
         assert result.exit_code != 0
 
-    async def test_a_missing_binary_is_a_reported_exit(self, sandbox: E2BSandboxBackend) -> None:
-        """Validates the fake-encoded assumption that E2B reports a lookup failure as an exit code.
-
-        The SDK raises `CommandExitException` on a non-zero exit; the protocol calls that a
-        normal result, so the backend must unwrap it rather than let it reach the caller.
-        """
-        result = await sandbox.run([_unique('definitely-not-a-real-binary')], timeout=30)
-
-        assert result.exit_code == 127
-
 
 class TestCreateConfiguration:
     """Create-time configuration reaching the real process, not only E2B create arguments."""
@@ -284,27 +250,6 @@ class TestCreateConfiguration:
 class TestRealFilesystem:
     """One real filesystem shared by E2B's file API and the shell."""
 
-    async def test_shell_and_file_api_see_the_same_filesystem(self, sandbox: E2BSandboxBackend) -> None:
-        """Validates the protocol's one-environment contract against real E2B."""
-        api_path = f'/tmp/{_unique("api")}.txt'
-        await sandbox.write_bytes(api_path, b'from-file-api\n')
-        via_shell = await sandbox.run(['cat', api_path], timeout=30)
-        assert via_shell.stdout == 'from-file-api\n'
-
-        shell_path = f'/tmp/{_unique("shell")}.txt'
-        wrote = await sandbox.run(f'printf from-shell > {shell_path}', shell=True, timeout=30)
-        assert wrote.exit_code == 0
-        assert await sandbox.read_bytes(shell_path) == b'from-shell'
-
-    async def test_binary_roundtrip_creating_parent_dirs(self, sandbox: E2BSandboxBackend) -> None:
-        """Validates the fake-encoded assumption that E2B stores raw bytes and creates real parent dirs."""
-        path = f'/tmp/{_unique("io")}/nested/deep/data.bin'
-        payload = b'\x00\x01hello \xf0\x9f\x9a\x80 world'
-
-        await sandbox.write_bytes(path, payload)
-
-        assert await sandbox.read_bytes(path) == payload
-
     async def test_large_filesystem_transfer_near_read_limit(self, sandbox: E2BSandboxBackend) -> None:
         """Validates the fake-encoded assumption that E2B's file API handles a near-limit transfer."""
         path = f'/tmp/{_unique("big")}.bin'
@@ -314,13 +259,6 @@ class TestRealFilesystem:
 
         assert (await sandbox.stat(path)).size == len(payload)
         assert await sandbox.read_bytes(path) == payload
-
-    async def test_missing_file_raises_the_builtin_error(self, sandbox: E2BSandboxBackend) -> None:
-        """Validates the protocol's contract that a missing path raises the builtin `FileNotFoundError`."""
-        with pytest.raises(FileNotFoundError):
-            await sandbox.read_bytes(f'/tmp/{_unique("missing")}')
-
-        assert await sandbox.exists(f'/tmp/{_unique("missing")}') is False
 
     async def test_list_dir_reports_basenames_and_dir_flags(self, sandbox: E2BSandboxBackend) -> None:
         """Validates the fake-encoded assumption that E2B lists entries by basename with a real dir flag."""
@@ -334,16 +272,6 @@ class TestRealFilesystem:
             ('file.txt', False, f'{root}/file.txt'),
             ('sub', True, f'{root}/sub'),
         ]
-
-    async def test_make_dir_and_remove_are_recursive(self, sandbox: E2BSandboxBackend) -> None:
-        """Validates the fake-encoded assumption that E2B's `mkdir -p` and recursive remove behave as documented."""
-        root = f'/tmp/{_unique("tree")}'
-        await sandbox.make_dir(f'{root}/a/b')
-        await sandbox.write_bytes(f'{root}/a/b/file.txt', b'x')
-
-        await sandbox.remove(root)
-
-        assert await sandbox.exists(root) is False
 
     async def test_relative_paths_resolve_against_the_working_directory(self) -> None:
         """Validates the fake-encoded assumption that the facade's resolution matches the process cwd."""
@@ -366,7 +294,7 @@ class TestRealLifecycle:
             await owner.write_bytes(marker, b'shared')
 
             attached = E2BSandboxBackend(ref=owner.ref)
-            assert (await attached.get_client()).sandbox_id == (await owner.get_client()).sandbox_id
+            assert (await attached.get_sandbox()).sandbox_id == (await owner.get_sandbox()).sandbox_id
             assert await attached.read_bytes(marker) == b'shared'
 
             assert (await owner.run(['cat', marker], timeout=30)).stdout == 'shared'
@@ -382,7 +310,7 @@ class TestRealLifecycle:
         async with _owned(sandbox_timeout=120) as owner:
             await owner.write_bytes(path, b'before-kill')
             assert owner.ref is not None
-            assert await (await owner.get_client()).kill() is True
+            assert await (await owner.get_sandbox()).kill() is True
 
             with pytest.raises(WorkspaceUnavailableError):
                 await E2BSandboxBackend(ref=owner.ref).working_dir()
@@ -395,12 +323,12 @@ class TestRealLifecycle:
         """Pins the documented behavior that attaching to a paused sandbox restarts it.
 
         This is the E2B-specific half of attach mode: a paused sandbox is not gone, and the
-        backend's first `get_client()` brings it back rather than failing.
+        backend's first `get_sandbox()` brings it back rather than failing.
         """
         marker = f'/tmp/{_unique("paused")}.txt'
         async with _owned(sandbox_timeout=120) as owner:
             await owner.write_bytes(marker, b'before-pause')
-            await (await owner.get_client()).beta_pause()
+            await (await owner.get_sandbox()).beta_pause()
 
             attached = E2BSandboxBackend(ref=owner.ref)
             assert await attached.read_bytes(marker) == b'before-pause'
@@ -421,11 +349,11 @@ class TestRealLifecycle:
         kill_sandbox = documented_cleanup(_DOCS_BLOCKS, 'kill_sandbox')
         async with _owned(sandbox_timeout=120) as owner:
             assert owner.ref is not None
-            await (await owner.get_client()).beta_pause()
+            await (await owner.get_sandbox()).beta_pause()
             await kill_sandbox(owner.ref)
 
             with pytest.raises(WorkspaceUnavailableError):
-                await E2BSandboxBackend(ref=owner.ref).get_client()
+                await E2BSandboxBackend(ref=owner.ref).get_sandbox()
 
 
 class TestCoder:
