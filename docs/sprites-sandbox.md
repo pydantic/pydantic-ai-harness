@@ -156,6 +156,8 @@ agent = Agent('anthropic:claude-opus-5-5', capabilities=[SpritesSandbox(), Coder
 
 ## Durable execution
 
+If the exec socket drops after connection but before an exit status arrives, the command may have run. This raises a non-retryable workspace error rather than replaying a potentially non-idempotent command. Connection failures before the socket opens remain retryable.
+
 Under [Temporal](https://pydantic.dev/docs/ai/capabilities/durable_execution/temporal/) or another durable engine, create one client when the worker starts and pass it as `client=`. Otherwise every activity opens its own client and never closes it.
 
 ```python {names="defined"}

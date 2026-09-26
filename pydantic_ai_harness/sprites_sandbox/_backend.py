@@ -180,8 +180,8 @@ def _map_error(error: Exception, sprite_name: str | None) -> WorkspaceError | No
 
     `sprite_name` is `None` while the Sprite is being created. Rejected credentials, a refused
     creation, and a missing Sprite end the run; any other request the API refused is a failed
-    operation. Transport failures (`NetworkError`, a socket that closed before the exit status),
-    rate limits, server errors, and anything unknown propagate unchanged, for durable engines to retry.
+    operation. Pre-connection transport failures, rate limits, server errors, and anything unknown
+    propagate unchanged, for durable engines to retry.
     """
     # The exec handshake reports its HTTP status as an `APIError`.
     status = error.status_code if isinstance(error, APIError) else None
@@ -401,14 +401,25 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                     # Stdin EOF gates execution: an unsuccessful handshake with no socket cannot
                     # have started the command. Never retry after the connection is established.
                     if exec_command.ws is not None:
-                        raise NetworkError(f'Sprites exec handshake failed: {error}') from error
+                        # An opened socket can have started the command even when start() fails.
+                        raise WorkspaceUnavailableError(
+                            'Sprites exec connection failed; command may have run'
+                        ) from error
                     await anyio.sleep(0.1)
                     exec_command = _ExecCommand(sprite.command(*args, cwd=directory))
                     try:
                         await exec_command.start()
                     except (TimeoutError, InvalidMessage, InvalidHandshake) as retry_error:
+                        if exec_command.ws is not None:
+                            raise WorkspaceUnavailableError(
+                                'Sprites exec connection failed; command may have run'
+                            ) from retry_error
                         raise NetworkError(f'Sprites exec handshake failed: {retry_error}') from retry_error
-                code = await exec_command.wait()
+                try:
+                    code = await exec_command.wait()
+                except NetworkError as error:
+                    # The socket opened: losing EXIT cannot prove the command did not execute.
+                    raise WorkspaceUnavailableError('Sprites exec connection failed; command may have run') from error
             if timeout is not None and deadline.cancelled_caught:
                 interrupted = True
                 await _close_command(exec_command)

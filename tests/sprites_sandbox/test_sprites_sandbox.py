@@ -465,14 +465,14 @@ class TestSpritesSandbox:
         assert result.stdout == 'ok\n'
         assert len(transport.execs) == 1
 
-    async def test_socket_closed_before_the_exit_status_propagates_the_sdk_error(
-        self, transport: SpriteTransport
-    ) -> None:
+    async def test_lost_exit_after_side_effect_is_not_retryable(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
         await backend.get_client()
         transport.connection_dropped = True
-        with pytest.raises(NetworkError, match='closed before receiving command exit status'):
-            await backend.run(['true'])
+        target = transport.root / 'executions'
+        with pytest.raises(WorkspaceUnavailableError, match='command may have run'):
+            await backend.run(['sh', '-c', f'echo executed >> {target}'])
+        assert target.read_text() == 'executed\n'
 
     async def test_exec_socket_carries_the_command_and_asks_the_sprite_to_end_it_on_disconnect(
         self, transport: SpriteTransport
