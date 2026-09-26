@@ -153,7 +153,7 @@ agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(working_di
 | `image` | Image for a new sandbox: a registry tag or a `modal.Image`. Default: Debian slim with Python 3.12, `git`, and `ripgrep`; the first sandbox in a Modal workspace takes a few extra seconds while it builds. |
 | `app_name` | Modal app a new sandbox belongs to. Default: `'pydantic-ai-harness'`. |
 | `create_app_if_missing` | Create that app if it doesn't exist. Default: `True`. |
-| `sandbox_timeout` | Seconds a new sandbox lives before Modal stops it. Default: `86_400` (24 hours, Modal's maximum). |
+| `sandbox_timeout` | Seconds a new sandbox lives before Modal stops it (10-86,400). Default: `86_400` (24 hours, Modal's maximum). |
 | `idle_timeout` | Seconds without activity before Modal stops a new sandbox. Default: `None`, no idle limit. |
 | `working_dir` | Absolute directory commands start in and relative paths resolve against. Default: the image's. |
 | `defer_loading` | `defer_loading=True` is unsupported: workspace selection happens at run setup. |

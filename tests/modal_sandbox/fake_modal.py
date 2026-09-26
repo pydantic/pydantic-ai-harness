@@ -183,6 +183,7 @@ _EXCEPTION_BASES: dict[str, type[Exception]] = {
     'ExecutionError': FakeModalError,
     'FilesystemExecutionError': FakeModalError,
     'InternalError': FakeModalError,
+    'ImageBuildError': FakeModalError,
     'NotFoundError': FakeModalError,
     'PermissionDeniedError': FakeModalError,
     'RequestSizeError': FakeModalError,
@@ -201,7 +202,10 @@ _EXCEPTIONS: dict[str, type[Exception]] = {
     'SandboxFilesystemNotFoundError': FakeSandboxFilesystemNotFoundError,
     'SandboxFilesystemNotADirectoryError': FakeSandboxFilesystemNotADirectoryError,
     'SandboxFilesystemIsADirectoryError': FakeSandboxFilesystemIsADirectoryError,
-    **{name: type(f'Fake{name}', (base,), {}) for name, base in _EXCEPTION_BASES.items()},
+    **{
+        name: type(name if name == 'ImageBuildError' else f'Fake{name}', (base,), {})
+        for name, base in _EXCEPTION_BASES.items()
+    },
 }
 
 

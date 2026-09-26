@@ -425,13 +425,13 @@ def test_working_dir_must_be_an_absolute_posix_path(working_dir: str) -> None:
 
 
 async def test_creation_settings_reach_the_sandbox(fake_modal: FakeModal) -> None:
-    capability = ModalSandbox(sandbox_timeout=1, idle_timeout=2, working_dir='/work', env={'A': '1'})
+    capability = ModalSandbox(sandbox_timeout=10, idle_timeout=2, working_dir='/work', env={'A': '1'})
     backend = capability.get_workspace(RunContext(deps=None, model=TestModel(), usage=RunUsage()), ref=None)
     assert isinstance(backend, ModalSandboxBackend)
     await backend.get_client()
     created = fake_modal.create_kwargs[-1]
     assert (created['timeout'], created['idle_timeout'], created['workdir'], created['env']) == (
-        1,
+        10,
         2,
         '/work',
         {'A': '1'},

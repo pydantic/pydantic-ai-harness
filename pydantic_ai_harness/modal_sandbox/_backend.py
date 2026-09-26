@@ -236,6 +236,14 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'modal'")
         if workspace is not None and ref is not None:
             raise ValueError('pass either `workspace` or `ref`, not both')
+        if type(sandbox_timeout) is not int or not 10 <= sandbox_timeout <= 86_400:
+            raise ValueError('sandbox_timeout must be an integer between 10 and 86400 seconds')
+        if image is not None and not isinstance(image, str):
+            modal_sdk = importlib.import_module('modal')
+            if not isinstance(image, modal_sdk.Image):
+                raise TypeError('image must be a registry tag or modal.Image')
+        if env is not None and any(type(key) is not str or type(value) is not str for key, value in env.items()):
+            raise TypeError('env keys and values must be strings')
         self._ref = ref if workspace is None else WorkspaceRef(provider='modal', id=workspace.object_id)
         self._sandbox: modal.Sandbox | None = workspace
         self._image = image
@@ -382,6 +390,9 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         except Exception as error:
             message = f'Could not start Modal sandbox: {error}'
             mapped = _translate(error, context=message, unavailable=message)
+            # SDK releases disagree on whether image build errors live in modal.exception.
+            if type(error).__name__ == 'ImageBuildError':
+                raise WorkspaceUnavailableError(message) from error
             if mapped is None:
                 raise
             # Modal refused the request itself: an unknown app or image, or an invalid argument

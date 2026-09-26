@@ -332,7 +332,7 @@ class TestCreate:
         assert fake_modal.create_kwargs[-1]['env'] == {'FOO': 'bar'}
 
     async def test_an_image_object_is_used_as_given(self, fake_modal: FakeModal) -> None:
-        image: Any = object()
+        image: Any = fake_modal.module.Image()
         await started(image=image)
         assert fake_modal.create_kwargs[-1]['image'] is image
         assert fake_modal.image_tags == []
@@ -370,6 +370,27 @@ class TestCreate:
         with pytest.raises(WorkspaceUnavailableError, match=match) as exc:
             await started()
         assert type(exc.value) is WorkspaceUnavailableError
+
+    async def test_image_build_error_is_unavailable(self, fake_modal: FakeModal) -> None:
+        fake_modal.create_error = fake_modal.exception('ImageBuildError')('bad image')
+        with pytest.raises(WorkspaceUnavailableError, match='Could not start Modal sandbox: bad image'):
+            await started()
+
+    @pytest.mark.parametrize(
+        'settings',
+        [
+            {'sandbox_timeout': 9},
+            {'sandbox_timeout': 86401},
+            {'image': 42},
+            {'env': {'TOKEN': 42}},
+        ],
+    )
+    async def test_bad_constructor_inputs_fail_before_create(
+        self, fake_modal: FakeModal, settings: dict[str, Any]
+    ) -> None:
+        with pytest.raises((TypeError, ValueError)):
+            ModalSandboxBackend(**settings)
+        assert not fake_modal.sandboxes
 
     async def test_create_transport_failure_propagates(self, fake_modal: FakeModal) -> None:
         fake_modal.create_error = fake_modal.exception('ResourceExhaustedError')('rate limited')
