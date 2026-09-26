@@ -292,7 +292,8 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     async def write_bytes(self, path: str, data: bytes) -> None:
         sandbox = await self.get_client()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not write {path!r}', path):
-            await sandbox.files.write(path, data)  # pyright: ignore[reportUnknownMemberType]
+            # The SDK's default 60s request bound can interrupt a valid large upload.
+            await sandbox.files.write(path, data, request_timeout=0)  # pyright: ignore[reportUnknownMemberType]
 
     async def stat(self, path: str) -> FileEntry:
         sandbox = await self.get_client()

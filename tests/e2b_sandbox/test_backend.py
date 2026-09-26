@@ -438,6 +438,24 @@ class TestWorkingDir:
 
 
 class TestFilesystem:
+    async def test_upload_does_not_inherit_sdk_request_timeout(
+        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = await started()
+        files = fake_e2b.sandboxes[0].files
+        write = files.write
+        seen: list[float | None] = []
+
+        async def track(
+            path: str, data: str | bytes, user: str | None = None, request_timeout: float | None = None
+        ) -> Any:
+            seen.append(request_timeout)
+            return await write(path, data, user, request_timeout)
+
+        monkeypatch.setattr(files, 'write', track)
+        await backend.write_bytes('/tmp/large', b'data')
+        assert seen == [0]
+
     async def test_write_then_read_round_trips(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         await backend.write_bytes('/tmp/a.txt', b'body')
