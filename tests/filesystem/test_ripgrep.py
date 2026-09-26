@@ -318,4 +318,5 @@ class TestWithoutRipgrep:
         ts, ws = toolset(workspace), Workspace(backend)
         await ts.grep('os', workspace=ws)
         await ts.list_files(workspace=ws)
+        await ts.grep('os', workspace=ws)
         assert backend.probes == 1

@@ -39,15 +39,15 @@ from pydantic_ai_harness.experimental.acp._session import AcpSession
 from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
 
 
-class _LocalFileWriter(Protocol):
-    """Something that can write a file for the agent -- structurally satisfied by `_LocalDiskWriter`."""
+class _WorkspaceFileWriter(Protocol):
+    """Something that can write a file for the agent -- structurally satisfied by `_FallbackFileWriter`."""
 
     def write_file(
         self, path: str, content: str, *, workspace: Workspace
     ) -> Awaitable[str]: ...  # pragma: no cover - structural protocol
 
 
-class _LocalDiskWriter:
+class _FallbackFileWriter:
     """Writes with the `FileSystem` toolset, bounded by the session's `cwd`.
 
     The write goes through the session's workspace (`AcpSessionConfig.workspace`) when one is
@@ -83,7 +83,12 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
     """
 
     def __init__(
-        self, *, client: Client, session_id: str, cwd: str | None = None, local_writer: _LocalFileWriter | None = None
+        self,
+        *,
+        client: Client,
+        session_id: str,
+        cwd: str | None = None,
+        local_writer: _WorkspaceFileWriter | None = None,
     ) -> None:
         super().__init__()
         self._client = client
@@ -152,7 +157,7 @@ def acp_filesystem(session: AcpSession) -> Toolset[None] | None:
     fs = capabilities.fs if capabilities is not None else None
     if fs is None or not fs.read_text_file:
         return None
-    local_writer = None if fs.write_text_file else _LocalDiskWriter(session.cwd)
+    local_writer = None if fs.write_text_file else _FallbackFileWriter(session.cwd)
     return Toolset(
         AcpFileSystemToolset[None](
             client=session.client, session_id=session.session_id, cwd=session.cwd, local_writer=local_writer
