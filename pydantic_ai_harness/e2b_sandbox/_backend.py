@@ -139,7 +139,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     Commands and file operations run inside an E2B microVM, so the host is never exposed.
 
     Building one does no I/O. The first operation creates or attaches to a workspace, and the
-    typed `e2b.AsyncSandbox` is available through `get_client()`. The backend does not kill the
+    typed `e2b.AsyncSandbox` is available through `get_sandbox()`. The backend does not kill the
     sandbox; killing it is the application's job.
 
     Commands run as one-shot operations, with complete output returned after they finish.
@@ -154,7 +154,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     process the command started in the background outlives it until the sandbox is torn down.
 
     Args:
-        workspace: A live `e2b.AsyncSandbox` you already have. Whoever created it owns killing it.
+        sandbox: A live `e2b.AsyncSandbox` you already have. Whoever created it owns killing it.
         ref: Identity of an existing sandbox to attach to on first use.
         template: E2B template name or ID a newly created sandbox runs; E2B's default when `None`.
             An unknown template raises `WorkspaceUnavailableError` on first use.
@@ -173,8 +173,8 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
 
     def __init__(
         self,
-        workspace: e2b.AsyncSandbox | None = None,
         *,
+        sandbox: e2b.AsyncSandbox | None = None,
         ref: WorkspaceRef | None = None,
         template: str | None = None,
         sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
@@ -184,10 +184,10 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     ) -> None:
         if ref is not None and ref.provider != 'e2b':
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'e2b'")
-        if workspace is not None and ref is not None:
-            raise ValueError('pass either `workspace` or `ref`, not both')
-        self._ref = ref if workspace is None else WorkspaceRef(provider='e2b', id=workspace.sandbox_id)
-        self._sandbox = workspace
+        if sandbox is not None and ref is not None:
+            raise ValueError('pass either `sandbox` or `ref`, not both')
+        self._ref = ref if sandbox is None else WorkspaceRef(provider='e2b', id=sandbox.sandbox_id)
+        self._sandbox = sandbox
         self._working_dir = absolute_path('working_dir', working_dir)
         # `working_dir()` must return a canonical absolute path: the configured one, or the
         # sandbox's default, resolved once with `pwd -P`.
@@ -198,7 +198,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         self._env = dict(env) if env is not None else None
         self._allow_internet_access = allow_internet_access
 
-    async def get_client(self) -> e2b.AsyncSandbox:
+    async def get_sandbox(self) -> e2b.AsyncSandbox:
         """Return the typed `e2b.AsyncSandbox`, creating or attaching to it on first use.
 
         Every operation takes the handle from here, so none reaches an unacquired one. The lock
@@ -267,34 +267,34 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         return error
 
     async def read_bytes(self, path: str) -> bytes:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not read {path!r}', path):
             return bytes(await sandbox.files.read(path, 'bytes'))
 
     async def write_bytes(self, path: str, data: bytes) -> None:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not write {path!r}', path):
             await sandbox.files.write(path, data)  # pyright: ignore[reportUnknownMemberType]
 
     async def stat(self, path: str) -> FileEntry:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not stat {path!r}', path):
             return await _file_entry(sandbox, await sandbox.files.get_info(path))
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not list {path!r}', path):
             # `depth=1` is E2B's non-recursive listing, as the protocol asks.
             entries = await sandbox.files.list(path, depth=1)
             return [await _file_entry(sandbox, entry) for entry in entries]
 
     async def make_dir(self, path: str) -> None:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not create directory {path!r}', path):
             await sandbox.files.make_dir(path)
 
     async def remove(self, path: str) -> None:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not remove {path!r}', path):
             # envd removes with `os.RemoveAll`, which succeeds on a missing path; the protocol
             # reports that as `FileNotFoundError`.
@@ -303,7 +303,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             await sandbox.files.remove(path)
 
     async def exists(self, path: str) -> bool:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._sdk_errors(sandbox.sandbox_id, f'Could not check {path!r}', path):
             return await sandbox.files.exists(path)
 
@@ -366,7 +366,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.removesuffix('\n')
             if result.exit_code != 0 or not posixpath.isabs(printed):
-                sandbox = await self.get_client()
+                sandbox = await self.get_sandbox()
                 raise WorkspaceError(
                     f'Could not determine the working directory of E2B sandbox {sandbox.sandbox_id}: '
                     f'`pwd -P` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
@@ -391,7 +391,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         # Acquiring the sandbox has its own bound; the timeout is the command's alone.
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         handle: e2b.AsyncCommandHandle | None = None
         result: e2b.CommandResult | None = None
         try:

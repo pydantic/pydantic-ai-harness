@@ -37,19 +37,19 @@ async def started(**settings: Any) -> E2BSandboxBackend:
     """Build a backend and resolve it now.
 
     Constructing one does no I/O, so a test that wants to assert on what creating or attaching
-    did has to touch the sandbox first. Awaiting `get_client()` is that touch.
+    did has to touch the sandbox first. Awaiting `get_sandbox()` is that touch.
     """
     backend = E2BSandboxBackend(**settings)
-    await backend.get_client()
+    await backend.get_sandbox()
     return backend
 
 
 class TestConformance:
-    async def test_get_client_is_lazy_and_reuses_the_client(self, fake_e2b: FakeE2B) -> None:
+    async def test_get_sandbox_is_lazy_and_reuses_the_sandbox(self, fake_e2b: FakeE2B) -> None:
         backend = E2BSandboxBackend()
         assert not fake_e2b.sandboxes
-        sandbox = await backend.get_client()
-        assert await backend.get_client() is sandbox
+        sandbox = await backend.get_sandbox()
+        assert await backend.get_sandbox() is sandbox
         assert fake_e2b.sandboxes == [sandbox]
 
     @pytest.mark.parametrize('operation', ['run', 'write_bytes'])
@@ -65,7 +65,7 @@ class TestConformance:
     async def test_identity_is_e2b_sandbox_id(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         assert backend.ref == WorkspaceRef(provider='e2b', id='sbx-1')
-        assert await backend.get_client() is fake_e2b.sandboxes[0]
+        assert await backend.get_sandbox() is fake_e2b.sandboxes[0]
 
 
 class TestCreate:
@@ -322,7 +322,7 @@ class TestRun:
 
 
 class TestKilledSandbox:
-    """A sandbox killed through the native client is gone for every later operation.
+    """A sandbox killed through its native handle is gone for every later operation.
 
     The fake follows the SDK after `kill()`: connecting 404s into `SandboxNotFoundException`,
     and envd calls on a handle that is still held fail with the 502 `TimeoutException` the
@@ -332,7 +332,7 @@ class TestKilledSandbox:
     async def test_attaching_after_kill_is_unavailable(self, fake_e2b: FakeE2B) -> None:
         owner = await started()
         assert owner.ref is not None
-        assert await (await owner.get_client()).kill() is True
+        assert await (await owner.get_sandbox()).kill() is True
         attached = E2BSandboxBackend(ref=owner.ref)
         with pytest.raises(WorkspaceUnavailableError, match="'sbx-1' is no longer running"):
             await attached.working_dir()
@@ -340,13 +340,13 @@ class TestKilledSandbox:
 
     async def test_a_command_on_a_killed_sandbox_is_unavailable(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
-        await (await backend.get_client()).kill()
+        await (await backend.get_sandbox()).kill()
         with pytest.raises(WorkspaceUnavailableError, match='it was killed'):
             await backend.run(['true'])
 
     async def test_a_filesystem_call_on_a_killed_sandbox_is_unavailable(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
-        await (await backend.get_client()).kill()
+        await (await backend.get_sandbox()).kill()
         with pytest.raises(WorkspaceUnavailableError, match='it was killed'):
             await backend.read_bytes('/tmp/a.txt')
 
@@ -354,7 +354,7 @@ class TestKilledSandbox:
         owner = await started()
         assert owner.ref is not None
         attached = await started(ref=owner.ref)
-        await (await owner.get_client()).kill()
+        await (await owner.get_sandbox()).kill()
         with pytest.raises(WorkspaceUnavailableError, match="'sbx-1' is no longer running"):
             await attached.write_bytes('/tmp/a.txt', b'x')
 

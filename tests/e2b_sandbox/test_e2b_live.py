@@ -52,7 +52,7 @@ def _unique(prefix: str) -> str:
 async def _owned(**settings: object) -> AsyncGenerator[E2BSandboxBackend]:
     """Create a workspace and kill its native handle on the way out."""
     backend = E2BSandboxBackend(**settings)  # type: ignore[arg-type]
-    native = await backend.get_client()
+    native = await backend.get_sandbox()
     try:
         yield backend
     finally:
@@ -238,7 +238,7 @@ class TestRealLifecycle:
             await owner.write_bytes(marker, b'shared')
 
             attached = E2BSandboxBackend(ref=owner.ref)
-            assert (await attached.get_client()).sandbox_id == (await owner.get_client()).sandbox_id
+            assert (await attached.get_sandbox()).sandbox_id == (await owner.get_sandbox()).sandbox_id
             assert await attached.read_bytes(marker) == b'shared'
 
             assert (await owner.run(['cat', marker], timeout=30)).stdout == 'shared'
@@ -254,7 +254,7 @@ class TestRealLifecycle:
         async with _owned(sandbox_timeout=120) as owner:
             await owner.write_bytes(path, b'before-kill')
             assert owner.ref is not None
-            assert await (await owner.get_client()).kill() is True
+            assert await (await owner.get_sandbox()).kill() is True
 
             with pytest.raises(WorkspaceUnavailableError):
                 await E2BSandboxBackend(ref=owner.ref).working_dir()
@@ -267,12 +267,12 @@ class TestRealLifecycle:
         """Pins the documented behavior that attaching to a paused sandbox restarts it.
 
         This is the E2B-specific half of attach mode: a paused sandbox is not gone, and the
-        backend's first `get_client()` brings it back rather than failing.
+        backend's first `get_sandbox()` brings it back rather than failing.
         """
         marker = f'/tmp/{_unique("paused")}.txt'
         async with _owned(sandbox_timeout=120) as owner:
             await owner.write_bytes(marker, b'before-pause')
-            await (await owner.get_client()).beta_pause()
+            await (await owner.get_sandbox()).beta_pause()
 
             attached = E2BSandboxBackend(ref=owner.ref)
             assert await attached.read_bytes(marker) == b'before-pause'
@@ -293,11 +293,11 @@ class TestRealLifecycle:
         kill_sandbox = documented_cleanup(_DOCS_BLOCKS, 'kill_sandbox')
         async with _owned(sandbox_timeout=120) as owner:
             assert owner.ref is not None
-            await (await owner.get_client()).beta_pause()
+            await (await owner.get_sandbox()).beta_pause()
             await kill_sandbox(owner.ref)
 
             with pytest.raises(WorkspaceUnavailableError):
-                await E2BSandboxBackend(ref=owner.ref).get_client()
+                await E2BSandboxBackend(ref=owner.ref).get_sandbox()
 
 
 class TestCoder:
