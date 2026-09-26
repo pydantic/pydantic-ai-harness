@@ -50,6 +50,13 @@ _ROOT = Path(__file__).parent.parent
 _HARNESS = 'pydantic_ai_harness'
 
 
+def test_coder_explains_sandbox_creation_timing() -> None:
+    for path in ('docs/coder.md', 'pydantic_ai_harness/coder/README.md', 'docs/index.md'):
+        text = Path(path).read_text()
+        assert 'Coder(repo_context=False)' in text
+        assert 'sandbox' in text.lower()
+
+
 def test_remote_search_and_shell_output_guidance() -> None:
     for name in ('coder', 'filesystem'):
         for page in (f'docs/{name}.md', f'pydantic_ai_harness/{name}/README.md'):
