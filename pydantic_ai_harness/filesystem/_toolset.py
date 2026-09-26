@@ -28,7 +28,7 @@ from pydantic_ai.workspaces import (
 )
 
 from pydantic_ai_harness._events import event_ctx
-from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored, warn_argument_renamed
+from pydantic_ai_harness._warn import SET_WORKING_DIR_ON_THE_WORKSPACE, warn_argument_ignored, warn_argument_renamed
 from pydantic_ai_harness._workspace import raise_tool_failure, supports_commands, workspace_path
 from pydantic_ai_harness.filesystem._changes import Change
 from pydantic_ai_harness.filesystem._command_search import run_posix_search
@@ -445,10 +445,6 @@ def root_spelling(root_dir: Path | None) -> str | None:
     return spelling
 
 
-def _as_workspace(workspace: WorkspaceBackend) -> Workspace:
-    return workspace if isinstance(workspace, Workspace) else Workspace(workspace)
-
-
 class FileSystemToolset(FunctionToolset[AgentDepsT]):
     """Toolset providing filesystem operations inside the run's workspace, scoped to a root directory.
 
@@ -483,7 +479,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
     ) -> None:
         super().__init__(id=id)
         if cwd is not None:
-            warn_argument_ignored('FileSystemToolset', 'cwd', WORKING_DIR_IS_THE_WORKSPACES, stacklevel=3)
+            warn_argument_ignored('FileSystemToolset', 'cwd', SET_WORKING_DIR_ON_THE_WORKSPACE, stacklevel=3)
         if protected_patterns is not None:
             if read_only_patterns is not None:
                 raise TypeError('Pass `read_only_patterns` only: `protected_patterns` is its deprecated name.')
@@ -551,7 +547,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         even on a backend whose working directory is a symlinked path. Raises `UserError` when the
         working directory is outside `root_dir`.
         """
-        facade = _as_workspace(workspace)
+        facade = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
         if (bounds := self._bounds.get(facade)) is not None:
             return _Scope(facade, bounds)
         cwd = posixpath.normpath(await facade.working_dir())

@@ -333,6 +333,28 @@ class TestWorkspaceMount:
         assert returned == [seen]
         assert secret.read_text() == ('original' if kept else 'overwritten')
 
+    async def test_read_only_workspace_is_mounted_read_only(self, tmp_path: Path) -> None:
+        secret = tmp_path.resolve() / '.env'
+        secret.write_text('original')
+        calls = iter([ToolCallPart('run_code', {'code': PATHLIB_SNIPPET.format(path=str(secret))})])
+        returned: list[object] = []
+
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            returned.extend(
+                part.content
+                for message in messages
+                for part in message.parts
+                if isinstance(part, ToolReturnPart) and part.tool_name == 'run_code'
+            )
+            return ModelResponse(parts=[next(calls, TextPart('done'))])
+
+        file_system = FileSystem[object](read_only_patterns=[])
+        sandbox = speculative_capabilities(SpeculationCounters(), (file_system,))
+        workspace = LocalWorkspace(tmp_path, read_only=True)
+        await Agent(streamed(respond), capabilities=[file_system, *sandbox, workspace]).run('go')
+        assert returned == ['original PermissionError']
+        assert secret.read_text() == 'original'
+
     async def test_sandbox_workspace_is_not_mounted(self, tmp_path: Path) -> None:
         """A sandbox plugin's workspace is elsewhere, so the host directory stays out of the sandbox."""
         secret = tmp_path.resolve() / '.env'
