@@ -178,6 +178,13 @@ Each attempt emits a `repair_tool_arguments` span through `ctx.tracer`, without 
 contents. Other Coder operations rely on core tool spans and on the events its `FileSystem` and `Shell`
 capabilities emit.
 
+## Durable execution
+
+`Coder` works under DBOS, Temporal and Prefect durable execution. Under Temporal its tools run
+in activities, which cannot reach the run's event stream yet ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)), so
+they emit no `FileSystem` or `Shell` events there and a `FileChangeRequestEvent` listener cannot
+refuse a change.
+
 ## Upgrading
 
 This release makes the workspace the single place that decides where an agent works. Removed arguments are still accepted, emit a `HarnessDeprecationWarning` naming the fix, and are ignored.

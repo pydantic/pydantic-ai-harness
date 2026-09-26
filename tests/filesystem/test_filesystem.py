@@ -430,6 +430,22 @@ class TestRootDir:
         await call_tools([FileSystem[None]()], [read, read], workspace=workspace)
         assert workspace.working_dir_calls == 1
 
+    async def test_each_run_resolves_the_boundary_in_its_own_workspace(self, tmp_path: Path) -> None:
+        # One toolset serves every run, so durable execution sees the toolset it registered.
+        capability = FileSystem[None]()
+        assert capability.get_toolset() is capability.get_toolset()
+        for name in ('first', 'second'):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / 'a.txt').write_text(f'{name}\n')
+        first, second = [
+            await call_tool(
+                [capability], 'read_file', {'path': 'a.txt'}, workspace=LocalWorkspaceBackend(tmp_path / name)
+            )
+            for name in ('first', 'second')
+        ]
+        assert first.endswith('1\tfirst\n')
+        assert second.endswith('1\tsecond\n')
+
     async def test_a_run_without_file_operations_does_no_workspace_io(self) -> None:
         assert await call_tools([FileSystem[None](root_dir='/srv')], [], workspace=UntouchableWorkspace()) == []
 

@@ -9,6 +9,7 @@ import hashlib
 import os
 import posixpath
 import re
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ from pydantic_ai.workspaces import (
     WorkspaceReadOnlyError,
 )
 
+from pydantic_ai_harness._events import event_ctx
 from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored, warn_argument_renamed
 from pydantic_ai_harness._workspace import raise_tool_failure, supports_commands, workspace_path
 from pydantic_ai_harness.filesystem._changes import Change
@@ -138,10 +140,9 @@ class _EventLocation(TypedDict):
 
 
 @dataclass
-class _Scope:
-    """The workspace a call acts on, with its containment boundary and working directory."""
+class _Bounds:
+    """A workspace's containment boundary and working directory, resolved on its first file operation."""
 
-    workspace: Workspace
     root: str
     """The boundary: the real (symlink-free) workspace path of `root_dir`."""
     cwd: str
@@ -153,6 +154,34 @@ class _Scope:
     """
     lacks_ripgrep: bool = False
     """Set once `rg` is found missing, so later searches go straight to the built-in walk."""
+
+
+@dataclass
+class _Scope:
+    """The workspace a call acts on, with its `_Bounds`."""
+
+    workspace: Workspace
+    bounds: _Bounds
+
+    @property
+    def root(self) -> str:
+        return self.bounds.root
+
+    @property
+    def cwd(self) -> str:
+        return self.bounds.cwd
+
+    @property
+    def checks_realpath(self) -> bool:
+        return self.bounds.checks_realpath
+
+    @property
+    def lacks_ripgrep(self) -> bool:
+        return self.bounds.lacks_ripgrep
+
+    @lacks_ripgrep.setter
+    def lacks_ripgrep(self, value: bool) -> None:
+        self.bounds.lacks_ripgrep = value
 
 
 def _contains(root: str, path: str) -> bool:
@@ -451,8 +480,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         # A workspace path, absolute or relative to the workspace's working directory, resolved
         # against the workspace a call acts on; `None` bounds calls by the working directory itself.
         self._root_spelling = root_spelling(root_dir)
-        # The scope the first call resolved, reused by every later call against the same workspace.
-        self._resolved: _Scope | None = None
+        # The bounds each workspace's first call resolved, reused by later calls against it. Keyed
+        # weakly by the workspace, so one toolset serves concurrent runs and holds no finished one.
+        self._bounds: weakref.WeakKeyDictionary[Workspace, _Bounds] = weakref.WeakKeyDictionary()
         self._allowed_patterns = list(allowed_patterns)
         self._denied_patterns = list(denied_patterns)
         self._read_only_patterns = list(read_only_patterns or ())
@@ -507,9 +537,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         even on a backend whose working directory is a symlinked path. Raises `UserError` when the
         working directory is outside `root_dir`.
         """
-        if self._resolved is not None and self._resolved.workspace is workspace:
-            return self._resolved
         facade = _as_workspace(workspace)
+        if (bounds := self._bounds.get(facade)) is not None:
+            return _Scope(facade, bounds)
         cwd = posixpath.normpath(await facade.working_dir())
         if self._root_spelling is None:
             root = cwd = cwd if cwd == '/' else await facade.realpath(cwd)
@@ -523,8 +553,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                     'Set `root_dir` to a directory that contains it, or leave it unset to use the working directory.'
                 )
         has_patterns = bool(self._allowed_patterns or self._denied_patterns or self._read_only_patterns)
-        self._resolved = _Scope(workspace=facade, root=root, cwd=cwd, checks_realpath=root != '/' or has_patterns)
-        return self._resolved
+        bounds = _Bounds(root=root, cwd=cwd, checks_realpath=root != '/' or has_patterns)
+        self._bounds[facade] = bounds
+        return _Scope(facade, bounds)
 
     def _matches(self, path: str, pattern: str) -> bool:
         """Glob-match a relative path, treating a leading `**/` as 'any directory, including the root'.
@@ -715,7 +746,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Returns:
             File content with line numbers, plus metadata header.
         """
-        return await self._read_file(await self._scope(ctx.workspace), ctx, path, offset=offset, limit=limit)
+        return await self._read_file(await self._scope(ctx.workspace), event_ctx(ctx), path, offset=offset, limit=limit)
 
     @_recoverable
     async def _read_file(
@@ -792,7 +823,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Returns:
             Confirmation message with new hash.
         """
-        return await self._write_file(await self._scope(ctx.workspace), ctx, path, content, expected_hash=expected_hash)
+        return await self._write_file(
+            await self._scope(ctx.workspace), event_ctx(ctx), path, content, expected_hash=expected_hash
+        )
 
     async def _write_file_tool_unhashed(self, ctx: RunContext[AgentDepsT], path: str, content: str) -> str:
         """Create a file or replace its whole content.
@@ -802,7 +835,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             path: File path relative to the working directory.
             content: The text content to write.
         """
-        return await self._write_file(await self._scope(ctx.workspace), ctx, path, content)
+        return await self._write_file(await self._scope(ctx.workspace), event_ctx(ctx), path, content)
 
     async def _announced_state(
         self, scope: _Scope, resolved: str, path: str, *, exists: bool, expected_hash: str | None
@@ -963,7 +996,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             Summary with new hash for subsequent operations.
         """
         edits = _replacements(old_text, new_text, replacements)
-        return await self._edit_file(await self._scope(ctx.workspace), ctx, path, edits, expected_hash=expected_hash)
+        return await self._edit_file(
+            await self._scope(ctx.workspace), event_ctx(ctx), path, edits, expected_hash=expected_hash
+        )
 
     async def _edit_file_tool_unhashed(
         self,
@@ -989,7 +1024,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             replacements: Replacements to apply in order, instead of a single pair.
         """
         edits = _replacements(old_text, new_text, replacements)
-        return await self._edit_file(await self._scope(ctx.workspace), ctx, path, edits)
+        return await self._edit_file(await self._scope(ctx.workspace), event_ctx(ctx), path, edits)
 
     @_recoverable
     async def _edit_file(
@@ -1049,7 +1084,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Returns:
             Paths relative to the working directory, with type indicators and sizes.
         """
-        return await self._list_directory(await self._scope(ctx.workspace), ctx, path)
+        return await self._list_directory(await self._scope(ctx.workspace), event_ctx(ctx), path)
 
     @_recoverable
     async def _list_directory(self, scope: _Scope, ctx: RunContext[AgentDepsT] | None, path: str = '.') -> str:
@@ -1116,7 +1151,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             str: Matching lines formatted as file:line_number:text, with paths relative to the working directory.
         """
         return await self._search_files(
-            await self._scope(ctx.workspace), ctx, pattern, path=path, include_glob=include_glob
+            await self._scope(ctx.workspace), event_ctx(ctx), pattern, path=path, include_glob=include_glob
         )
 
     @_recoverable
@@ -1212,7 +1247,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Returns:
             Newline-separated list of matching file paths relative to the working directory.
         """
-        return await self._find_files(await self._scope(ctx.workspace), ctx, pattern, path=path)
+        return await self._find_files(await self._scope(ctx.workspace), event_ctx(ctx), pattern, path=path)
 
     @_recoverable
     async def _find_files(
@@ -1285,7 +1320,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Returns:
             One file path per line, relative to the working directory.
         """
-        return await self._list_files(await self._scope(ctx.workspace), ctx, path, glob=glob)
+        return await self._list_files(await self._scope(ctx.workspace), event_ctx(ctx), path, glob=glob)
 
     @_recoverable
     async def _list_files(
@@ -1374,7 +1409,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """
         return await self._grep(
             await self._scope(ctx.workspace),
-            ctx,
+            event_ctx(ctx),
             pattern,
             path=path,
             glob=glob,
@@ -1488,7 +1523,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Returns:
             Confirmation message.
         """
-        return await self._create_directory(await self._scope(ctx.workspace), ctx, path)
+        return await self._create_directory(await self._scope(ctx.workspace), event_ctx(ctx), path)
 
     async def _nearest_existing_is_dir(self, scope: _Scope, path: str) -> bool:
         """Whether the closest existing ancestor of `path` (or the filesystem root) is a directory."""

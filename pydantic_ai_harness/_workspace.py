@@ -49,8 +49,7 @@ def raise_tool_failure(error: WorkspaceError) -> NoReturn:
     if isinstance(error, WorkspaceReadOnlyError):
         raise ToolFailed(READ_ONLY_FAILURE) from error
     if isinstance(error, WorkspaceTimeoutError):
-        deadline = '' if error.timeout is None else f' after {error.timeout:g}s'
-        raise ToolFailed(f'The workspace operation timed out{deadline}.') from error
+        raise ToolFailed(str(error) or 'The workspace operation timed out.') from error
     raise ToolFailed(str(error) or f'The workspace operation failed ({type(error).__name__}).') from error
 
 

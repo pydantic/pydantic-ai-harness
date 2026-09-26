@@ -32,6 +32,7 @@ from pydantic_ai.workspaces import (
     UnavailableWorkspace,
     Workspace,
     WorkspaceReadOnlyError,
+    WorkspaceUnavailableError,
 )
 
 from pydantic_ai_harness.subagents import ModelOption, SubAgent, SubAgents, SubAgentToolset
@@ -282,7 +283,7 @@ class TestDelegation:
             _delegate_then_finish('worker'), capabilities=[SubAgents(agents=[SubAgent(worker)])]
         )
 
-        with pytest.raises(UserError, match='workspace disabled by policy'):
+        with pytest.raises(WorkspaceUnavailableError, match='workspace disabled by policy'):
             await parent.run('go', workspace=UnavailableWorkspace('workspace disabled by policy'))
 
     async def test_delegates_via_name_override(self) -> None:
