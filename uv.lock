@@ -3866,28 +3866,28 @@ requires-dist = [
     { name = "logfire", marker = "extra == 'logfire'", specifier = ">=4.31.0" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.0" },
     { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.61.0" },
-    { name = "pydantic-ai-slim", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", marker = "extra == 'aws-lambda'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'anthropic'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["cli"], marker = "extra == 'cli'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'code-mode'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'codemode'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["duckduckgo", "web-fetch"], marker = "extra == 'researcher'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'day-ai'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'github'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'google-workspace'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'grain'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'linear'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'logfire-mcp'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'notion'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'ordinal'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'posthog'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'pylon'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'slack'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'stackone'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["spec"], marker = "extra == 'logfire'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
+    { name = "pydantic-ai-slim", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", marker = "extra == 'aws-lambda'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'anthropic'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["cli"], marker = "extra == 'cli'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'code-mode'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'codemode'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["duckduckgo", "web-fetch"], marker = "extra == 'researcher'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'day-ai'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'github'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'google-workspace'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'grain'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'linear'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'logfire-mcp'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'notion'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'ordinal'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'posthog'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'pylon'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'slack'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'stackone'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["spec"], marker = "extra == 'logfire'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
     { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.23,<1" },
     { name = "pydantic-monty", marker = "extra == 'codemode'", specifier = ">=0.0.23,<1" },
     { name = "pydantic-monty", marker = "extra == 'dynamic-workflow'", specifier = ">=0.0.23,<1" },
@@ -3910,9 +3910,9 @@ dev = [
     { name = "logfire", extras = ["httpx"], specifier = ">=4.31.0" },
     { name = "mongomock-motor", specifier = ">=0.0.36" },
     { name = "pydantic-ai-harness", extras = ["code-mode", "coder"] },
-    { name = "pydantic-ai-slim", extras = ["anthropic"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["mcp", "spec"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
-    { name = "pydantic-ai-slim", extras = ["openai"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
+    { name = "pydantic-ai-slim", extras = ["anthropic"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["mcp", "spec"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
+    { name = "pydantic-ai-slim", extras = ["openai"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
     { name = "pytest", specifier = ">=9.0.0" },
     { name = "pytest-anyio" },
     { name = "pytest-examples", specifier = ">=0.0.18" },
@@ -3926,8 +3926,8 @@ lint = [
 
 [[package]]
 name = "pydantic-ai-slim"
-version = "2.50.1.dev362+71c15de3"
-source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8#71c15de3786e236fe7f4750d476805f1f40eb8a8" }
+version = "2.50.1.dev409+64359944"
+source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873#64359944e6d2ca27bc329e77dfacdeb73014a873" }
 dependencies = [
     { name = "anyio" },
     { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
@@ -4003,7 +4003,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "pydantic-ai-harness", extras = ["coder"], editable = "." },
-    { name = "pydantic-ai-slim", extras = ["anthropic", "mcp", "openai"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8" },
+    { name = "pydantic-ai-slim", extras = ["anthropic", "mcp", "openai"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=64359944e6d2ca27bc329e77dfacdeb73014a873" },
     { name = "pydantic-monty", specifier = ">=0.0.23,<1" },
     { name = "pyfiglet", specifier = ">=1.0.4" },
     { name = "rich", specifier = ">=14" },
@@ -4130,8 +4130,8 @@ wheels = [
 
 [[package]]
 name = "pydantic-graph"
-version = "2.50.1.dev362+71c15de3"
-source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_graph&rev=71c15de3786e236fe7f4750d476805f1f40eb8a8#71c15de3786e236fe7f4750d476805f1f40eb8a8" }
+version = "2.50.1.dev409+64359944"
+source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_graph&rev=64359944e6d2ca27bc329e77dfacdeb73014a873#64359944e6d2ca27bc329e77dfacdeb73014a873" }
 dependencies = [
     { name = "anyio" },
     { name = "logfire-api" },

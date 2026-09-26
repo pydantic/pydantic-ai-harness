@@ -1863,7 +1863,7 @@ class _RaisingWorkspace(LocalWorkspaceBackend):
 
 class _SlowReads(LocalWorkspaceBackend):
     async def read_bytes(self, path: str) -> bytes:
-        raise WorkspaceTimeoutError('slow')
+        raise WorkspaceTimeoutError('read timed out after 5 seconds')
 
 
 class TestWorkspaceFailures:
@@ -1872,8 +1872,8 @@ class TestWorkspaceFailures:
     @pytest.mark.parametrize(
         ('error', 'message'),
         [
-            (WorkspaceTimeoutError('slow', timeout=30), 'The workspace operation timed out after 30s.'),
-            (WorkspaceTimeoutError('slow'), 'The workspace operation timed out.'),
+            (WorkspaceTimeoutError('command timed out after 30 seconds'), 'command timed out after 30 seconds'),
+            (WorkspaceTimeoutError(''), 'The workspace operation timed out.'),
             (WorkspaceError('backend refused'), 'backend refused'),
             (WorkspaceError(), 'The workspace operation failed (WorkspaceError).'),
         ],

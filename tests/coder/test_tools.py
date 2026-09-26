@@ -46,11 +46,11 @@ class TestCoder:
         agent = Agent(TestModel(call_tools=[], custom_output_text='done'), name='coder', capabilities=capabilities)
         result = await agent.run('Inspect tools')
         assert result.output == 'done'
-        assert [name for name, _ in durability.calls] == [
-            'coder__workspace__ensure',
-            'coder__workspace__stat',
-            'coder__workspace__stat',
-            'coder__model.request_stream',
+        assert [(name, getattr(args[0], 'method', None)) for name, args in durability.calls] == [
+            ('coder__capability__workspace.call', 'ensure'),
+            ('coder__capability__workspace.call', 'stat'),
+            ('coder__capability__workspace.call', 'stat'),
+            ('coder__model.request_stream', None),
         ]
 
     @pytest.mark.parametrize('unrestricted_filesystem', [False, True])
