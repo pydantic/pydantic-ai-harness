@@ -660,6 +660,14 @@ class TestWriteFile:
         with pytest.raises(ModelRetry, match="Path 'subdir' exists and is not a regular file"):
             await toolset.write_file('subdir', 'content', workspace=ws)
 
+    async def test_write_missing_parent_does_not_suggest_unregistered_tool(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        with pytest.raises(ModelRetry) as error:
+            await toolset.write_file('missing/file.txt', 'hello', workspace=ws)
+        assert 'create_directory' not in str(error.value)
+        assert 'parent directory' in str(error.value).lower()
+
     async def test_write_nonexistent_parent_raises(
         self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
     ) -> None:
