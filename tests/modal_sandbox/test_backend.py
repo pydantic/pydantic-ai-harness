@@ -489,6 +489,16 @@ class TestFilesystem:
             'relative': (False, 5),
         }
 
+    async def test_dangling_symlink_is_listed_but_does_not_exist(self, fake_modal: FakeModal, tmp_path: Path) -> None:
+        fake_modal.host_root = tmp_path
+        (tmp_path / 'dangling').symlink_to('missing')
+        backend = ModalSandboxBackend()
+        entry = next(e for e in await backend.list_dir(str(tmp_path)) if e.name == 'dangling')
+        assert (entry.is_dir, entry.size) == (False, None)
+        with pytest.raises(FileNotFoundError):
+            await backend.stat(str(tmp_path / 'dangling'))
+        assert await backend.exists(str(tmp_path / 'dangling')) is False
+
     async def test_remove_is_recursive(self, fake_modal: FakeModal) -> None:
         # One call covers both halves of the protocol's `remove`: on a file `recursive`
         # changes nothing, and on a directory it is what removes a non-empty one.

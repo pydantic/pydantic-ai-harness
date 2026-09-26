@@ -303,7 +303,12 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         absolute_path('path', path)
         sandbox = await self.get_client()
         async with self._mapped_errors(sandbox, f'Could not stat {path!r}', path):
-            return await _file_entry(sandbox, await sandbox.filesystem.stat.aio(path), path)
+            info = await sandbox.filesystem.stat.aio(path)
+            entry = await _file_entry(sandbox, info, path)
+            # Listings retain broken links, but stat follows them like the local backend.
+            if info.is_symlink() and entry.size is None and not entry.is_dir:
+                raise FileNotFoundError(path)
+            return entry
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
         absolute_path('path', path)
