@@ -179,6 +179,17 @@ async def test_nested_gitignore_on_posix_search(tmp_path: Path) -> None:
     assert backend.reads == 0
 
 
+async def test_posix_grep_explicit_ignored_file(tmp_path: Path) -> None:
+    (tmp_path / '.gitignore').write_text('ignored.txt\n')
+    (tmp_path / 'ignored.txt').write_text('needle\n')
+    subprocess.run(['git', '-C', str(tmp_path), 'init', '-q'], check=True)
+    backend = CountingBackend(tmp_path)
+    tools = FileSystem[None](root_dir=tmp_path, tools=['grep']).get_toolset()
+    assert isinstance(tools, FileSystemToolset)
+    assert await tools.grep('needle', workspace=backend) == 'No matches found.'
+    assert await tools.grep('needle', path='ignored.txt', workspace=backend) == 'ignored.txt:1:needle'
+
+
 async def test_posix_output_cap_reports_truncation(tmp_path: Path) -> None:
     (tmp_path / 'many.txt').write_text(('needle ' + 'X' * 100 + '\n') * 85000)
     backend = CountingBackend(tmp_path)

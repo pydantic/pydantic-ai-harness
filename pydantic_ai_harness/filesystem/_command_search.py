@@ -33,6 +33,7 @@ async def run_posix_search(
     *,
     cwd: str,
     target: str = '.',
+    explicit_file: bool = False,
     pattern: str | None = None,
     literal: bool = False,
     ignore_case: bool = False,
@@ -62,6 +63,9 @@ async def run_posix_search(
         + (" ! -path . -name '.*' -prune -o " if not include_hidden else ' ')
         + '-type f -print0; fi'
     )
+    if explicit_file:
+        # An explicit path bypasses gitignore, but still passes through canonical authorization.
+        enumeration = 'printf "%s\\0" ' + shlex.quote(target)
     # Carry the canonical path with each candidate, so a single search command can
     # authorize thousands of files without per-result sandbox round trips.
     canonical = 'real=$(realpath -- "$file" && printf .) || continue; real=${real%.}; real=${real%?}; '
