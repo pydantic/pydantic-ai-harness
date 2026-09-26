@@ -94,10 +94,12 @@ async def run_posix_search(
     )
     result = await workspace.run(script, shell=True, cwd=cwd, timeout=120)
     stderr, _, status = result.stderr.rpartition(_STATUS)
-    if result.exit_code != 0 or not status or status.strip() != '0':
-        raise ModelRetry(f'POSIX search failed: {stderr.strip() or result.stderr.strip() or result.exit_code}')
     output = result.stdout
     cut = len(output.encode('utf-8', errors='surrogateescape')) >= _MAX_OUTPUT_BYTES
+    # head closes the pipe at the cap; xargs can report its child dying of SIGPIPE.
+    pipe_cut = cut and ('signal 13' in stderr or status.strip() == '141')
+    if result.exit_code != 0 or not status or (status.strip() != '0' and not pipe_cut):
+        raise ModelRetry(f'POSIX search failed: {stderr.strip() or result.stderr.strip() or result.exit_code}')
     results: list[_T] = []
     records, incomplete = _parse_records(output, listing=pattern is None)
     cut |= incomplete

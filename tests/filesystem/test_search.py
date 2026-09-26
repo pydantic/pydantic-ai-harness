@@ -179,6 +179,16 @@ async def test_nested_gitignore_on_posix_search(tmp_path: Path) -> None:
     assert backend.reads == 0
 
 
+async def test_posix_output_cap_reports_truncation(tmp_path: Path) -> None:
+    (tmp_path / 'many.txt').write_text(('needle ' + 'X' * 100 + '\n') * 85000)
+    backend = CountingBackend(tmp_path)
+    tools = FileSystem[None](root_dir=tmp_path, max_search_results=200000, tools=['grep']).get_toolset()
+    assert isinstance(tools, FileSystemToolset)
+    result = await tools.grep('needle', workspace=backend)
+    assert result.startswith('many.txt:1:needle')
+    assert 'truncated' in result
+
+
 async def test_no_rg_rejects_unsupported_regex(tmp_path: Path) -> None:
     (tmp_path / 'file.txt').write_text('needle\n')
     backend = CountingBackend(tmp_path)
