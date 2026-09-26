@@ -200,6 +200,21 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
         self.env = env
         self.warn_if_no_tools = warn_if_no_tools
 
+    def backend(self, ref: WorkspaceRef) -> ModalSandboxBackend:
+        """Construct a backend for a stored Modal ref without opening the sandbox."""
+        return ModalSandboxBackend(ref=ref, working_dir=self.working_dir, env=self.env)
+
+    async def destroy(self, ref: WorkspaceRef) -> None:
+        """Terminate a sandbox by ID without running commands or restoring its workspace."""
+        if ref.provider != 'modal':
+            raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'modal'")
+        import modal
+
+        # A dead sandbox cannot be opened for work, but its ID still identifies the
+        # resource to terminate. Do not go through backend.get_client() here.
+        sandbox = await modal.Sandbox.from_id.aio(ref.id)
+        await sandbox.terminate.aio()
+
     def get_workspace(self, ctx: RunContext[AgentDepsT], *, ref: WorkspaceRef | None) -> WorkspaceBackend | None:
         """Build a backend without performing Modal I/O."""
         del ctx

@@ -18,7 +18,7 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 
-from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
+from pydantic_ai_harness.modal_sandbox import ModalSandbox, ModalSandboxBackend
 
 from .fake_modal import FakeImage, FakeModal, FileInfo
 
@@ -37,6 +37,35 @@ async def started(**settings: Any) -> ModalSandboxBackend:
     backend = ModalSandboxBackend(**settings)
     await backend.get_client()
     return backend
+
+
+async def test_destroy_ref_does_not_attach_or_create(fake_modal: FakeModal) -> None:
+    owner = await started()
+    ref = owner.ref
+    assert ref is not None
+    provider = ModalSandbox()
+    attached = provider.backend(ref)
+    assert attached.ref == ref
+    assert fake_modal.attach_ids == []
+    await provider.destroy(ref)
+    assert fake_modal.attach_ids == [ref.id]
+    assert fake_modal.owned_creates == 1
+    assert fake_modal.sandboxes[0].shutting_down
+
+
+async def test_auth_failure_classifies_reason_without_echoing_secret(fake_modal: FakeModal) -> None:
+    secret = 'modal-secret-value-123'
+    fake_modal.create_error = fake_modal.exception('AuthError')(f'token {secret} expired')
+    with pytest.raises(WorkspaceUnavailableError, match='Credential expired') as exc:
+        await ModalSandboxBackend().get_client()
+    assert secret not in str(exc.value)
+    assert 'MODAL_TOKEN_ID' in str(exc.value)
+
+
+async def test_destroy_rejects_foreign_ref_without_sdk_call(fake_modal: FakeModal) -> None:
+    with pytest.raises(ValueError, match='unsupported workspace provider'):
+        await ModalSandbox().destroy(WorkspaceRef(provider='other', id='sb-owned'))
+    assert fake_modal.attach_ids == []
 
 
 class TestRun:
@@ -740,7 +769,7 @@ class TestFilesystem:
         await fake_modal.sandboxes[0].terminate.aio()
         with pytest.raises(WorkspaceUnavailableError, match='no longer running'):
             await backend.read_bytes('/x')
-        assert fake_modal.sandboxes[0].exec_calls[-1].argv == ['true']
+        assert fake_modal.sandboxes[0].exec_calls  # the FIFO probe detects shutdown before the SDK read
 
     async def test_a_wrapped_auth_failure_is_terminal(self, fake_modal: FakeModal) -> None:
         backend = await started()

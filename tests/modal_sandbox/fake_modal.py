@@ -508,14 +508,16 @@ class FakeSandbox:
             raise FakeConflictError('Modal Sandbox is shutting down.')
         if self._control.exec_error is not None:
             raise self._control.exec_error
-        stdout, stderr, code = self._control.responder(argv, timeout)
+        # In-memory fake stores only regular files; its generic echo responder would
+        # otherwise report that every path is a FIFO.
+        stdout, stderr, code = ('', '', 1) if argv[:2] == ['test', '-p'] else self._control.responder(argv, timeout)
         return _FakeProcess(
             _stream_bytes(stdout),
             _stream_bytes(stderr),
             code,
             self._control.wait_error,
-            self._control.wait_hangs,
-            self._control.stdout_hangs,
+            self._control.wait_hangs and argv[:2] != ['test', '-p'],
+            self._control.stdout_hangs and argv[:2] != ['test', '-p'],
         )
 
     def _poll(self) -> int | None:

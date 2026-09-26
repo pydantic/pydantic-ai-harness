@@ -111,13 +111,14 @@ The sandbox keeps running, and billing, after the run ends. Pydantic AI never te
 
 ```python {names="defined"}
 from pydantic_ai.workspaces import WorkspaceRef
-from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
+from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
 
 async def terminate_sandbox(ref: WorkspaceRef) -> None:
-    sandbox = await ModalSandboxBackend(ref=ref).get_client()
-    await sandbox.terminate.aio()
+    await ModalSandbox().destroy(ref)
 ```
+
+`ModalSandbox().backend(ref)` constructs a backend for an existing ref without I/O. `destroy(ref)` uses the sandbox ID directly; it does not resume an expired sandbox or run its tools. Only destroy sandboxes you own.
 
 ### What a timeout stops
 

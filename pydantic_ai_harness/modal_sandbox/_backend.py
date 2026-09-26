@@ -40,7 +40,12 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 
-from pydantic_ai_harness._workspace_provider import absolute_path, command_argv, command_deadline
+from pydantic_ai_harness._workspace_provider import (
+    absolute_path,
+    command_argv,
+    command_deadline,
+    safe_credential_reason,
+)
 
 if TYPE_CHECKING:
     import modal
@@ -99,7 +104,7 @@ def _translate(error: Exception, *, context: str, unavailable: str, path: str | 
 
     exc = modal.exception
     if isinstance(error, (exc.AuthError, exc.PermissionDeniedError)):
-        return WorkspaceUnavailableError(_AUTH_MESSAGE)
+        return WorkspaceUnavailableError(f'{safe_credential_reason(error)}. {_AUTH_MESSAGE}')
     # `SandboxTimeoutError` is the sandbox reaching its lifetime (`sandbox_timeout`), not a
     # command timing out; a command's own deadline is handled in `run()`.
     if isinstance(error, (exc.NotFoundError, exc.SandboxTerminatedError, exc.SandboxTimeoutError)) or (
