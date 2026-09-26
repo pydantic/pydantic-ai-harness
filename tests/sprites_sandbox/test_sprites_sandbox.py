@@ -316,6 +316,15 @@ class TestSpritesSandbox:
         assert (await backend.get_client()).name == name
         assert transport.created == [name]
 
+    async def test_auth_error_reports_safe_reason_without_token(self, transport: SpriteTransport) -> None:
+        secret = 'secret-sprite-token-123'
+        transport.get_error = AuthenticationError(f'credential expired: {secret}')
+        backend = SpritesSandboxBackend(ref=WorkspaceRef(provider='sprites', id='target'))
+        with pytest.raises(WorkspaceUnavailableError) as caught:
+            await backend.get_client()
+        assert 'Credential expired' in str(caught.value)
+        assert secret not in str(caught.value)
+
     async def test_missing_token(self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('SPRITE_TOKEN')
         with pytest.raises(WorkspaceUnavailableError, match='SPRITE_TOKEN'):

@@ -77,7 +77,7 @@ from pydantic_ai.workspaces import (
 from pydantic_ai.workspaces.workspace import _ShellFilesystem  # pyright: ignore[reportPrivateUsage]
 from websockets.exceptions import InvalidHandshake, InvalidMessage
 
-from pydantic_ai_harness._workspace_provider import absolute_path, command_argv, stop_shielded
+from pydantic_ai_harness._workspace_provider import absolute_path, command_argv, safe_credential_reason, stop_shielded
 
 try:
     from sprites import AsyncSprite, AsyncSpritesClient
@@ -186,7 +186,8 @@ def _map_error(error: Exception, sprite_name: str | None) -> WorkspaceError | No
     # The exec handshake reports its HTTP status as an `APIError`.
     status = error.status_code if isinstance(error, APIError) else None
     if isinstance(error, AuthenticationError) or status == 401:
-        return WorkspaceUnavailableError(_AUTH_MESSAGE)
+        # SDK error text may contain the rejected token; keep only a classified reason.
+        return WorkspaceUnavailableError(f'{safe_credential_reason(error)}. {_AUTH_MESSAGE}')
     if not isinstance(error, SpriteError) or isinstance(error, (NetworkError, SpriteTimeoutError)):
         return None
     # sprites-py reports every other HTTP failure, a rate limit or a server error included, as a plain
