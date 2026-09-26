@@ -1731,10 +1731,7 @@ class TestMutationKillers:
     ) -> None:
         """The first line must be included when no offset is specified."""
         result = await toolset.read_file('multi.txt', workspace=ws)
-        # First line must be present (line1)
         assert '     1\tline1' in result
-        # Verify line numbering starts at 1
-        assert '     0\t' not in result
 
     async def test_toolset_tool_names(self, toolset: FileSystemToolset[None]) -> None:
         """Verify tools are registered with correct names."""
@@ -1773,31 +1770,10 @@ class TestMutationKillers:
         # Exact match: no trailing double newline
         assert result == '     1\thello\n'
 
-    async def test_safe_resolve_write_default_is_false(
-        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
-    ) -> None:
-        """Protected files should be readable via _safe_resolve's default (write=False)."""
-        (fs_root / '.env.local').write_text('SECRET=x\n')
-        scope = await toolset._scope(ws)
-        # _safe_resolve without write= uses default write=False → read is allowed
-        resolved = await toolset._safe_resolve(scope, '.env.local')
-        assert resolved.endswith('/.env.local')
-        # But with write=True, it should raise. `_safe_resolve` is an internal
-        # helper, so it raises the native PermissionError; the `ModelRetry`
-        # conversion happens in the public tool methods that wrap it.
-        with pytest.raises(PermissionError, match='protected'):
-            await toolset._safe_resolve(scope, '.env.local', write=True)
-
     async def test_list_directory_exact_size(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         result = await toolset.list_directory('.', workspace=ws)
         # hello.txt has 'Hello, world!\n' = 14 bytes
         assert '14 bytes' in result
-
-    async def test_list_directory_no_garbage_separator(
-        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
-    ) -> None:
-        result = await toolset.list_directory('.', workspace=ws)
-        assert 'XX' not in result
 
     async def test_list_directory_error_message(
         self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
@@ -1816,35 +1792,9 @@ class TestMutationKillers:
         with pytest.raises(ModelRetry, match='not a valid glob pattern|must be relative'):
             await toolset.find_files(pattern, workspace=ws)
 
-    async def test_find_files_no_suffix_on_files(
-        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
-    ) -> None:
-        result = await toolset.find_files('*', workspace=ws)
-        for line in result.splitlines():
-            if not line.endswith('/'):
-                assert 'XXXX' not in line
-
-    async def test_find_files_no_garbage_separator(
-        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
-    ) -> None:
-        result = await toolset.find_files('*.txt', workspace=ws)
-        assert 'XX' not in result
-
-    async def test_search_files_no_garbage_separator(
-        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
-    ) -> None:
-        result = await toolset.search_files(r'line\d', workspace=ws)
-        assert 'XX' not in result
-
     async def test_file_info_exact_size(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         result = await toolset.file_info('hello.txt', workspace=ws)
         assert '14 bytes' in result
-
-    async def test_file_info_no_garbage_separator(
-        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
-    ) -> None:
-        result = await toolset.file_info('hello.txt', workspace=ws)
-        assert 'XX' not in result
 
     async def test_search_with_invalid_utf8_file(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend

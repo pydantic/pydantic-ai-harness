@@ -21,7 +21,7 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset, ToolsetTool
 from pydantic_ai.workspaces import Workspace, WorkspaceTimeoutError
 
 from pydantic_ai_harness._output import truncate_tail
-from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored
+from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACE, warn_argument_ignored
 from pydantic_ai_harness._workspace import metadata_dir
 from pydantic_ai_harness.shell._jobs import CONTROL_TIMEOUT, Job
 from pydantic_ai_harness.shell._limits import file_limit_status, limited_script, validate_file_limit
@@ -79,7 +79,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
     ) -> None:
         super().__init__(id=id)
         if cwd is not None:
-            warn_argument_ignored('ShellToolset', 'cwd', WORKING_DIR_IS_THE_WORKSPACES, stacklevel=3)
+            warn_argument_ignored('ShellToolset', 'cwd', WORKING_DIR_IS_THE_WORKSPACE, stacklevel=3)
         # The absolute workspace path `persist_cwd` last recorded; `None` means the working directory.
         self._cwd: str | None = None
         self._allowed_commands = list(allowed_commands)
@@ -262,12 +262,12 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
     async def _build_cwd_capture(self, ctx: RunContext[AgentDepsT], command: str) -> tuple[str, str | None]:
         """Wrap a command to record its final working directory out-of-band.
 
-        `pwd` is written to a file inside the workspace whose random path the
-        agent's command can't address, so command output can never spoof the
-        tracked cwd -- unlike parsing a sentinel out of stdout, where any command
-        that prints the sentinel string (or one using `;` to skip success-gating)
-        could redirect the cwd. Returns the wrapped command plus the capture
-        path, or the command unchanged and `None` when cwd tracking is off.
+        `pwd` is written to a file inside the workspace, so command output can
+        never spoof the tracked cwd -- unlike parsing a sentinel out of stdout,
+        where any command that prints the sentinel string (or one using `;` to
+        skip success-gating) could redirect the cwd. The random file name keeps
+        concurrent commands from colliding. Returns the wrapped command plus the
+        capture path, or the command unchanged and `None` when cwd tracking is off.
         """
         if not self._persist_cwd:
             return command, None
