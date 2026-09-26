@@ -146,7 +146,7 @@ agent = Agent('anthropic:claude-opus-5-5', capabilities=[SpritesSandbox(), Coder
 | Option | What it does |
 | --- | --- |
 | `runtime` | Runtime for a new Sprite. |
-| `working_dir` | Absolute directory commands start in and relative paths resolve against. Default: the Sprite's own. |
+| `working_dir` | Absolute directory commands start in and relative paths resolve against. A default Sprite runs as non-root `sprite` in `/home/sprite`; use relative paths or set `working_dir=` for portable code. |
 | `env` | Environment variables every command gets. Nothing from your machine's environment reaches the Sprite. |
 | `client` | A `sprites.AsyncSpritesClient` to share across runs on one event loop, or to set its base URL or timeout. You close it; `SpritesSandbox` never does. |
 
