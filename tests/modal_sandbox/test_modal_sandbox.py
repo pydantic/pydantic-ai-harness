@@ -113,11 +113,11 @@ async def test_command_start_timeout_is_bounded(fake_modal: FakeModal) -> None:
 
 
 async def test_create_timeout_is_a_retryable_timeout(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
-    # An unresponsive control plane is transient: a plain `TimeoutError`, not a `WorkspaceError`.
+    # An image build or pull may still be running: report a transient timeout.
     fake_modal.create_gate = anyio.Event()
     monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._CREATE_TIMEOUT', 0.01)
     backend = ModalSandboxBackend()
-    with pytest.raises(TimeoutError, match='control plane') as exc_info:
+    with pytest.raises(TimeoutError, match='image build or pull') as exc_info:
         await backend.get_client()
     assert not isinstance(exc_info.value, WorkspaceError)
 
