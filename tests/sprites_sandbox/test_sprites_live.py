@@ -178,11 +178,13 @@ async def test_timeout_keeps_stderr_and_cleans_capture(client: AsyncSpritesClien
     with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
         refs.write(f'sprites sprites {native.name}\n')
     try:
-        previous = await backend.run(['sh', '-c', 'ls /tmp/pydantic-ai-stderr-* 2>/dev/null'], timeout=30)
+        # A listing command creates its own empty capture while it runs; check only nonempty captures.
+        check = ['find', '/tmp', '-maxdepth', '1', '-name', 'pydantic-ai-stderr-*', '-size', '+0c']
+        previous = await backend.run(check, timeout=30)
         with pytest.raises(WorkspaceTimeoutError) as caught:
             await backend.run('echo ERROR >&2; sleep 30', shell=True, timeout=3)
         assert 'ERROR' in caught.value.stderr
-        result = await backend.run(['sh', '-c', 'ls /tmp/pydantic-ai-stderr-* 2>/dev/null'], timeout=30)
+        result = await backend.run(check, timeout=30)
         assert result.stdout == previous.stdout
     finally:
         await native.delete()
