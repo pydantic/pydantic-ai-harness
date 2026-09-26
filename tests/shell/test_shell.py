@@ -1406,6 +1406,21 @@ class TestCodeModeInterop:
 
 
 class TestStopEscalation:
+    async def test_stop_signals_group_after_wrapper_exits(self, shell_dir: Path) -> None:
+        ts = _shell_toolset(shell_dir)
+        command_id = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'exec sleep 30'))
+        job = await _job(ts, _ctx(shell_dir), command_id)
+        # A published finished status may precede the exit of another group member.
+        with patch.object(Job, 'status', return_value=(False, 0)):
+            assert '[stopped]' in await ts.stop_command(_ctx(shell_dir), command_id)
+        try:
+            await _wait_for_exit(job.pid)
+        finally:
+            try:
+                os.kill(job.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
     async def test_stop_escalates_to_sigkill(self, shell_dir: Path) -> None:
         """A group that ignores SIGTERM is killed after the grace period, with no exit code to report."""
         ts = _shell_toolset(shell_dir)
@@ -1473,7 +1488,8 @@ class TestSignalling:
         assert stopped.splitlines()[-2:] == ['[stopped]', '[exit code: 143]']
         signals = [argv for argv in backend.argv if argv[:3] == ['sh', '-c', _KILL_SCRIPT]]
         target = f'-{job.pgid}' if job.pgid is not None else str(job.pid)
-        assert signals == [['sh', '-c', _KILL_SCRIPT, 'kill', 'TERM', target]]
+        assert signals[0] == ['sh', '-c', _KILL_SCRIPT, 'kill', 'TERM', target]
+        assert all(argv[-2:] == ['0', target] for argv in signals[1:])
         assert all(argv[0] != 'kill' for argv in backend.argv)
         await _wait_for_exit(job.pid)
 

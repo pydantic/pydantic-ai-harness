@@ -467,7 +467,8 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             return f'[Error: unknown command ID {command_id!r}]'
 
         running, exit_code = await job.status()
-        if running:
+        if running or job.pgid is not None:
+            # The wrapper can publish a finished status while children still occupy its group.
             with anyio.CancelScope(shield=True):
                 await job.kill()
                 # A group that ignored SIGTERM is killed with SIGKILL, which its wrapper cannot

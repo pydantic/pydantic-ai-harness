@@ -227,9 +227,17 @@ class Job:
         """Stop the job's process group: `SIGTERM`, then `SIGKILL` if it is still running after the grace period."""
         if not await self._signal('TERM'):
             return
+        if self.pgid is None:
+            return
+        # The wrapper's status says nothing about children left in its process group.
+        # When it is already finished, avoid waiting a grace period for zombie members.
+        if not (await self.status())[0]:
+            if await self._signal('0'):
+                await self._signal('KILL')
+            return
         interval = POLL_MIN
         with anyio.move_on_after(_KILL_GRACE_PERIOD):
-            while (await self.status())[0]:
+            while await self._signal('0'):
                 await anyio.sleep(interval)
                 interval = min(interval * 2, POLL_MAX)
             return
