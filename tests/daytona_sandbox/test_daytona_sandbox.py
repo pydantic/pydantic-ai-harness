@@ -203,6 +203,35 @@ async def test_cancelled_run_closes_owned_client_mid_command(fake_daytona: FakeD
     assert sandbox.process_sessions == set()
 
 
+async def test_run_waits_for_sdk_event_connection_before_closing_client(fake_daytona: FakeDaytona) -> None:
+    fake_daytona.connect_gate = asyncio.Event()
+    fake_daytona.failed_event_session = True
+    tool_done = asyncio.Event()
+
+    async def touch(ctx: RunContext[None]) -> str:
+        result = await _touch(ctx)
+        tool_done.set()
+        return result
+
+    agent = Agent(TestModel(call_tools=['touch']), deps_type=type(None), tools=[touch], capabilities=[DaytonaSandbox()])
+    task = asyncio.create_task(agent.run('go'))
+    try:
+        with anyio.fail_after(10):
+            await tool_done.wait()
+            with anyio.move_on_after(0.2):
+                while not task.done():
+                    await anyio.sleep(0.01)
+        assert not task.done()
+        fake_daytona.connect_gate.set()
+        await task
+    finally:
+        fake_daytona.connect_gate.set()
+    # The SDK's close cancels an in-flight event connection without awaiting it;
+    # it may already own an engineio aiohttp session that disconnect cannot close.
+    assert fake_daytona.leaked_sessions == 0
+    assert fake_daytona.closed_clients == 1
+
+
 async def test_run_closes_the_client_it_opened_and_the_result_workspace_reopens(fake_daytona: FakeDaytona) -> None:
     agent = Agent(
         TestModel(call_tools=['_touch']), deps_type=type(None), tools=[_touch], capabilities=[DaytonaSandbox()]

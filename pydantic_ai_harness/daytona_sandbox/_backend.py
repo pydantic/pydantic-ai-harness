@@ -280,6 +280,30 @@ class _DaytonaProcess:
         await _delete_session(self._process, self._session_id)
 
 
+async def _close_sdk_client(client: AsyncDaytona) -> None:
+    """Close an SDK client and its event transport even after a failed socket handshake."""
+    # SDK 0.198.0 cancels its event connect task in close() without joining it.
+    # If it has opened engineio's aiohttp session, disconnect cannot close it yet.
+    dispatcher = client._event_dispatcher  # pyright: ignore[reportPrivateUsage]
+    if dispatcher is not None and (connecting := dispatcher._connect_task) is not None:  # pyright: ignore[reportPrivateUsage]
+        with anyio.move_on_after(6, shield=True) as connect_deadline:
+            try:
+                # This is an asyncio-only SDK task; do not cancel it on our grace timeout.
+                await asyncio.shield(connecting)
+            except Exception:
+                pass  # A failed connection still needs the normal SDK close.
+        if connect_deadline.cancelled_caught:
+            _logger.warning('Daytona event connection did not settle before client close.')
+    sio = dispatcher._sio if dispatcher is not None else None  # pyright: ignore[reportPrivateUsage]
+    try:
+        await client.close()
+    finally:
+        if sio is not None:
+            # On a failed socket handshake socketio.disconnect() skips engineio's
+            # aiohttp session; explicitly disconnect the underlying transport.
+            await sio.eio.disconnect()  # pyright: ignore[reportUnknownMemberType]
+
+
 class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem, SupportsRealpath):
     """A [Daytona](https://www.daytona.io) sandbox as a Pydantic AI [`WorkspaceBackend`][pydantic_ai.workspaces.WorkspaceBackend].
 
@@ -477,9 +501,9 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         client = self._client
         if client is None or not self._owns_client:
             return
-        with anyio.CancelScope(shield=True), anyio.move_on_after(_TEARDOWN_TIMEOUT) as deadline:
+        with anyio.move_on_after(_TEARDOWN_TIMEOUT, shield=True) as deadline:
             try:
-                await client.close()
+                await _close_sdk_client(client)
             except Exception:
                 _logger.warning('Could not close the Daytona API client.', exc_info=True)
                 return

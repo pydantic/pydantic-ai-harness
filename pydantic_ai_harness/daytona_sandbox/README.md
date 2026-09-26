@@ -104,16 +104,15 @@ Already have a `daytona.AsyncSandbox`? Pass `workspace=DaytonaSandboxBackend(wor
 The sandbox keeps running, and billing, after the run ends. Pydantic AI never stops or deletes it. Sandboxes created by this backend carry the `created-by=pydantic-ai` label; filter by that label when auditing your Daytona account. Delete one with the ref you kept:
 
 ```python {names="defined"}
-from daytona import AsyncDaytona
 from pydantic_ai.workspaces import WorkspaceRef
+from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
 
 
 async def delete_sandbox(ref: WorkspaceRef) -> None:
-    async with AsyncDaytona() as client:
-        await (await client.get(ref.id)).delete()
+    await DaytonaSandbox().destroy(ref)
 ```
 
-Alternatively, `await DaytonaSandbox().destroy(ref)` deletes by ref without starting a stopped sandbox. If you pass `client=`, you own and must close that client (including after a cancelled run). Without one, the capability closes the client it opened when the run ends.
+`destroy(ref)` deletes by ref without starting a stopped sandbox. If you pass `client=`, you own and must close that client (including after a cancelled run). Without one, the capability closes the client it opened when the run ends, including its current event socket. Daytona SDK 0.198.0 can leave an aiohttp session open after a failed event-socket reconnect: its previous socket is no longer exposed for cleanup. This SDK leak can affect both owned and caller-supplied clients; callers supplying `client=` must close their client themselves.
 
 By default, Daytona stops a sandbox after 15 idle minutes (a later run starts it again); set `auto_stop_interval=` to a smaller number of minutes to stop it sooner. A stopped sandbox keeps its disk, is archived after 7 days, and is never deleted. See [Daytona's SDK docs](https://www.daytona.io/docs/en/python-sdk/async/async-daytona/).
 

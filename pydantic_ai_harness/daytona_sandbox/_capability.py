@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.run import AgentRunResult
@@ -14,7 +15,10 @@ from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 
 from pydantic_ai_harness._workspace import innermost_backend
 from pydantic_ai_harness._workspace_provider import check_integer, check_working_dir
-from pydantic_ai_harness.daytona_sandbox._backend import DaytonaSandboxBackend
+from pydantic_ai_harness.daytona_sandbox._backend import (
+    DaytonaSandboxBackend,
+    _close_sdk_client,  # pyright: ignore[reportPrivateUsage]
+)
 
 if TYPE_CHECKING:
     from daytona import AsyncDaytona
@@ -86,8 +90,13 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
         else:
             import daytona  # optional SDK is imported only when needed
 
-            async with daytona.AsyncDaytona() as client:
+            client = daytona.AsyncDaytona()
+            try:
                 await (await client.get(ref.id)).delete()
+            finally:
+                # Deleting a sandbox must release the API client even if deletion is cancelled.
+                with anyio.move_on_after(30, shield=True):
+                    await _close_sdk_client(client)
 
     def get_workspace(self, ctx: RunContext[AgentDepsT], *, ref: WorkspaceRef | None) -> WorkspaceBackend | None:
         """Build the backend for this run. No I/O here: it attaches or creates on first use."""

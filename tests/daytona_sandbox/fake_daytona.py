@@ -511,6 +511,9 @@ class FakeClient:
     def __init__(self, owner: FakeDaytona) -> None:
         self.owner = owner
         self.closed = False
+        self._event_dispatcher: object | None = None
+        if owner.connect_gate is not None:
+            self._event_dispatcher = FakeEventDispatcher(owner)
 
     async def __aenter__(self) -> FakeClient:
         return self
@@ -551,8 +554,38 @@ class FakeClient:
             await self.owner.close_gate.wait()
         if (error := next(self.owner.close_errors, None)) is not None:
             raise error
+        if self.owner.connect_gate is not None:
+            dispatcher = self._event_dispatcher
+            assert isinstance(dispatcher, FakeEventDispatcher)
+            self.owner.leaked_sessions += int(not dispatcher._connect_task.done())
+            self.owner.leaked_sessions += int(self.owner.failed_event_session)
+            dispatcher._connect_task.cancel()
         self.closed = True
         self.owner.closed_clients += 1
+
+
+class FakeEventDispatcher:
+    def __init__(self, owner: FakeDaytona) -> None:
+        async def connect() -> None:
+            assert owner.connect_gate is not None
+            await owner.connect_gate.wait()
+
+        self._connect_task = asyncio.create_task(connect())
+        self._sio = FakeSocket(owner)
+
+
+class FakeSocket:
+    def __init__(self, owner: FakeDaytona) -> None:
+        self.eio = FakeEngine(owner)
+
+
+class FakeEngine:
+    def __init__(self, owner: FakeDaytona) -> None:
+        self.owner = owner
+
+    async def disconnect(self) -> None:
+        if self.owner.failed_event_session:
+            self.owner.leaked_sessions -= 1
 
 
 class FakeDaytona:
@@ -567,6 +600,9 @@ class FakeDaytona:
         # Raised by successive `close` calls; closing succeeds once it is exhausted.
         self.close_errors: Iterator[Exception] = iter(())
         self.close_gate: asyncio.Event | None = None
+        self.connect_gate: asyncio.Event | None = None
+        self.leaked_sessions = 0
+        self.failed_event_session = False
         self.get_gate: asyncio.Event | None = None
         self.get_error: Exception | None = None
         # What constructing `AsyncDaytona()` raises, e.g. for a missing API key.
@@ -574,7 +610,7 @@ class FakeDaytona:
         # When set, new sandboxes run commands and file operations on the host under this directory.
         self.host_root: Path | None = None
 
-    def client(self) -> FakeClient:
+    def client(self, _config: object = None) -> FakeClient:
         if self.client_error is not None:
             raise self.client_error
         return FakeClient(self)
