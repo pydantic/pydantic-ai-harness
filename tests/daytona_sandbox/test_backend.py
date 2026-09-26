@@ -276,6 +276,10 @@ class TestErrorsAndFilesystem:
             assert type(exc_info.value) is expected
             assert exc_info.value.__cause__ is sdk_error
 
+    async def test_created_sandbox_has_provenance_label(self, fake_daytona: FakeDaytona) -> None:
+        await DaytonaSandboxBackend().get_client()
+        assert fake_daytona.create_params[0].labels == {'created-by': 'pydantic-ai'}
+
     async def test_refused_creation_names_the_provider_and_the_sdk_message(self, fake_daytona: FakeDaytona) -> None:
         fake_daytona.create_error = DaytonaNotFoundError("Snapshot 'nope' not found", status_code=404)
         with pytest.raises(

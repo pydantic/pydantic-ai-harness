@@ -426,6 +426,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             env_vars=self._env or None,
             auto_stop_interval=self._auto_stop_interval,
             network_block_all=self._network_block_all,
+            labels={'created-by': 'pydantic-ai'},
         )
         # Shielded: cancelling the request after Daytona accepted it would leave a sandbox nothing
         # names. The caller records the ref first, then a pending cancellation is delivered.

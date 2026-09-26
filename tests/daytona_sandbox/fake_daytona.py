@@ -36,6 +36,7 @@ class CreateParams(Protocol):
     auto_delete_interval: int | None
     env_vars: dict[str, str] | None
     network_block_all: bool | None
+    labels: dict[str, str] | None
 
 
 class FakeProcess:
