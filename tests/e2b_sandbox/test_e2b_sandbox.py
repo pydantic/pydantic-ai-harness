@@ -7,6 +7,7 @@ from pathlib import Path
 
 import anyio
 import pytest
+from e2b.exceptions import SandboxException
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
@@ -140,11 +141,9 @@ async def test_post_acquisition_operations_overlap(fake_e2b: FakeE2B) -> None:
     async with anyio.create_task_group() as tg:
         tg.start_soon(run_command)
         tg.start_soon(run_command)
-        with anyio.fail_after(1):
-            while len(fake_e2b.sandboxes[0].commands.calls) < 2:
-                await anyio.sleep(0)
+        await anyio.wait_all_tasks_blocked()
+        assert len(fake_e2b.sandboxes[0].commands.calls) == 2
         tg.cancel_scope.cancel()
-    assert len(fake_e2b.sandboxes[0].commands.calls) == 2
 
 
 async def test_agent_preserves_explicit_read_only_workspace(fake_e2b: FakeE2B) -> None:
@@ -167,7 +166,7 @@ async def test_agent_preserves_explicit_read_only_workspace(fake_e2b: FakeE2B) -
 
 async def test_failed_acquisition_can_retry(fake_e2b: FakeE2B) -> None:
     backend = E2BSandboxBackend()
-    fake_e2b.create_error = fake_e2b.error_type('temporary')
+    fake_e2b.create_error = SandboxException('temporary')
     with pytest.raises(WorkspaceError, match='temporary'):
         await backend.get_client()
     fake_e2b.create_error = None

@@ -167,13 +167,14 @@ class FakeCommands:
         user: str | None = None,
         cwd: str | None = None,
         timeout: float | None = 60,
-    ) -> FakeCommandHandle | CommandResult:
+    ) -> FakeCommandHandle:
         # Closed signature on purpose: the real `run` rejects unknown kwargs, so the fake must
         # too, or a bad kwarg in the backend would only fail in production.
         del user
         await anyio.lowlevel.checkpoint()
         self._sandbox.check_alive()
         self.calls.append(FakeCommandCall(cmd, background is True, cwd, envs, timeout))
+        assert background is True, 'the backend always starts commands in the background'
         if self._control.run_error is not None:
             raise self._control.run_error
         stdout, stderr, exit_code = self._control.responder(cmd, timeout)
@@ -189,9 +190,7 @@ class FakeCommands:
         if self._control.start_response_held is not None:
             # E2B has started the process before the start event with its pid arrives.
             await self._control.start_response_held.wait()
-        if background is True:
-            return handle
-        return await handle.wait()  # pragma: no cover - the backend always starts in background
+        return handle
 
     async def kill(self, pid: int, request_timeout: float | None = None) -> bool:
         del request_timeout
@@ -212,7 +211,6 @@ class FakeFilesystem:
         self.files: dict[str, bytes] = {}
         self.directories: set[str] = set()
         self.removed: list[str] = []
-        self.listed: list[str] = []
         # Paths the sandbox user may not touch, the way a root-owned `/etc` refuses envd's user.
         self.denied: set[str] = set()
         # Symlinks by path, each reported with the target a test gives it.
@@ -271,7 +269,6 @@ class FakeFilesystem:
         del user, request_timeout
         await self._check(path)
         assert depth == 1, f'unexpected list depth {depth!r}'
-        self.listed.append(path)
         if not await self._exists(path):
             raise FileNotFoundException(path)
         if path in self.files:
@@ -415,7 +412,7 @@ class _HostCommands(FakeCommands):
         user: str | None = None,
         cwd: str | None = None,
         timeout: float | None = 60,
-    ) -> FakeCommandHandle | CommandResult:
+    ) -> FakeCommandHandle:
         del user
         await anyio.lowlevel.checkpoint()
         self._sandbox.check_alive()
@@ -548,10 +545,9 @@ class _HostFilesystem(FakeFilesystem):
 class FakeSandbox:
     """Mirrors `e2b.AsyncSandbox` for the members the backend uses."""
 
-    def __init__(self, control: FakeE2B, id: str) -> None:
+    def __init__(self, control: FakeE2B, sandbox_id: str) -> None:
         self._control = control
-        self.id = id
-        self.sandbox_id = id
+        self.sandbox_id = sandbox_id
         self.files = FakeFilesystem(self, control)
         self.commands = FakeCommands(self, control)
         if control.host_root is not None:
@@ -624,7 +620,7 @@ class FakeAsyncSandboxFactory:
         await anyio.lowlevel.checkpoint()
         if self._control.connect_error is not None:
             raise self._control.connect_error
-        existing = next((sandbox for sandbox in self._control.sandboxes if sandbox.id == id), None)
+        existing = next((sandbox for sandbox in self._control.sandboxes if sandbox.sandbox_id == id), None)
         if existing is not None and existing.killed:
             # The connect endpoint 404s for a killed sandbox, which the SDK raises like this.
             raise SandboxNotFoundException(f'Paused sandbox {id} not found')
@@ -663,33 +659,10 @@ class FakeE2B:
     def __post_init__(self) -> None:
         self.module = self._build_module()
 
-    def new_sandbox(self, id: str) -> FakeSandbox:
-        sandbox = FakeSandbox(self, id)
+    def new_sandbox(self, sandbox_id: str) -> FakeSandbox:
+        sandbox = FakeSandbox(self, sandbox_id)
         self.sandboxes.append(sandbox)
         return sandbox
-
-    @property
-    def auth_type(self) -> type[Exception]:
-        return AuthenticationException
-
-    @property
-    def sandbox_gone_type(self) -> type[Exception]:
-        """E2B `SandboxNotFoundException`: the sandbox does not exist -- terminal."""
-        return SandboxNotFoundException
-
-    @property
-    def ambiguous_type(self) -> type[Exception]:
-        """E2B `TimeoutException`: an unanswered request, whether the sandbox is alive or gone."""
-        return TimeoutException
-
-    @property
-    def invalid_argument_type(self) -> type[Exception]:
-        """E2B `InvalidArgumentException`: envd's 400, which includes reading a directory."""
-        return InvalidArgumentException
-
-    @property
-    def error_type(self) -> type[Exception]:
-        return SandboxException
 
     def _build_module(self) -> types.ModuleType:
         module = types.ModuleType('e2b')
