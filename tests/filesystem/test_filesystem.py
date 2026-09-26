@@ -642,6 +642,15 @@ class TestReadFile:
 
 
 class TestWriteFile:
+    async def test_default_patterns_protect_nested_env_and_git(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
+        (fs_root / 'subdir' / '.git').mkdir()
+        toolset = FileSystem[None]().get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        for path in ('subdir/.env', 'subdir/.env.local', 'subdir/.git/config'):
+            with pytest.raises(ModelRetry, match='protected'):
+                await toolset.write_file(path, 'secret', workspace=ws)
+            assert not (fs_root / path).exists()
+
     async def test_write_new_file(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
     ) -> None:
@@ -1997,8 +2006,8 @@ class TestFileSystemCapability:
 
     def test_read_only_defaults(self) -> None:
         fs = FileSystem()
-        assert '.git/*' in fs.read_only_patterns
-        assert '.env' in fs.read_only_patterns
+        assert '**/.git/*' in fs.read_only_patterns
+        assert '**/.env' in fs.read_only_patterns
 
     def test_protected_patterns_is_a_deprecated_alias(self) -> None:
         with pytest.warns(

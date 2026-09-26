@@ -22,9 +22,9 @@ from pydantic_ai_harness.filesystem._toolset import (
 )
 
 _DEFAULT_READ_ONLY: tuple[str, ...] = (
-    '.git/*',
-    '.env',
-    '.env.*',
+    '**/.git/*',
+    '**/.env',
+    '**/.env.*',
     '*.pem',
     '*.key',
     '**/secrets*',
