@@ -141,6 +141,27 @@ class TestCreate:
         assert exc.value.__cause__ is error
 
     @pytest.mark.parametrize(
+        ('message', 'status', 'advice'),
+        [
+            ('400: reading failed: read tcp 10.0.0.1:443: i/o timeout', 400, False),
+            ('400: Timeout cannot be greater than 1 hours', 400, True),
+            ('500: Timeout cannot be greater than 1 hours', 500, False),
+        ],
+    )
+    async def test_lifetime_advice_only_for_validation_refusal(
+        self, fake_e2b: FakeE2B, message: str, status: int, advice: bool
+    ) -> None:
+        error = SandboxException(message, status_code=status)
+        fake_e2b.create_error = error
+        with pytest.raises(WorkspaceError) as exc:
+            await started()
+        assert str(exc.value) == (
+            f'Could not start E2B sandbox: {message}'
+            + (' Hobby plans allow at most 3600 seconds; pass `E2BSandbox(sandbox_timeout=3600)`.' if advice else '')
+        )
+        assert exc.value.__cause__ is error
+
+    @pytest.mark.parametrize(
         'error',
         [SandboxException('500: internal', status_code=500), SandboxException('no status')],
         ids=['server-error', 'no-status'],

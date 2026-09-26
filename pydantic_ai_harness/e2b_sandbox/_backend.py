@@ -136,7 +136,8 @@ def _unavailable_message(sandbox_id: str) -> str:
 def _is_lifetime_refusal(error: e2b.SandboxException) -> bool:
     """Whether E2B refused the requested `sandbox_timeout`, e.g. `400: Timeout cannot be greater than 1 hours`."""
     status = error.status_code
-    return status is not None and 400 <= status < 500 and 'timeout' in str(error).lower()
+    # E2B can also return HTTP 400 for a transport i/o timeout during creation.
+    return status is not None and 400 <= status < 500 and 'timeout cannot be greater than' in str(error).lower()
 
 
 def _refused_message(context: str, error: e2b.SandboxException) -> str:
