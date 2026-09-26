@@ -207,6 +207,21 @@ def _map_error(error: Exception, sprite_name: str | None) -> WorkspaceError | No
     return WorkspaceError(f'Sprites refused the request: {error}')
 
 
+async def _check_sigkill_sprite(sprite: AsyncSprite) -> None:
+    # A user's SIGKILL also exits 137; only a control-plane 404 proves the Sprite died.
+    # A stalled or failing lookup must not replace the command's real result.
+    try:
+        with anyio.fail_after(2):
+            await sprite.client.get_sprite(sprite.name)
+    except NotFoundError as error:
+        raise WorkspaceUnavailableError(
+            f'The Sprite {sprite.name!r} no longer exists: it was deleted. '
+            "Pass `workspace='new'` to start a fresh sandbox."
+        ) from error
+    except Exception:
+        pass
+
+
 class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     """A Fly.io Sprite behind the Pydantic AI `WorkspaceBackend` protocol.
 
@@ -448,6 +463,8 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             raise
         await _close_command(exec_command)
         stdout, stderr = _split_output(exec_command.get_stdout(), exec_command.get_stderr(), marker)
+        if code == 137:
+            await _check_sigkill_sprite(sprite)
         return CommandResult(exit_code=code, stdout=stdout, stderr=stderr)
 
     async def _collect_stderr(self, path: str) -> str:

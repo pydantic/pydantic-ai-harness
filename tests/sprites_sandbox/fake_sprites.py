@@ -60,6 +60,7 @@ class FakeExecSocket:
 
     def __init__(self, sprites: SpriteTransport, url: str) -> None:
         self.sprites = sprites
+        self.query_url = url
         self.query = parse_qs(urlsplit(url).query)
         self.transport = FakeSocketTransport(sprites)
         # Read by the SDK when the stream ends without an EXIT frame.
@@ -99,6 +100,8 @@ class FakeExecSocket:
             self._send(None)
         else:
             exit_code = code if self.sprites.exit_override is None else self.sprites.exit_override
+            if self.sprites.delete_on_exit:
+                self.sprites.names.discard(unquote(urlsplit(self.query_url).path.split('/')[3]))
             self._send(bytes([_EXIT, exit_code % 256]))
 
     def _pump(self, source: IO[bytes], stream: int) -> None:
@@ -178,6 +181,7 @@ class SpriteTransport:
         self.exec_closes = 0
         self.aborted = 0
         self.exit_override: int | None = None
+        self.delete_on_exit = False
         # Holds the client's stdin EOF, and with it the stream's attachment, until set.
         self.release_stdin_eof: asyncio.Event | None = None
         self.url_limit = 40_000

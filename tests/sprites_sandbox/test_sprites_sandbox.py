@@ -484,6 +484,26 @@ class TestSpritesSandbox:
         assert transport.aborted == 1
         assert 'Could not close a Sprite exec connection' in caplog.text
 
+    async def test_deleted_mid_command_is_unavailable(self, transport: SpriteTransport) -> None:
+        backend = SpritesSandboxBackend()
+        sprite = await backend.get_client()
+        transport.exit_override = 137
+        transport.delete_on_exit = True
+        with pytest.raises(WorkspaceUnavailableError, match=sprite.name):
+            await backend.run(['true'])
+
+    async def test_sigkill_with_live_sprite_returns_exit(self, transport: SpriteTransport) -> None:
+        backend = SpritesSandboxBackend()
+        transport.exit_override = 137
+        assert (await backend.run(['true'])).exit_code == 137
+
+    async def test_sigkill_with_failing_liveness_check_returns_exit(self, transport: SpriteTransport) -> None:
+        backend = SpritesSandboxBackend()
+        await backend.get_client()
+        transport.exit_override = 137
+        transport.get_error = NetworkError('control plane unavailable')
+        assert (await backend.run(['true'])).exit_code == 137
+
     async def test_exec_handshake_transport_failure_is_network_error(self, transport: SpriteTransport) -> None:
         transport.connect_error = InvalidMessage('bad handshake')
         with pytest.raises(NetworkError, match='handshake'):
