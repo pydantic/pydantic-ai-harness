@@ -508,7 +508,6 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             f'Command timed out after {timeout:g} seconds.',
             stdout=_until_marker(process.stdout, process.marker) if process is not None else '',
             stderr=_until_marker(process.stderr, process.marker) if process is not None else '',
-            timeout=timeout,
         )
 
     async def _start(

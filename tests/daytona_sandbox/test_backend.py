@@ -156,11 +156,7 @@ class TestCommands:
         sandbox.process_delete_errors = iter([DaytonaError('bad gateway', status_code=502)])
         with pytest.raises(WorkspaceTimeoutError) as exc_info:
             await backend.run(['sleep', '30'], timeout=0.01)
-        assert (exc_info.value.stdout, exc_info.value.stderr, exc_info.value.timeout) == (
-            'partial out',
-            'partial err',
-            0.01,
-        )
+        assert (exc_info.value.stdout, exc_info.value.stderr) == ('partial out', 'partial err')
         assert sandbox.process_sessions == set()
 
     async def test_deadline_includes_exit_status_rpc(self, fake_daytona: FakeDaytona) -> None:
@@ -170,7 +166,7 @@ class TestCommands:
         sandbox.process_status_gate = asyncio.Event()
         with pytest.raises(WorkspaceTimeoutError) as exc_info:
             await backend.run(['true'], timeout=0.01)
-        assert (exc_info.value.stdout, exc_info.value.timeout) == ('complete output', 0.01)
+        assert exc_info.value.stdout == 'complete output'
         assert sandbox.process_sessions == set()
 
     async def test_session_not_found_on_a_live_sandbox_is_a_workspace_error(self, fake_daytona: FakeDaytona) -> None:
