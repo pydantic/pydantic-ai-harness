@@ -47,7 +47,7 @@ async def test_bundled_coder_agent_continues_its_local_ref_from_history() -> Non
 
 
 async def test_bundled_coder_agent_declines_a_local_ref_for_another_directory(tmp_path: Path) -> None:
-    with pytest.raises(UserError, match='No capability can supply workspace'):
+    with pytest.raises(UserError, match="none of the agent's workspace capabilities recognized it"):
         await coder_agent.run(
             'go',
             model=TestModel(call_tools=[], custom_output_text='done'),

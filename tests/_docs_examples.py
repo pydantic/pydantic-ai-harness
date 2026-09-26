@@ -23,6 +23,7 @@ import inspect
 import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from unittest import mock
@@ -107,8 +108,10 @@ def run_block(
             assert cleanup is not None, (
                 f'{example.path}:{example.start_line} created a workspace and nothing cleans it up'
             )
-            for ref in refs:
-                anyio.run(cleanup, ref)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                for ref in refs:
+                    # A thread of its own: the calling test may already have an event loop running.
+                    pool.submit(anyio.run, cleanup, ref).result()
     return namespace, runs
 
 
