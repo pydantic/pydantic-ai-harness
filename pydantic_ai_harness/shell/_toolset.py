@@ -214,6 +214,14 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         run_key = hashlib.sha256(ctx.run_id.encode('utf-8')).hexdigest()
         return posixpath.join(await self._jobs_base(ctx), 'run-state', run_key)
 
+    async def clear_run_cwd(self, ctx: RunContext[AgentDepsT]) -> None:
+        """Remove the run's saved directory once its agent run ends."""
+        if ctx.run_id is not None:
+            try:
+                await ctx.workspace.remove(await self._cwd_state_path(ctx))
+            except FileNotFoundError:
+                pass
+
     async def _jobs_base(self, ctx: RunContext[AgentDepsT]) -> str:
         """The workspace directory holding job and capture files, looked up once per workspace."""
         if (jobs_dir := self._jobs_dirs.get(ctx.workspace)) is None:

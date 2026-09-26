@@ -23,6 +23,16 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxR
 from pydantic_ai_harness.shell import Shell
 
 
+@pytest.mark.anyio
+async def test_completed_run_removes_cwd_state(tmp_path: Path) -> None:
+    (tmp_path / 'a').mkdir()
+    agent = _agent(tmp_path, 'a')
+    result = await agent.run('start')
+    assert result.output == 'done'
+    state_dir = tmp_path / '.pydantic-ai-harness/shell/run-state'
+    assert not state_dir.exists() or not list(state_dir.iterdir())
+
+
 @workflow.defn
 class ShellWorkflow(PydanticAIWorkflow):
     agents: dict[str, Agent[None, str]]

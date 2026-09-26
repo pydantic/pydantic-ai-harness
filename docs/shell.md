@@ -361,6 +361,7 @@ workspace capability in Python).
   reach the run's event stream yet ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
 - With `persist_cwd=True`, the cwd is kept per run in the workspace under
   `.pydantic-ai-harness/shell/run-state/`, so it can be restored by another worker.
+  The file is removed when the agent run ends (including cancellation).
   Commands in the same run should execute in order; simultaneous commands that change cwd
   can overwrite each other's state.
 - `start_command` uses the run and tool-call IDs to reattach to a job after an activity retry.
