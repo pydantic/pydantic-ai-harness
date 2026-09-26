@@ -98,6 +98,11 @@ class TestCreate:
             False,
         )
 
+    async def test_created_sandbox_provisions_working_dir(self, fake_e2b: FakeE2B) -> None:
+        backend = await started(working_dir='/work/new')
+        assert backend.ref is not None
+        assert '/work/new' in fake_e2b.sandboxes[0].files.directories
+
     async def test_defaults(self, fake_e2b: FakeE2B) -> None:
         await started()
         call = fake_e2b.create_calls[-1]

@@ -227,6 +227,12 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             sandbox = await self._attach(ref.id) if ref is not None else await self._create()
             self._sandbox = sandbox
             self._ref = WorkspaceRef(provider='e2b', id=sandbox.sandbox_id)
+            if ref is None and self._working_dir is not None:
+                # Record the new sandbox before setup, so a failed mkdir still leaves
+                # a ref the caller can use to clean up the billed sandbox.
+                with anyio.CancelScope(shield=True):
+                    async with self._sdk_errors(sandbox.sandbox_id, 'Could not create working_dir', self._working_dir):
+                        await sandbox.files.make_dir(self._working_dir)
         await anyio.lowlevel.checkpoint_if_cancelled()
         return sandbox
 
