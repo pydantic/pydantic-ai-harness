@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
@@ -53,7 +53,7 @@ class SpritesSandbox(AbstractCapability[AgentDepsT]):
     working_dir: str | None = None
     """Absolute directory commands start in and relative paths resolve against; `None` uses the Sprite's default."""
 
-    env: Mapping[str, str] | None = None
+    env: Mapping[str, str] | None = field(default=None, repr=False)
     """Environment variables every command gets, on top of the Sprite's own; a command's `env` is layered on top."""
 
     def __post_init__(self) -> None:

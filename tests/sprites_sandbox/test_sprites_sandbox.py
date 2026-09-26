@@ -59,6 +59,14 @@ def _handshake(status: int) -> InvalidStatus:
 
 
 class TestSpritesSandbox:
+    def test_env_values_are_not_represented(self) -> None:
+        secret = 'secret-environment-value-123'
+        capability = SpritesSandbox[None](env={'API_KEY': secret})
+        backend = capability.get_workspace(context(), ref=None)
+        assert backend is not None
+        for value in (repr(capability), str(capability), repr(backend), str(backend)):
+            assert secret not in value
+
     async def test_construction_is_lazy_and_first_use_is_shared(self, transport: SpriteTransport) -> None:
         backend = SpritesSandbox[None]().get_workspace(context(), ref=None)
         assert isinstance(backend, SpritesSandboxBackend)
