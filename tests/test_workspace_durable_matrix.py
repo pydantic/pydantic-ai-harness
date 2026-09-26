@@ -66,9 +66,12 @@ def _agent(root: Path, engine: str, capability: str, vetoes: list[str]) -> Agent
 
     def model(messages: list[ModelMessage], info: object) -> ModelResponse:
         returns = [p for m in messages for p in m.parts if isinstance(p, (ToolReturnPart, RetryPromptPart))]
-        if len(returns) >= len(script):
+        if capability == 'shell' and len(returns) >= len(script) and '[status: running]' in str(returns[-1].content):
+            name, original = script[-1]
+        elif len(returns) >= len(script):
             return ModelResponse(parts=[TextPart('done')])
-        name, original = script[len(returns)]
+        else:
+            name, original = script[len(returns)]
         args = dict(original)
         if args.get('command_id') == '__ID__':
             ids = re.findall(r'ID: ([0-9a-f]{32})', ' '.join(str(p.content) for p in returns))
@@ -154,4 +157,4 @@ def _assert_results(root: Path, capability: str, outputs: list[str], vetoes: lis
     else:
         assert str(root / 'dir') in outputs[0] and str(root / 'dir') in outputs[1]
         assert 'ID: ' in outputs[2]
-        assert '[status: ' in outputs[3]
+        assert '[status: finished]' in outputs[-1]
