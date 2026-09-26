@@ -273,8 +273,8 @@ class TestGrep:
         assert 'link.txt' not in await toolset(workspace).grep('import os', workspace=LocalWorkspaceBackend(workspace))
 
 
-class _CountingProbes(LocalWorkspaceBackend):
-    probes = 0
+class _CountingCommands(LocalWorkspaceBackend):
+    commands = 0
 
     async def run(
         self,
@@ -285,8 +285,7 @@ class _CountingProbes(LocalWorkspaceBackend):
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
     ) -> CommandResult:
-        if isinstance(command, str) and 'command -v rg' in command:
-            self.probes += 1
+        self.commands += 1
         return await super().run(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
 
 
@@ -314,8 +313,9 @@ class TestWithoutRipgrep:
             await ts.grep('os', file_type='py', workspace=without_rg)
 
     async def test_missing_rg_is_probed_once_per_workspace(self, workspace: Path) -> None:
-        backend = _CountingProbes(workspace, env={'PATH': str(workspace)})
+        backend = _CountingCommands(workspace, env={'PATH': str(workspace)})
         ts, ws = toolset(workspace), Workspace(backend)
         await ts.grep('os', workspace=ws)
         await ts.list_files(workspace=ws)
-        assert backend.probes == 1
+        await ts.grep('os', workspace=ws)
+        assert backend.commands == 1  # the `rg` probe; the rest walks the tree
