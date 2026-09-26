@@ -66,7 +66,7 @@ so they are left out when it can't run commands; `search_files` and
 | `write_file` | Create or overwrite a file. Optional `expected_hash` rejects stale writes (optimistic concurrency). |
 | `edit_file` | Exact-string replacement: one `old_text`/`new_text` pair, or a `replacements` batch applied in order. Each `old_text` must match exactly once; a batch is checked in memory and written only if every replacement matches. Optional `expected_hash`. |
 | `list_directory` | List a directory's entries with type indicators and sizes. |
-| `search_files` | Regex search over file contents, optionally narrowed by an `include_glob`. |
+| `search_files` | Regex search over file contents, optionally narrowed by an `include_glob`; skips files over 10 MiB or unreadable files and reports skipped paths. |
 | `find_files` | Glob search over file names (e.g. `*.py`, `**/*.json`). The pattern is relative to `path`; absolute patterns are rejected. |
 | `create_directory` | Create a directory and any missing parents. |
 | `file_info` | Metadata for a file or directory: size, type, line count, hash, and symlink target, where the workspace provides them. |

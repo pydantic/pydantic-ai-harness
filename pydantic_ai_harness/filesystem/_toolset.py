@@ -62,6 +62,9 @@ RIPGREP_TOOL_NAMES: tuple[str, ...] = ('list_files', 'grep')
 FILE_SYSTEM_TOOL_NAMES: tuple[str, ...] = (*DEFAULT_TOOL_NAMES, *RIPGREP_TOOL_NAMES)
 """Every tool `FileSystem` can register, in registration order."""
 
+_MAX_SEARCH_FILE_BYTES = 10 << 20
+"""Avoid remote full-file downloads for large files during Python-side content searches."""
+
 _MAX_MATCH_COLUMNS = 4096
 """Bytes of a matching or context line `grep` shows before ripgrep cuts it with an omission marker."""
 
@@ -1180,16 +1183,18 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         entry = await self._stat(scope, resolved)
         walk_cut = False
         if entry is None:
-            files: list[str] = []
+            files: list[WorkspaceFileEntry] = []
         elif not entry.is_dir:
-            files = [resolved]
+            files = [entry]
         else:
             walked, walk_cut = await self._walk(scope, resolved)
-            files = [child.path for child in walked if not child.is_dir]
+            files = [child for child in walked if not child.is_dir]
 
         results: list[str] = []
+        skipped: list[str] = []
         capped = False
-        for file_path in sorted(files, key=_sort_key):
+        for file in sorted(files, key=lambda child: _sort_key(child.path)):
+            file_path = file.path
             rel_str = self._walk_entry(scope, file_path)
             if rel_str is None:
                 continue
@@ -1198,12 +1203,14 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             # Contents are read, so a file that links outside the root, or to a denied file, is skipped.
             if file_path != resolved and not await self._readable_entry(scope, file_path):
                 continue
+            if file.size is not None and file.size > _MAX_SEARCH_FILE_BYTES:
+                skipped.append(posixpath.relpath(file_path, scope.cwd))
+                continue
             try:
                 raw = await scope.workspace.read_bytes(file_path)
-            except WorkspaceError:
-                raise
-            except OSError:
-                # A dangling symlink, or a file deleted or made unreadable mid-walk.
+            except (WorkspaceError, OSError):
+                # A single inaccessible file should not hide matches in the rest of the tree.
+                skipped.append(posixpath.relpath(file_path, scope.cwd))
                 continue
             if _is_binary(raw):
                 continue
@@ -1223,6 +1230,11 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             )
         if capped:
             results.append(f'[... truncated at {self._max_search_results} matches]')
+        if skipped:
+            results.append(
+                f'[{len(skipped)} files skipped (too large or unreadable): {", ".join(skipped[:10])}'
+                f'{", ..." if len(skipped) > 10 else ""}]'
+            )
         return _with_walk_notice(results, walk_cut)
 
     def _searched(

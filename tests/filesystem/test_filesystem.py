@@ -998,6 +998,18 @@ class TestListDirectory:
 
 
 class TestSearchFiles:
+    async def test_skips_large_and_unreadable_files(self, fs_root: Path) -> None:
+        (fs_root / 'large.txt').write_text('needle' * 2_000_000)
+        (fs_root / 'unreadable.txt').write_text('needle')
+        (fs_root / 'good.txt').write_text('needle')
+        toolset = FileSystem[None](root_dir=fs_root).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        backend = FailingWorkspace(fs_root, {'read_bytes': WorkspaceError('unreadable')}, where='unreadable.txt')
+        result = await toolset.search_files('needle', workspace=backend)
+        assert 'good.txt:1:needle' in result
+        assert 'large.txt' in result and 'unreadable.txt' in result
+        assert 'skipped' in result
+
     async def test_search_basic(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         result = await toolset.search_files('Hello', workspace=ws)
         assert 'hello.txt:1:Hello, world!' in result
@@ -2232,10 +2244,13 @@ class TestWorkspaceBackends:
         workspace = FailingWorkspace(
             fs_root, {'read_bytes': PermissionError(errno.EACCES, 'denied')}, where='hello.txt'
         )
-        assert await toolset.search_files('Hello', workspace=workspace) == 'No matches found.'
+        assert (
+            await toolset.search_files('Hello', workspace=workspace)
+            == '[1 files skipped (too large or unreadable): hello.txt]'
+        )
 
     @pytest.mark.parametrize('operation', ['list_dir', 'read_bytes'])
-    async def test_workspace_failure_during_a_walk_fails_the_call(
+    async def test_workspace_failure_during_a_walk_is_reported(
         self, toolset: FileSystemToolset[None], operation: str, fs_root: Path
     ) -> None:
         workspace = FailingWorkspace(
@@ -2243,8 +2258,11 @@ class TestWorkspaceBackends:
             {operation: WorkspaceError('backend refused')},
             where='nested.py' if operation == 'read_bytes' else '/subdir',
         )
-        with pytest.raises(ToolFailed, match='backend refused'):
-            await toolset.search_files('x', workspace=workspace)
+        if operation == 'list_dir':
+            with pytest.raises(ToolFailed, match='backend refused'):
+                await toolset.search_files('x', workspace=workspace)
+        else:
+            assert 'nested.py' in await toolset.search_files('x', workspace=workspace)
 
     async def test_read_only_refusal_of_a_read_is_not_a_permission_retry(
         self, fs_root: Path, anyio_backend: object
