@@ -229,7 +229,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'sprites'")
         if workspace is not None and ref is not None:
             raise ValueError('pass either `workspace` or `ref`, not both')
-        self._sprite = workspace
+        self._sandbox = workspace
         self._ref = ref if workspace is None else WorkspaceRef(provider='sprites', id=workspace.name)
         self._new_sprite_name = f'pydantic-ai-{uuid.uuid4().hex}'
         self._runtime = runtime
@@ -256,8 +256,8 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         no longer exists raises `WorkspaceUnavailableError`; it does not create a replacement.
         """
         async with self._lock:
-            if (sprite := self._sprite) is not None:
-                return sprite
+            if (sandbox := self._sandbox) is not None:
+                return sandbox
 
             client = self._client
             if client is None:
@@ -273,13 +273,13 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             async def acquire() -> AsyncSprite:
                 with anyio.move_on_after(_ACQUIRE_TIMEOUT):
                     if ref is not None:
-                        sprite = await client.get_sprite(ref.id)
+                        sandbox = await client.get_sprite(ref.id)
                     else:
-                        sprite = await client.create_sprite(self._new_sprite_name, runtime=self._runtime)
+                        sandbox = await client.create_sprite(self._new_sprite_name, runtime=self._runtime)
                     # Recorded as soon as the SDK returns, so a cancelled caller still leaves it named.
-                    self._sprite = sprite
-                    self._ref = WorkspaceRef(provider='sprites', id=sprite.name)
-                    return sprite
+                    self._sandbox = sandbox
+                    self._ref = WorkspaceRef(provider='sprites', id=sandbox.name)
+                    return sandbox
                 # Only our own bound lands here; an SDK `TimeoutError` propagates as raised. A stalled
                 # control plane is a transport failure, which propagates for a retry;
                 # `WorkspaceTimeoutError` is reserved for command deadlines.
@@ -321,7 +321,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                     logger.warning('Could not close Sprites SDK client: %r', error)
                 else:
                     self._client = None
-                    self._sprite = None
+                    self._sandbox = None
 
         # Finished even when the caller (a run being cancelled) is cancelled meanwhile.
         await _run_to_completion(close)
@@ -331,9 +331,9 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.removesuffix('\n')
             if result.exit_code != 0 or not posixpath.isabs(printed):
-                sprite = await self.get_client()
+                sandbox = await self.get_client()
                 raise WorkspaceError(
-                    f'Could not determine the working directory of Sprite {sprite.name!r}: '
+                    f'Could not determine the working directory of Sprite {sandbox.name!r}: '
                     f'`pwd -P` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
                 )
             self._resolved_working_dir = printed
@@ -357,8 +357,8 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         args = _ending_with(marker, _with_env(command_argv(command, shell), {**self._env, **(env or {})}))
 
         # Acquiring the Sprite has its own bound; the deadline is the command's alone.
-        sprite = await self.get_client()
-        exec_command = _ExecCommand(sprite.command(*args, cwd=directory))
+        sandbox = await self.get_client()
+        exec_command = _ExecCommand(sandbox.command(*args, cwd=directory))
         deadline = anyio.CancelScope(deadline=math.inf if timeout is None else anyio.current_time() + timeout)
         code = -1
         try:
@@ -375,7 +375,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         except BaseException as error:
             # On a timeout or a cancellation, closing the socket is what ends the command in the Sprite.
             await _close_command(exec_command)
-            if isinstance(error, Exception) and (mapped := _map_error(error, sprite.name)) is not None:
+            if isinstance(error, Exception) and (mapped := _map_error(error, sandbox.name)) is not None:
                 raise mapped from error
             raise
         await _close_command(exec_command)
@@ -384,8 +384,8 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         # Not through a command: the exec API sends argv in the URL, which caps a command at about 40 KB.
-        sprite = await self.get_client()
-        target = sprite.filesystem() / path
+        sandbox = await self.get_client()
+        target = sandbox.filesystem() / path
         try:
             mode = 0o644
             try:
