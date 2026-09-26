@@ -19,7 +19,7 @@ import shutil
 import stat
 import subprocess
 import types
-from collections.abc import Callable, Generator
+from collections.abc import AsyncGenerator, Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,6 +93,13 @@ class _GatedCreate(_AioCallable):
         return created
 
 
+class _HangingExec(_AioCallable):
+    async def aio(self, *args: Any, **kwargs: Any) -> Any:
+        if args[:4] == ('setsid', '-w', 'sh', '-c'):
+            await anyio.sleep_forever()
+        return await super().aio(*args, **kwargs)
+
+
 class _HangingAioCall:
     """An `.aio` that never returns, for tests that cancel a pending call."""
 
@@ -105,7 +112,14 @@ class _FakeStream:
 
     def __init__(self, data: bytes, hangs: bool = False) -> None:
         self._data = data
+        self._hangs = hangs
         self.read = _HangingAioCall() if hangs else _AioCallable(self._read)
+
+    async def __aiter__(self) -> AsyncGenerator[bytes, None]:
+        if self._hangs:
+            await anyio.sleep_forever()
+        await anyio.lowlevel.checkpoint()
+        yield self._data
 
     def _read(self) -> bytes:
         return self._data
@@ -379,7 +393,7 @@ class FakeSandbox:
         self._control = control
         self.object_id = object_id
         self.exec_calls: list[ExecCall] = []
-        self.exec = _HangingAioCall() if control.exec_hangs else _AioCallable(self._exec)
+        self.exec = _HangingExec(self._exec) if control.exec_hangs else _AioCallable(self._exec)
         self.poll = _AioCallable(self._poll)
         # Filesystem state the tests read and write.
         self.files: dict[str, bytes] = {}
@@ -423,6 +437,10 @@ class FakeSandbox:
         # Runs the command on the host, rooted at the sandbox's working directory, so the
         # conformance suite sees real exit codes, output, `cwd`, `env`, and deadlines.
         argv = list(args)
+        # The fake host lacks Linux `setsid`; emulate the wrapper while preserving command
+        # records for tests of the public argv contract.
+        if argv[:4] == ['setsid', '-w', 'sh', '-c']:
+            argv = argv[8:]
         self.exec_calls.append(ExecCall(argv=argv, timeout=timeout, text=text, workdir=workdir, env=env))
         if self.shutting_down:
             raise FakeConflictError('Modal Sandbox is shutting down.')
@@ -450,7 +468,12 @@ class FakeSandbox:
         # Closed keyword signature on purpose: real `Sandbox.exec` rejects unknown kwargs,
         # so the fake must too, or a bad kwarg in the backend would only fail in production.
         argv = list(args)
+        stopping = argv[:4] == ['sh', '-c', argv[2] if len(argv) > 2 else '', 'modal-stop']
+        if argv[:4] == ['setsid', '-w', 'sh', '-c']:
+            argv = argv[8:]
         self.exec_calls.append(ExecCall(argv=argv, timeout=timeout, text=text, workdir=workdir, env=env))
+        if stopping:
+            return _FakeProcess(b'', b'', 0, None, False)
         if self.shutting_down:
             raise FakeConflictError('Modal Sandbox is shutting down.')
         if self._control.exec_error is not None:

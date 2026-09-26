@@ -107,7 +107,7 @@ async def test_filesystem_not_directory_error_uses_builtin_exception(fake_modal:
 async def test_command_start_timeout_is_bounded(fake_modal: FakeModal) -> None:
     fake_modal.exec_hangs = True
     backend = ModalSandboxBackend()
-    with pytest.raises(WorkspaceTimeoutError, match='before the command could start'):
+    with pytest.raises(WorkspaceTimeoutError, match='Command timed out after 0.01s'):
         with anyio.fail_after(0.2):
             await backend.run(['echo', 'hello'], timeout=0.01)
 
@@ -147,8 +147,7 @@ async def test_command_timeout_starts_once_the_sandbox_is_acquired(fake_modal: F
     assert fake_modal.sandboxes[0].exec_calls[0].timeout == 1
 
 
-async def test_command_timeout_keeps_captured_output(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._RESULT_GRACE', 0.01)
+async def test_command_timeout_keeps_captured_output(fake_modal: FakeModal) -> None:
     fake_modal.responder = lambda argv, timeout: ('partial stdout', 'partial stderr', 0)
     fake_modal.wait_hangs = True
     backend = ModalSandboxBackend()
@@ -158,10 +157,7 @@ async def test_command_timeout_keeps_captured_output(fake_modal: FakeModal, monk
     assert exc_info.value.stderr == 'partial stderr'
 
 
-async def test_command_timeout_keeps_completed_stderr_when_stdout_reader_hangs(
-    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._RESULT_GRACE', 0.01)
+async def test_command_timeout_keeps_completed_stderr_when_stdout_reader_hangs(fake_modal: FakeModal) -> None:
     fake_modal.responder = lambda argv, timeout: ('partial stdout', 'partial stderr', 0)
     fake_modal.stdout_hangs = True
     backend = ModalSandboxBackend()

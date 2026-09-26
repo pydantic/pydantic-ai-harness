@@ -51,6 +51,7 @@ class TestRun:
 
     async def test_cwd_and_env_reach_the_command(self, fake_modal: FakeModal) -> None:
         backend = await started()
+        fake_modal.sandboxes[0].directories.add('/srv')
         await backend.run(['env'], cwd='/srv', env={'FOO': 'bar'})
         call = fake_modal.sandboxes[0].exec_calls[-1]
         assert call.workdir == '/srv'
@@ -64,6 +65,7 @@ class TestRun:
         backend = await started(
             ref=WorkspaceRef(provider='modal', id='sb-keep'), working_dir='/work', env={'A': '1', 'B': '1'}
         )
+        fake_modal.sandboxes[0].directories.add('/srv')
         await backend.run(['env'])
         await backend.run(['env'], cwd='/srv', env={'B': '2'})
         calls = fake_modal.sandboxes[0].exec_calls
@@ -80,6 +82,7 @@ class TestRun:
 
     async def test_preserves_parent_segments_in_cwd(self, fake_modal: FakeModal) -> None:
         backend = await started()
+        fake_modal.sandboxes[0].directories.add('/linked/../target')
 
         await backend.run(['pwd'], cwd='/linked/../target')
 
@@ -243,6 +246,19 @@ class TestRun:
         backend = await started()
         with pytest.raises(RuntimeError, match='raw wait failed'):
             await backend.run(['x'])
+
+    async def test_cancel_stops_only_the_command_group(self, fake_modal: FakeModal) -> None:
+        fake_modal.wait_hangs = True
+        backend = await started()
+        waiter = asyncio.create_task(backend.run(['sleep', '30'], timeout=5))
+        await anyio.wait_all_tasks_blocked()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        sandbox = fake_modal.sandboxes[0]
+        assert any('kill -TERM' in ' '.join(call.argv) for call in sandbox.exec_calls)
+        assert not sandbox.shutting_down
+        assert backend.ref == WorkspaceRef(provider='modal', id=sandbox.object_id)
 
     async def test_cancelling_run_propagates_the_cancellation(self, fake_modal: FakeModal) -> None:
         # A cancelled run abandons the result collection (reaping its readers) and re-raises

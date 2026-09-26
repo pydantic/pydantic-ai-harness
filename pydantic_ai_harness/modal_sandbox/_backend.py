@@ -15,13 +15,16 @@ Re-check these SDK methods before changing the protocol integration.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import importlib
+import logging
 import math
 import posixpath
 import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import anyio
 from pydantic_ai.exceptions import UserError
@@ -37,7 +40,7 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 
-from pydantic_ai_harness._workspace_provider import absolute_path, command_argv
+from pydantic_ai_harness._workspace_provider import absolute_path, command_argv, command_deadline
 
 if TYPE_CHECKING:
     import modal
@@ -66,7 +69,8 @@ _INTERNAL_EXEC_TIMEOUT = 10
 _CLIENT_DEADLINE_EXIT = -1
 _SIGKILL_EXIT = 137
 
-_RESULT_GRACE = 30
+_PARTIAL_OUTPUT_LIMIT = 65_536
+logger = logging.getLogger(__name__)
 
 
 def _is_shutting_down(e: BaseException) -> bool:
@@ -197,8 +201,8 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     typed `modal.Sandbox` is available through `get_client()`. The backend does not terminate the
     sandbox; terminating it is the application's job.
 
-    Modal applies whole-second command deadlines. Cancelling `run()` stops the local wait while
-    the command may continue until its deadline or the sandbox lifetime ends.
+    Commands run in isolated process groups. Cancellation and command deadlines attempt to stop
+    the foreground group without terminating the sandbox shared by other commands.
 
     The protocol is structural, but subclassing it here makes a signature drift fail the type
     check on this class instead of at a distant `WorkspaceBackend` call.
@@ -472,9 +476,8 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     ) -> CommandResult:
         """Execute a command and wait for it to complete.
 
-        A shell command runs as `/bin/sh -c <command>`. Modal has no per-command kill, so a
-        cancelled `run()` stops the wait but leaves the command running until its `timeout`
-        deadline. Pass a finite `timeout` so an abandoned command cannot run on indefinitely.
+        A shell command runs as `/bin/sh -c <command>`. Cancellation and command deadlines
+        stop its foreground process group, without terminating the shared sandbox.
         """
         # Modal executes argv and never a shell string, so shell interpretation is requested
         # explicitly through `/bin/sh -c`, the one shell every sandbox image carries.
@@ -487,58 +490,87 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         variables: dict[str, str | None] | None = dict(merged) if merged else None
         # Acquiring the sandbox has its own bound; the timeout is the command's alone.
         sandbox = await self.get_client()
-        # Modal takes whole seconds and reads 0 as no deadline, so round up. Messages quote the
-        # caller's `timeout`; the exception's `timeout` attribute is the deadline Modal enforced.
+        if cwd is not None:
+            await self.stat(cwd)
+        # Modal takes whole seconds and reads 0 as no deadline, so round up. The client
+        # deadline below includes exec-start, collection, and stream drain.
         deadline = None if timeout is None else max(1, math.ceil(timeout))
         timed_out = f'Command timed out after {timeout} seconds.'
         server_started_at = time.monotonic()
+        token = uuid4().hex
+        pid_file = f'/tmp/.pydantic-modal-{token}.pid'
+        cancel_file = f'/tmp/.pydantic-modal-{token}.cancel'
+        # Register a killable group before running user code; a tombstone prevents a late
+        # exec-start reply from launching work after its caller has been cancelled.
+        # `setsid -w` waits for its child; without -w Modal reports success after the fork.
+        start_script = 'test ! -e "$1" || exit 143; echo $$ > "$2"; test ! -e "$1" || exit 143; shift 2; exec "$@"'
+        wrapped = ['setsid', '-w', 'sh', '-c', start_script, 'modal-command', cancel_file, pid_file, *argv]
+        # dash's builtin kill rejects `--`; the negative PID after -TERM addresses the group.
+        stop_script = 'touch "$1"; if test -f "$2"; then kill -TERM -"$(cat "$2")" 2>/dev/null || true; fi; rm -f "$2"'
+
+        async def stop() -> None:
+            try:
+                stopper = await sandbox.exec.aio(
+                    'sh',
+                    '-c',
+                    stop_script,
+                    'modal-stop',
+                    cancel_file,
+                    pid_file,
+                    timeout=2,
+                    workdir=workdir,
+                    text=False,
+                )
+                await stopper.wait.aio()
+            except Exception:
+                # Stop can fail when the sandbox is already gone; preserve the original
+                # cancellation/error and leave its ref available for explicit cleanup.
+                logger.warning('Could not stop Modal command in sandbox %s', sandbox.object_id)
+
+        tasks: tuple[asyncio.Task[str], asyncio.Task[str], asyncio.Task[int]] | None = None
+        snapshots = ['', '']
+
+        def captured() -> tuple[str, str]:
+            return snapshots[0], snapshots[1]
+
+        async def read(reader: modal.io_streams.StreamReader[bytes], index: int) -> str:
+            decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+            pieces: list[str] = []
+            async for chunk in reader:
+                text = decoder.decode(chunk)
+                pieces.append(text)
+                # Keep a bounded snapshot even when Modal interrupts a streaming read.
+                snapshots[index] = (snapshots[index] + text)[-_PARTIAL_OUTPUT_LIMIT:]
+            tail = decoder.decode(b'', final=True)
+            pieces.append(tail)
+            snapshots[index] = (snapshots[index] + tail)[-_PARTIAL_OUTPUT_LIMIT:]
+            return ''.join(pieces)
+
         try:
-            with anyio.fail_after(timeout):
+            async with command_deadline(timeout, stop=stop, output=captured):
                 async with self._mapped_errors(sandbox, 'Command could not run in the workspace'):
                     process = await sandbox.exec.aio(
-                        *argv, timeout=deadline, workdir=workdir, env=variables, text=False
+                        *wrapped, timeout=deadline, workdir=workdir, env=variables, text=False
                     )
-        except TimeoutError as error:
-            raise WorkspaceTimeoutError(
-                'Timed out before the command could start; the Modal process may still be running.'
-            ) from error
-
-        async def read(reader: modal.io_streams.StreamReader[bytes]) -> str:
-            return (await reader.read.aio()).decode('utf-8', errors='replace')
-
-        tasks = (
-            asyncio.create_task(read(process.stdout)),
-            asyncio.create_task(read(process.stderr)),
-            asyncio.create_task(process.wait.aio()),
-        )
-        gather = asyncio.gather(*tasks)
-        try:
-            if deadline is None:
-                stdout, stderr, exit_code = await gather
-            else:
-                result_timeout = max(0.0, server_started_at + deadline - time.monotonic()) + _RESULT_GRACE
-                stdout, stderr, exit_code = await asyncio.wait_for(gather, result_timeout)
-        except BaseException as error:
-            for task in tasks:
-                task.cancel()
-            with anyio.CancelScope(shield=True):
-                await asyncio.gather(*tasks, return_exceptions=True)
-            if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
-
-                def captured(task: asyncio.Task[str]) -> str:
-                    if task.cancelled() or task.exception() is not None:
-                        return ''
-                    return task.result()
-
-                raise WorkspaceTimeoutError(timed_out, stdout=captured(tasks[0]), stderr=captured(tasks[1])) from error
-            if isinstance(error, Exception) and (
-                mapped := await _failure(
-                    sandbox,
-                    error,
-                    'Could not read the command result (the command may still run until its deadline)',
+                tasks = (
+                    asyncio.create_task(read(process.stdout, 0)),
+                    asyncio.create_task(read(process.stderr, 1)),
+                    asyncio.create_task(process.wait.aio()),
                 )
-            ):
-                raise mapped from error
+                try:
+                    stdout, stderr, exit_code = await asyncio.gather(*tasks)
+                except Exception as error:
+                    mapped = await _failure(sandbox, error, 'Could not read the command result')
+                    if mapped is not None:
+                        raise mapped from error
+                    raise
+        except BaseException:
+            if tasks is not None:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                with anyio.CancelScope(shield=True):
+                    await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
         elapsed = time.monotonic() - server_started_at

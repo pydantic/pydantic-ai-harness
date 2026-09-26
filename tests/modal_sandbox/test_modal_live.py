@@ -9,9 +9,11 @@ Run locally:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -51,6 +53,56 @@ async def owned_backend(**settings: Any) -> AsyncGenerator[ModalSandboxBackend, 
             await native.terminate.aio()
         finally:
             # Modal 1.5.2 leaves the return type of `detach.aio()` unspecified.
+            await native.detach.aio()  # pyright: ignore[reportUnknownMemberType]
+
+
+async def test_cancel_stops_foreground_descendants_without_destroying_sandbox() -> None:
+    marker = uuid.uuid4().hex
+    backend = ModalSandboxBackend(sandbox_timeout=LIVE_SANDBOX_TIMEOUT, idle_timeout=LIVE_IDLE_TIMEOUT)
+    native = await backend.get_client()
+    with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
+        refs.write(f'modal modal {native.object_id}\n')
+    try:
+        task = asyncio.create_task(
+            backend.run(
+                [
+                    'sh',
+                    '-c',
+                    f'python -c "import os; print(os.getpgrp())" > /tmp/{marker}.pgid; '
+                    f'sleep 30 & sleep 30; touch /tmp/{marker}.marker',
+                ],
+                timeout=None,
+            )
+        )
+        try:
+            with anyio.fail_after(30):
+                while not await backend.exists(f'/tmp/{marker}.pgid'):
+                    await anyio.sleep(0.1)
+            assert not task.done(), task.result() if task.done() else None
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert backend.ref is not None
+            # `kill -0` includes zombies; inspect /proc for live group members instead.
+            probe = (
+                'import os; pgid=int(open("/tmp/' + marker + '.pgid").read()); '
+                'print([p for p in os.listdir("/proc") if p.isdigit() and '
+                'os.path.exists("/proc/"+p+"/stat") and '
+                'open("/proc/"+p+"/stat").read().split()[2] != "Z" and '
+                'int(open("/proc/"+p+"/stat").read().split()[4]) == pgid])'
+            )
+            group = await backend.run(['python', '-c', probe], timeout=15)
+            assert group.stdout.strip() == '[]'
+            assert not await backend.exists(f'/tmp/{marker}.marker')
+            assert (await backend.run(['true'], timeout=15)).exit_code == 0
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    finally:
+        try:
+            await native.terminate.aio()
+        finally:
             await native.detach.aio()  # pyright: ignore[reportUnknownMemberType]
 
 
