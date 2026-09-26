@@ -77,7 +77,7 @@ async def run_python(ctx: RunContext, code: str) -> str:
 
 See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for more.
 
-When a command times out, processes it started in the background (such as `server &`) keep running.
+When a command times out, plain `&` children of that command end with it. A Sprite pauses processes between commands unless you run them as a [Sprites service](https://docs.sprites.dev/working-with-sprites/services/).
 
 ## Reattach later
 

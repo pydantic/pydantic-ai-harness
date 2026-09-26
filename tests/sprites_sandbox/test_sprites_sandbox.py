@@ -4,6 +4,7 @@ import asyncio
 import json
 import signal
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import anyio
 import httpx
@@ -616,6 +617,14 @@ class TestSpritesSandbox:
     def test_relative_working_dir_is_rejected(self) -> None:
         with pytest.raises(ValueError, match='absolute'):
             SpritesSandboxBackend(working_dir='relative')
+
+
+def test_background_process_docs_explain_sprite_pause() -> None:
+    root = Path(__file__).resolve().parents[2]
+    for page in (root / 'docs/sprites-sandbox.md', root / 'pydantic_ai_harness/sprites_sandbox/README.md'):
+        content = page.read_text()
+        assert 'plain `&`' in content
+        assert 'Sprites service' in content
 
 
 @pytest.mark.parametrize(
