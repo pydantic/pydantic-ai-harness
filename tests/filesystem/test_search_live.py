@@ -3,7 +3,6 @@
 # pyright: basic, reportMissingImports=false
 
 import os
-from pathlib import Path
 
 import pytest
 
@@ -20,9 +19,7 @@ async def test_default_e2b_search_without_ripgrep() -> None:
 
     backend = E2BSandboxBackend(sandbox_timeout=300)
     try:
-        sandbox = await backend.get_client()
-        with (Path(__file__).parents[4] / 'workspaces-qa' / 'refs.log').open('a') as refs:
-            refs.write(f'harness-fs3 e2b {sandbox.sandbox_id}\n')
+        await backend.get_client()
         await backend.write_bytes('/home/user/search-proof.txt', b'proof-marker\n')
         tools = FileSystemToolset(
             root_dir=None,

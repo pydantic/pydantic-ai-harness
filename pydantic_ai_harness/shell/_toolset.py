@@ -83,6 +83,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             warn_argument_ignored('ShellToolset', 'cwd', WORKING_DIR_IS_THE_WORKSPACES, stacklevel=3)
         # The absolute workspace path `persist_cwd` last recorded; `None` means the working directory.
         self._cwd: str | None = None
+        self._cwd_run_id: str | None = None
         self._allowed_commands = list(allowed_commands)
         self._denied_commands = list(denied_commands)
         self._denied_operators = list(denied_operators)
@@ -204,7 +205,12 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             state = await self._cwd_state_path(ctx)
             try:
                 recorded = (await ctx.workspace.read_bytes(state)).decode('utf-8')
-            except (FileNotFoundError, UnicodeDecodeError):
+            except FileNotFoundError:
+                if self._cwd is not None and self._cwd_run_id == ctx.run_id:
+                    # This worker saw a saved cwd for this run; a missing file now is lost state.
+                    self._cwd = None
+                    raise ModelRetry('The saved working directory was lost; now in the workspace working directory.')
+            except UnicodeDecodeError:
                 pass
         else:
             recorded = self._cwd
@@ -217,8 +223,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                 # Remote shells may report a missing cwd as an exit code; tell the model to retry elsewhere.
                 if state is not None:
                     await ctx.workspace.remove(state)
-                else:
-                    self._cwd = None
+                self._cwd = None
                 raise ModelRetry(f'The previous directory was removed; now in {await ctx.workspace.working_dir()}.')
             return recorded
         return await ctx.workspace.working_dir()
@@ -335,6 +340,8 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                     # Parallel calls in one run each use their starting cwd; last completion wins.
                     # Workspace backends do not provide a cross-worker compare-and-swap for this state.
                     await ctx.workspace.write_bytes(state, posixpath.normpath(recorded).encode('utf-8'))
+                    self._cwd = posixpath.normpath(recorded)
+                    self._cwd_run_id = ctx.run_id
         except (OSError, ValueError):
             return
 

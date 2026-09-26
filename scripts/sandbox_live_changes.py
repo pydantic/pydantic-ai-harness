@@ -111,7 +111,13 @@ def providers_for(
     selected: list[str] = []
     for name, packages in PROVIDERS.items():
         own = (f'pydantic_ai_harness/{name}_sandbox/', f'docs/{name}-sandbox.md', f'tests/{name}_sandbox/')
-        if shared or any(_touches(path, own) for path in files) or moved & set(packages):
+        # The E2B search smoke test lives with FileSystem, outside the provider test directory.
+        if (
+            shared
+            or any(_touches(path, own) for path in files)
+            or (name == 'e2b' and 'tests/filesystem/test_search_live.py' in files)
+            or moved & set(packages)
+        ):
             selected.append(name)
     allowed = set(PROVIDERS if present is None else present)
     return [name for name in selected if name in allowed]
