@@ -29,7 +29,7 @@ def _attach(ref: WorkspaceRef) -> WorkspaceBackend:
 
 async def _delete(backend: WorkspaceBackend) -> None:
     assert isinstance(backend, DaytonaSandboxBackend)
-    sandbox = await backend.get_client()
+    sandbox = await backend.get_sandbox()
     await sandbox.delete()
 
 

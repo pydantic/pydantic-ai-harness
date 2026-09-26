@@ -94,7 +94,7 @@ The ref holds no credentials, so the process that reattaches needs `DAYTONA_API_
 
 `snapshot`, `auto_stop_interval`, and `network_block_all` only shape a new sandbox; `working_dir` and `env` apply to every command, including after you reattach.
 
-Already have a `daytona.AsyncSandbox`? Pass `workspace=DaytonaSandboxBackend(workspace=sandbox)` to a run, with `DaytonaSandboxBackend` from `pydantic_ai_harness.daytona_sandbox`. `DaytonaSandbox`'s settings don't apply to it; pass `working_dir=` and `env=` to the backend.
+Already have a `daytona.AsyncSandbox`? Pass `workspace=DaytonaSandboxBackend(sandbox=sandbox)` to a run, with `DaytonaSandboxBackend` from `pydantic_ai_harness.daytona_sandbox`. `DaytonaSandbox`'s settings don't apply to it; pass `working_dir=` and `env=` to the backend.
 
 ## Clean up
 
@@ -107,12 +107,12 @@ from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxBackend
 
 async def delete_sandbox(ref: WorkspaceRef) -> None:
     backend = DaytonaSandboxBackend(ref=ref)
-    sandbox = await backend.get_client()
+    sandbox = await backend.get_sandbox()
     await sandbox.delete()
     await backend.aclose()
 ```
 
-`get_client()` returns the `daytona.AsyncSandbox`, and `aclose()` closes the Daytona client the backend opened.
+`get_sandbox()` returns the `daytona.AsyncSandbox`, and `aclose()` closes the Daytona API client the backend opened.
 
 By default, Daytona stops a sandbox after 15 idle minutes (a later run starts it again); set `auto_stop_interval=` to a smaller number of minutes to stop it sooner. A stopped sandbox keeps its disk, is archived after 7 days, and is never deleted. See [Daytona's SDK docs](https://www.daytona.io/docs/en/python-sdk/async/async-daytona/).
 

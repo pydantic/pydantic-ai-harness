@@ -69,7 +69,7 @@ async def client() -> AsyncIterator[daytona.AsyncDaytona]:
 async def _owned(client: daytona.AsyncDaytona) -> AsyncGenerator[DaytonaSandboxBackend]:
     """Create a sandbox and delete it on the way out, even when the test deleted it already."""
     backend = DaytonaSandboxBackend(client=client, auto_stop_interval=LIVE_AUTO_STOP_INTERVAL)
-    native = await backend.get_client()
+    native = await backend.get_sandbox()
     try:
         yield backend
     finally:
@@ -155,7 +155,7 @@ async def test_reattach_to_a_deleted_sandbox_is_unavailable(client: daytona.Asyn
     async with _owned(client) as owner:
         await owner.write_bytes(path, b'before-delete')
         assert owner.ref is not None
-        await (await owner.get_client()).delete()
+        await (await owner.get_sandbox()).delete()
 
         with pytest.raises(WorkspaceUnavailableError):
             await DaytonaSandboxBackend(client=client, ref=owner.ref).working_dir()
