@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
@@ -80,6 +81,30 @@ def _ctx(
         run_id=run_id,
         tracer=tracer,
     )
+
+
+async def test_memory_symlink_escape_is_model_retry(tmp_path: Path) -> None:
+    root = tmp_path / 'store'
+    (root / 'main').mkdir(parents=True)
+    (tmp_path / 'outside.md').write_text('secret')
+    os.symlink(tmp_path / 'outside.md', root / 'main' / 'topic.md')
+    toolset = MemoryToolset(Memory[None](store=FileStore('.', workspace=LocalWorkspaceBackend(root))))
+    with pytest.raises(ModelRetry, match='outside the store directory'):
+        await toolset.read_memory(_ctx(), 'topic')
+    with pytest.raises(ModelRetry, match='outside the store directory'):
+        await toolset.write_memory(_ctx(), 'new', file='topic')
+    with pytest.raises(ModelRetry, match='outside the store directory'):
+        await toolset.delete_memory(_ctx(), 'topic')
+    assert (tmp_path / 'outside.md').read_text() == 'secret'
+
+
+async def test_file_store_recovers_corrupt_receipts(tmp_path: Path) -> None:
+    root = tmp_path / 'store'
+    root.mkdir()
+    (root / '.memory-operations.json').write_text('not json')
+    toolset = MemoryToolset(Memory[None](store=FileStore('.', workspace=LocalWorkspaceBackend(root))))
+    assert (await toolset.write_memory(_ctx(), 'new'))['status'] == 'created'
+    assert (root / 'main' / 'MEMORY.md').read_text() == 'new\n'
 
 
 async def test_file_store_hides_mutations_on_read_only_run(tmp_path: Path) -> None:

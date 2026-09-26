@@ -6,6 +6,7 @@ import bisect
 import hashlib
 import heapq
 import json
+import logging
 import posixpath
 import re
 import sqlite3
@@ -34,6 +35,11 @@ _HIDDEN_PREFIXES = (_OPERATIONS_NAME, _LEGACY_JOURNAL_NAME)
 _MAX_RECEIPTS = 1024
 _SQLITE_SETUP_LOCK = threading.RLock()
 _T = TypeVar('_T')
+logger = logging.getLogger(__name__)
+
+
+class MemoryPathEscapeError(ValueError):
+    """A memory path resolves outside its store directory."""
 
 
 @dataclass(frozen=True)
@@ -507,7 +513,7 @@ class FileStore:
     @staticmethod
     def _confined(real_root: str, real_target: str, path: str) -> str:
         if not real_target.startswith(real_root.rstrip('/') + '/'):
-            raise ValueError(f'memory path {path!r} resolves outside the store directory')
+            raise MemoryPathEscapeError(f'memory path {path!r} resolves outside the store directory')
         return real_target
 
     @staticmethod
@@ -522,7 +528,12 @@ class FileStore:
         raw = await FileStore._content(workspace, posixpath.join(root, _OPERATIONS_NAME))
         if raw is None:
             return []
-        return [_Receipt(**item) for item in json.loads(raw)]
+        try:
+            return [_Receipt(**item) for item in json.loads(raw)]
+        except (json.JSONDecodeError, TypeError):
+            # Invalid receipts cannot establish idempotency; start a fresh journal.
+            logger.warning('Invalid FileStore operation receipts; starting with an empty journal')
+            return []
 
     @staticmethod
     async def _save(workspace: Workspace, root: str, receipts: list[_Receipt]) -> None:

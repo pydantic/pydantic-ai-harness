@@ -20,6 +20,7 @@ from pydantic_ai_harness.memory._store import (
     MemoryConflictError,
     MemoryMutation,
     MemoryOperation,
+    MemoryPathEscapeError,
     MemorySearchMatch,
     MemorySearchResult,
     MemoryStore,
@@ -375,6 +376,9 @@ class MemoryToolset(FunctionToolset[AgentDepsT]):
             except WorkspaceError as exc:
                 _set_span_error(span, exc)
                 raise_tool_failure(exc)
+            except MemoryPathEscapeError as exc:
+                _set_span_error(span, exc)
+                raise ModelRetry(str(exc)) from exc
             except Exception as exc:
                 _set_span_error(span, exc)
                 raise
@@ -404,6 +408,9 @@ class MemoryToolset(FunctionToolset[AgentDepsT]):
                     )
                 _set_span_result(span, 'ok', chars=len(memory_file.content))
                 return memory_file.content + (_READ_TRUNCATION_MARKER if memory_file.truncated else '')
+            except MemoryPathEscapeError as exc:
+                _set_span_error(span, exc)
+                raise ModelRetry(str(exc)) from exc
             except Exception as exc:
                 _set_span_error(span, exc)
                 raise
@@ -454,6 +461,9 @@ class MemoryToolset(FunctionToolset[AgentDepsT]):
             except WorkspaceError as exc:
                 _set_span_error(span, exc)
                 raise_tool_failure(exc)
+            except MemoryPathEscapeError as exc:
+                _set_span_error(span, exc)
+                raise ModelRetry(str(exc)) from exc
             except Exception as exc:
                 _set_span_error(span, exc)
                 raise
