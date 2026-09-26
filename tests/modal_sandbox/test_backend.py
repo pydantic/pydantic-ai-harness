@@ -256,7 +256,9 @@ class TestRun:
         with pytest.raises(asyncio.CancelledError):
             await waiter
         sandbox = fake_modal.sandboxes[0]
-        assert any('kill -TERM' in ' '.join(call.argv) for call in sandbox.exec_calls)
+        assert any(
+            'kill -TERM' in ' '.join(call.argv) and 'kill -KILL' in ' '.join(call.argv) for call in sandbox.exec_calls
+        )
         assert not sandbox.shutting_down
         assert backend.ref == WorkspaceRef(provider='modal', id=sandbox.object_id)
 

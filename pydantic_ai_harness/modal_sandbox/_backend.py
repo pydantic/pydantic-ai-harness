@@ -44,6 +44,7 @@ from pydantic_ai_harness._workspace_provider import absolute_path, command_argv,
 
 if TYPE_CHECKING:
     import modal
+    import modal.container_process
     import modal.io_streams
     from pydantic_ai.workspaces import WorkspaceCommand
 
@@ -541,8 +542,16 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         # `setsid -w` waits for its child; without -w Modal reports success after the fork.
         start_script = 'test ! -e "$1" || exit 143; echo $$ > "$2"; test ! -e "$1" || exit 143; shift 2; exec "$@"'
         wrapped = ['setsid', '-w', 'sh', '-c', start_script, 'modal-command', cancel_file, pid_file, *argv]
-        # dash's builtin kill rejects `--`; the negative PID after -TERM addresses the group.
-        stop_script = 'touch "$1"; if test -f "$2"; then kill -TERM -"$(cat "$2")" 2>/dev/null || true; fi; rm -f "$2"'
+        # dash's builtin kill rejects `--`; the negative PID addresses the group. Give TERM
+        # a short grace period, then KILL survivors (including TERM-ignoring descendants).
+        stop_script = (
+            'touch "$1"; if test -f "$2"; then '
+            'pid=$(cat "$2"); kill -TERM -"$pid" 2>/dev/null || true; '
+            'i=0; while kill -0 -"$pid" 2>/dev/null && test "$i" -lt 5; do '
+            'sleep 0.2; i=$((i+1)); done; '
+            'if kill -0 -"$pid" 2>/dev/null; then kill -KILL -"$pid" 2>/dev/null || true; fi; '
+            'fi; rm -f "$2"'
+        )
 
         async def stop() -> None:
             try:
@@ -557,7 +566,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                     workdir=workdir,
                     text=False,
                 )
-                await stopper.wait.aio()
+                await _check_stop(stopper, sandbox.object_id)
             except Exception:
                 # Stop can fail when the sandbox is already gone; preserve the original
                 # cancellation/error and leave its ref available for explicit cleanup.
@@ -615,6 +624,11 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         ):
             raise WorkspaceTimeoutError(timed_out, stdout=stdout, stderr=stderr)
         return CommandResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
+
+
+async def _check_stop(process: modal.container_process.ContainerProcess[bytes], sandbox_id: str) -> None:
+    if await process.wait.aio() != 0:
+        logger.warning('Modal command stop exited nonzero in sandbox %s', sandbox_id)
 
 
 def _unavailable_message(sandbox_id: str) -> str:
