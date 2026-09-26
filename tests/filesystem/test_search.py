@@ -94,6 +94,20 @@ async def test_no_rg_ignore_and_failure_are_not_silent(tmp_path: Path) -> None:
     assert backend.reads == 0
 
 
+async def test_explicit_hidden_file_glob_and_omission_count(tmp_path: Path) -> None:
+    (tmp_path / '.hidden.py').write_text('needle\n')
+    (tmp_path / '.another.py').write_text('needle\n')
+    (tmp_path / 'visible.py').write_text('needle\n')
+    backend = LocalWorkspaceBackend(tmp_path)
+    tools = FileSystem[None](root_dir=tmp_path, tools=['list_files']).get_toolset()
+    assert isinstance(tools, FileSystemToolset)
+    listing = await tools.list_directory(workspace=backend)
+    assert '2 hidden' in listing
+    assert '.hidden.py' in await tools.find_files('.hidden.py', workspace=backend)
+    assert '.hidden.py' in await tools.search_files('needle', include_glob='.hidden.py', workspace=backend)
+    assert '.hidden.py' in await tools.list_files(glob='.hidden.py', workspace=backend)
+
+
 async def test_no_rg_rejects_unsupported_regex(tmp_path: Path) -> None:
     (tmp_path / 'file.txt').write_text('needle\n')
     backend = CountingBackend(tmp_path)

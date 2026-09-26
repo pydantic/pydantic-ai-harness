@@ -977,8 +977,9 @@ class TestListDirectory:
         )
         result = await ts.list_directory('.', workspace=ws)
         lines = result.splitlines()
-        assert len(lines) == 6
-        assert lines[-1] == '[... truncated at 5 entries]'
+        assert len(lines) == 7
+        assert lines[-2] == '[... truncated at 5 entries]'
+        assert lines[-1].startswith('[3 hidden entries omitted')
 
     async def test_list_at_cap_is_not_marked_truncated(self, tmp_path: Path, ws: LocalWorkspaceBackend) -> None:
         for i in range(3):

@@ -299,8 +299,8 @@ class TestWithoutRipgrep:
 
     async def test_list_files(self, workspace: Path, without_rg: LocalWorkspaceBackend) -> None:
         ts = toolset(workspace)
-        # Ignore files need ripgrep, so `ignored.log` is listed; hidden files still are not.
-        assert (await ts.list_files(workspace=without_rg)).splitlines() == ['ignored.log', 'notes.txt', 'src/app.py']
+        # Git-backed POSIX enumeration also applies a root .ignore outside a repository.
+        assert (await ts.list_files(workspace=without_rg)).splitlines() == ['notes.txt', 'src/app.py']
         assert await ts.list_files(glob='*.py', workspace=without_rg) == 'src/app.py'
         assert await ts.list_files(glob='src/*.py', workspace=without_rg) == 'src/app.py'
 

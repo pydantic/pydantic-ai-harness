@@ -198,6 +198,11 @@ def _is_hidden(relative: str) -> bool:
     return relative != '.' and any(part.startswith('.') for part in relative.split('/'))
 
 
+def _explicit_hidden(pattern: str) -> bool:
+    """Whether the caller explicitly names a dot-prefixed glob component."""
+    return any(part.startswith('.') for part in pattern.split('/'))
+
+
 def _sort_key(path: str) -> list[str]:
     """Order paths component by component, as sorting `Path` objects does."""
     return path.split('/')
@@ -639,7 +644,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             return False
         return True
 
-    def _walk_entry(self, scope: _Scope, path: str, start: str) -> str | None:
+    def _walk_entry(self, scope: _Scope, path: str, start: str, *, include_hidden: bool = False) -> str | None:
         """Authorize one entry of a directory walk: its root-relative path, or `None` to skip it.
 
         Hidden entries are skipped, matching `list_directory`, `search_files`,
@@ -652,7 +657,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             return None
         relative = posixpath.relpath(path, scope.root)
         # The caller explicitly named `start`; only hidden components below it are omitted.
-        if _is_hidden(posixpath.relpath(path, start)) or not self._is_accessible(relative):
+        if (not include_hidden and _is_hidden(posixpath.relpath(path, start))) or not self._is_accessible(relative):
             return None
         return relative
 
@@ -1119,7 +1124,10 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         entries: list[str] = []
         entry_count = 0
+        hidden_count = 0
         for entry in sorted(children, key=lambda child: child.name):
+            if entry.name.startswith('.'):
+                hidden_count += 1
             # Skip dotfiles and dot-directories, matching search_files and
             # find_files so the three walkers agree on what exists.
             if self._walk_entry(scope, entry.path, resolved) is None:
@@ -1146,6 +1154,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             entry_count += 1
         if ctx is not None:
             await ctx.emit(DirectoryListedEvent(**self._event_location(scope, resolved), entry_count=entry_count))
+        if hidden_count:
+            entries.append(f'[{hidden_count} hidden entries omitted; name a hidden path explicitly to include it]')
         return '\n'.join(entries) if entries else '(empty directory)'
 
     async def search_files(
@@ -1209,7 +1219,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         capped = False
         for file in sorted(files, key=lambda child: _sort_key(child.path)):
             file_path = file.path
-            rel_str = self._walk_entry(scope, file_path, resolved)
+            rel_str = self._walk_entry(
+                scope, file_path, resolved, include_hidden=bool(include_glob and _explicit_hidden(include_glob))
+            )
             if rel_str is None:
                 continue
             if include_glob and not fnmatch.fnmatch(rel_str, include_glob):
@@ -1266,7 +1278,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         async def accept(record: Record) -> str | None:
             if include_glob and not fnmatch.fnmatch(record.path, include_glob):
                 return None
-            return await self._authorized_match(scope, cwd, record)
+            return await self._authorized_match(
+                scope, cwd, record, include_hidden=bool(include_glob and _explicit_hidden(include_glob))
+            )
 
         try:
             if scope.lacks_ripgrep:
@@ -1288,7 +1302,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 ],
                 cwd=cwd,
                 limit=self._max_search_results,
-                accept=lambda record: self._match_line(scope, cwd, record),
+                accept=lambda record: self._match_line(
+                    scope, cwd, record, include_hidden=bool(include_glob and _explicit_hidden(include_glob))
+                ),
             )
         except RipgrepMissing:
             scope.lacks_ripgrep = True
@@ -1371,7 +1387,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         matches: list[str] = []
         capped = False
         for match in sorted(found, key=lambda child: _sort_key(child.path)):
-            if self._walk_entry(scope, match.path, resolved) is None:
+            if self._walk_entry(scope, match.path, resolved, include_hidden=_explicit_hidden(pattern)) is None:
                 continue
             if not match.is_dir and match.size is None and not await scope.workspace.exists(match.path):
                 # A dangling symlink is inside the root but names nothing.
@@ -1428,7 +1444,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 cwd=resolved,
                 limit=self._max_find_results,
                 listing=True,
-                accept=lambda record: self._ripgrep_entry(scope, resolved, record),
+                accept=lambda record: self._ripgrep_entry(
+                    scope, resolved, record, include_hidden=bool(glob and _explicit_hidden(glob))
+                ),
             )
         except RipgrepMissing:
             scope.lacks_ripgrep = True
@@ -1440,7 +1458,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             async def accept(record: Record) -> str | None:
                 if glob is not None and not fnmatch.fnmatch(posixpath.normpath(record.path), glob):
                     return None
-                return await self._authorized_entry(scope, resolved, record)
+                return await self._authorized_entry(
+                    scope, resolved, record, include_hidden=bool(glob and _explicit_hidden(glob))
+                )
 
             results, capped = await run_posix_search(
                 scope.workspace,
@@ -1572,7 +1592,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 arguments,
                 cwd=cwd,
                 limit=self._max_search_results,
-                accept=lambda record: self._match_line(scope, cwd, record),
+                accept=lambda record: self._match_line(
+                    scope, cwd, record, include_hidden=bool(glob and _explicit_hidden(glob))
+                ),
             )
         except RipgrepMissing:
             scope.lacks_ripgrep = True
@@ -1587,7 +1609,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             async def accept(record: Record) -> str | None:
                 if glob is not None and not fnmatch.fnmatch(posixpath.normpath(record.path), glob):
                     return None
-                return await self._authorized_match(scope, cwd, record)
+                return await self._authorized_match(
+                    scope, cwd, record, include_hidden=bool(glob and _explicit_hidden(glob))
+                )
 
             results, capped = await run_posix_search(
                 scope.workspace,
@@ -1608,32 +1632,34 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             results.append(f'[... truncated at {self._max_search_results} lines]')
         return '\n'.join(results) if results else 'No matches found.'
 
-    async def _authorized_entry(self, scope: _Scope, cwd: str, record: Record) -> str | None:
+    async def _authorized_entry(
+        self, scope: _Scope, cwd: str, record: Record, *, include_hidden: bool = False
+    ) -> str | None:
         path = posixpath.normpath(posixpath.join(cwd, record.path))
         if not await self._readable_entry(scope, path):
             return None
-        return self._ripgrep_entry(scope, cwd, record)
+        return self._ripgrep_entry(scope, cwd, record, include_hidden=include_hidden)
 
-    async def _authorized_match(self, scope: _Scope, cwd: str, record: Record) -> str | None:
-        if await self._authorized_entry(scope, cwd, record) is None:
+    async def _authorized_match(
+        self, scope: _Scope, cwd: str, record: Record, *, include_hidden: bool = False
+    ) -> str | None:
+        if await self._authorized_entry(scope, cwd, record, include_hidden=include_hidden) is None:
             return None
-        return self._match_line(scope, cwd, record)
+        return self._match_line(scope, cwd, record, include_hidden=include_hidden)
 
-    def _ripgrep_entry(self, scope: _Scope, cwd: str, record: Record) -> str | None:
+    def _ripgrep_entry(self, scope: _Scope, cwd: str, record: Record, *, include_hidden: bool = False) -> str | None:
         """Authorize a path `rg` printed and return it relative to the working directory, or `None` to drop it.
 
-        A `glob` makes ripgrep surface hidden files it would otherwise skip;
-        dropping dot-prefixed entries here keeps these walkers in step with the
-        pure-Python ones, which skip dotfiles regardless of patterns.
+        Hidden entries are kept only when the caller explicitly names a dotfile.
         """
         target = posixpath.normpath(posixpath.join(cwd, record.path))
-        if self._walk_entry(scope, target, cwd) is None:
+        if self._walk_entry(scope, target, cwd, include_hidden=include_hidden) is None:
             return None
         return posixpath.relpath(target, scope.cwd)
 
-    def _match_line(self, scope: _Scope, cwd: str, record: Record) -> str | None:
+    def _match_line(self, scope: _Scope, cwd: str, record: Record, *, include_hidden: bool = False) -> str | None:
         """Rebuild ripgrep's `path:line:text` (match) or `path-line-text` (context) line for an authorized path."""
-        entry = self._ripgrep_entry(scope, cwd, record)
+        entry = self._ripgrep_entry(scope, cwd, record, include_hidden=include_hidden)
         if entry is None:
             return None
         digits = len(record.text) - len(record.text.lstrip('0123456789'))
