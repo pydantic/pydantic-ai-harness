@@ -42,7 +42,7 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 
-from pydantic_ai_harness._workspace_provider import absolute_path, command_argv
+from pydantic_ai_harness._workspace_provider import absolute_path, command_argv, stop_shielded
 
 if TYPE_CHECKING:
     from pydantic_ai.workspaces import WorkspaceCommand
@@ -159,7 +159,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     command `timeout` abandons the output stream and leaves the command running, so the
     deadline is enforced client-side instead and the command is killed with SIGKILL when it
     expires or when the caller is cancelled, if E2B has returned the process ID. Cancellation
-    during startup can leave the command running. That kill signals the command's own process; a
+    during startup waits up to 10 seconds for a PID; if none arrives the command may remain running. That kill signals the command's own process; a
     process the command started in the background outlives it until the sandbox is torn down.
 
     The protocol is structural, but subclassing it here makes a signature drift fail the type
@@ -425,15 +425,21 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         result: e2b.CommandResult | None = None
         try:
             with anyio.move_on_after(timeout):
-                handle = await sandbox.commands.run(
-                    line,
-                    background=True,
-                    # C.UTF-8 needs no locale package on the default image; libc falls back to C
-                    # on images without it. Explicit caller settings take precedence.
-                    envs={'LC_ALL': 'C.UTF-8', **(self._env or {}), **(env or {})},
-                    cwd=cwd if cwd is not None else self._working_dir,
-                    timeout=_SDK_STREAM_UNBOUNDED,
-                )
+                # The remote start may commit before returning its PID. Wait briefly for
+                # the handle under cancellation so cleanup can stop it.
+                with anyio.move_on_after(_INTERNAL_EXEC_TIMEOUT, shield=True) as start_scope:
+                    handle = await sandbox.commands.run(
+                        line,
+                        background=True,
+                        # C.UTF-8 needs no locale package on the default image; libc falls back to C
+                        # on images without it. Explicit caller settings take precedence.
+                        envs={'LC_ALL': 'C.UTF-8', **(self._env or {}), **(env or {})},
+                        cwd=cwd if cwd is not None else self._working_dir,
+                        timeout=_SDK_STREAM_UNBOUNDED,
+                    )
+                if start_scope.cancelled_caught:
+                    raise TimeoutError('E2B command start did not return a process ID; it may still be running')
+                assert handle is not None
                 result = await handle.wait()
             if result is None:
                 assert timeout is not None
@@ -448,12 +454,13 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         except BaseException as error:
             if handle is not None:
                 # Cleanup must not replace a timeout, cancellation, or SDK failure.
-                with anyio.CancelScope(shield=True):
-                    with anyio.move_on_after(_INTERNAL_EXEC_TIMEOUT):
-                        try:
-                            await sandbox.commands.kill(handle.pid)
-                        except Exception:
-                            pass
+                async def stop() -> None:
+                    try:
+                        await sandbox.commands.kill(handle.pid)
+                    except Exception:
+                        pass
+
+                await stop_shielded(stop)
             if isinstance(error, Exception):
                 context = (
                     'Command could not run in the E2B sandbox'

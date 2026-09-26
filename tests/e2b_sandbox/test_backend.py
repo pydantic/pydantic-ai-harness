@@ -282,6 +282,36 @@ class TestRun:
         assert (exc.value.stdout, exc.value.stderr) == ('partial', 'oops')
         assert fake_e2b.sandboxes[0].commands.killed_pids == [4242]
 
+    async def test_cancel_during_start_kills_returned_handle(
+        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = await started()
+        commands = fake_e2b.sandboxes[0].commands
+        start = commands.run
+        entered = anyio.Event()
+        release = anyio.Event()
+
+        async def held(*args: Any, **kwargs: Any) -> Any:
+            handle = await start(*args, **kwargs)
+            entered.set()
+            await release.wait()
+            return handle
+
+        monkeypatch.setattr(commands, 'run', held)
+        with anyio.fail_after(3):
+            async with anyio.create_task_group() as group:
+                scope = anyio.CancelScope()
+
+                async def run() -> None:
+                    with scope:
+                        await backend.run(['sleep', '99'])
+
+                group.start_soon(run)
+                await entered.wait()
+                scope.cancel()
+                release.set()
+        assert commands.killed_pids == [4242]
+
     async def test_a_cancelled_run_kills_the_command(self, fake_e2b: FakeE2B) -> None:
         # The protocol's cancellation contract: a cancelled `run()` must not knowingly leave
         # the command running. E2B has a per-command kill, so the backend uses it.
