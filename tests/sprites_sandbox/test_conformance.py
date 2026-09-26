@@ -65,6 +65,12 @@ class TestLiveSpritesSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover 
     # Class-scoped so the rules share one Sprite instead of creating one each; the suite runs its
     # destroy rule last.
     @pytest.fixture
+    def can_detect_exit_with_inherited_output_pipes(self) -> bool:
+        # Live Sprite (2026-09-26): the exec socket sends EXIT only after a background child
+        # holding stdout exits, so `run()` waits for it. Documented with a redirect workaround.
+        return False
+
+    @pytest.fixture
     def filesystem_honors_shell_permissions(self) -> bool:
         # Live Sprite (2026-09-26): uid 1001 reads chmod 000 files (`test -r` succeeds).
         # The Sprite filesystem does not enforce ordinary POSIX mode checks for this user.
