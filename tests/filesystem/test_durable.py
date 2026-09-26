@@ -92,21 +92,24 @@ async def test_temporal_default_runner_veto(tmp_path: Path) -> None:
     assert (tmp_path / 'protected.txt').read_text() == 'original'
 
 
-@pytest.mark.parametrize('capability', [FileSystem(), Coder()], ids=['filesystem', 'coder'])
 @pytest.mark.parametrize(
-    'tool_name,args',
+    'capability,tool_name,args',
     [
-        ('write_file', {'path': 'note.txt', 'content': 'changed'}),
-        ('edit_file', {'path': 'note.txt', 'old_text': 'original', 'new_text': 'changed'}),
-        ('create_directory', {'path': 'newdir'}),
+        pytest.param(capability, tool_name, args, id=f'{tool_name}-{name}')
+        for name, capability in [('filesystem', FileSystem()), ('coder', Coder())]
+        for tool_name, args in [
+            ('write_file', {'path': 'note.txt', 'content': 'changed'}),
+            ('edit_file', {'path': 'note.txt', 'old_text': 'original', 'new_text': 'changed'}),
+            ('create_directory', {'path': 'newdir'}),
+        ]
+        # Coder does not expose create_directory.
+        if not (name == 'coder' and tool_name == 'create_directory')
     ],
 )
 @pytest.mark.anyio
 async def test_temporal_vetoes_before_mutation(
     tmp_path: Path, capability: FileSystem | Coder, tool_name: str, args: dict[str, str]
 ) -> None:
-    if isinstance(capability, Coder) and tool_name == 'create_directory':
-        pytest.skip('Coder does not expose create_directory')
     (tmp_path / 'note.txt').write_text('original')
     requests: list[str] = []
 
