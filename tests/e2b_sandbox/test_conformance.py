@@ -70,6 +70,12 @@ class TestLiveE2BSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover - li
         pytest.skip('E2B envd omits looping symlinks from directory listings')
 
     @pytest.fixture
+    def can_detect_exit_with_inherited_output_pipes(self) -> bool:
+        # Live envd (2026-09-26) closes the command stream only after a background child holding
+        # stdout exits, so `run()` waits for it. Documented with a redirect workaround.
+        return False
+
+    @pytest.fixture
     def filesystem_honors_shell_permissions(self) -> bool:
         # Live envd file operations run with elevated privileges despite the non-root shell user.
         # Verified by the live conformance chmod-000 test (2026-09-26).
