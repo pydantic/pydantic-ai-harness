@@ -296,6 +296,12 @@ class TestRun:
         marker = tmp_path / 'pid'
         subprocess.run(['sh', '-c', script, 'modal-command', str(tmp_path / 'cancel'), str(marker), 'true'], check=True)
         assert not marker.exists()
+        (tmp_path / 'cancel').touch()
+        blocked = subprocess.run(
+            ['sh', '-c', script, 'modal-command', str(tmp_path / 'cancel'), str(marker), 'true'], check=False
+        )
+        assert blocked.returncode == 143
+        assert not marker.exists()
 
     async def test_stop_uses_stable_directory_after_command_cwd_is_removed(self, fake_modal: FakeModal) -> None:
         fake_modal.wait_hangs = True
@@ -309,8 +315,7 @@ class TestRun:
         assert stop.workdir == '/'
 
     async def test_cancelling_run_propagates_the_cancellation(self, fake_modal: FakeModal) -> None:
-        # A cancelled run abandons the result collection (reaping its readers) and re-raises
-        # the cancellation untranslated; the command itself runs on until its Modal deadline.
+        # A cancelled run reaps its readers and re-raises cancellation untranslated.
         fake_modal.wait_hangs = True
         backend = await started()
         waiter = asyncio.create_task(backend.run(['x'], timeout=5))
