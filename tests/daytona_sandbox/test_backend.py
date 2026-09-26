@@ -282,6 +282,36 @@ class TestCommands:
         with pytest.raises(TimeoutError, match='session setup did not complete'):
             await backend.run(['true'])
 
+    async def test_committed_session_without_ack_is_deleted_on_setup_timeout(
+        self, fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_create_ack_gate = asyncio.Event()
+        monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._REQUEST_TIMEOUT', 0.02)
+        with pytest.raises(TimeoutError, match='session setup'):
+            await backend.run(['true'])
+        assert sandbox.process_sessions == set()
+        assert sandbox.process_delete_calls == 1
+        assert sandbox.process_command == ''
+
+    async def test_native_cancellation_of_committed_session_deletes_it(
+        self, fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._REQUEST_TIMEOUT', 0.02)
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_create_ack_gate = asyncio.Event()
+        task = asyncio.create_task(backend.run(['true']))
+        with anyio.fail_after(2):
+            while not sandbox.process_sessions:
+                await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert sandbox.process_sessions == set()
+        assert sandbox.process_command == ''
+
     async def test_session_execution_failure_cleans_up(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         sandbox = fake_daytona.sandboxes[0]

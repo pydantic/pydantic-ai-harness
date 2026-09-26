@@ -59,7 +59,7 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 
-from pydantic_ai_harness._workspace_provider import absolute_path, command_argv, command_deadline
+from pydantic_ai_harness._workspace_provider import absolute_path, command_argv, command_deadline, stop_shielded
 
 if TYPE_CHECKING:
     from daytona import AsyncDaytona, AsyncSandbox
@@ -642,38 +642,68 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         )
         session_id = f'pydantic-ai-{uuid.uuid4().hex}'
         process = sandbox.process
-        created = False
-        with anyio.move_on_after(_REQUEST_TIMEOUT):
+
+        async def setup() -> _DaytonaProcess:
             try:
-                await process.create_session(session_id, request_timeout=_REQUEST_TIMEOUT)
-                created = True
-                response = await process.execute_session_command(
-                    session_id,
-                    daytona.SessionExecuteRequest(command=line, run_async=True),
-                    timeout=_REQUEST_TIMEOUT,
+                with anyio.fail_after(_REQUEST_TIMEOUT):
+                    await process.create_session(session_id, request_timeout=_REQUEST_TIMEOUT)
+                    response = await process.execute_session_command(
+                        session_id,
+                        daytona.SessionExecuteRequest(command=line, run_async=True),
+                        timeout=_REQUEST_TIMEOUT,
+                    )
+                stdout: list[str] = []
+                stderr: list[str] = []
+                logs = asyncio.create_task(
+                    process.get_session_command_logs_async(session_id, response.cmd_id, stdout.append, stderr.append)
+                )
+                return _DaytonaProcess(
+                    _process=process,
+                    _sandbox=sandbox,
+                    _session_id=session_id,
+                    _command_id=response.cmd_id,
+                    stdout=stdout,
+                    stderr=stderr,
+                    marker=marker,
+                    _logs=logs,
                 )
             except BaseException as error:
-                if created:
-                    await _delete_session(process, session_id)
+                # The server may commit create_session before its acknowledgement. The preallocated
+                # ID is the cleanup token even if setup times out or the caller is cancelled.
+                await stop_shielded(lambda: _delete_session(process, session_id))
+                if isinstance(error, TimeoutError):
+                    raise TimeoutError(
+                        f'Daytona command session setup did not complete within {_REQUEST_TIMEOUT}s.'
+                    ) from error
                 if isinstance(error, Exception):
                     await _raise_failure(sandbox, error, 'Could not start the command')
                 raise
-            stdout: list[str] = []
-            stderr: list[str] = []
-            logs = asyncio.create_task(
-                process.get_session_command_logs_async(session_id, response.cmd_id, stdout.append, stderr.append)
-            )
-            return _DaytonaProcess(
-                _process=process,
-                _sandbox=sandbox,
-                _session_id=session_id,
-                _command_id=response.cmd_id,
-                stdout=stdout,
-                stderr=stderr,
-                marker=marker,
-                _logs=logs,
-            )
-        raise TimeoutError(f'Daytona command session setup did not complete within {_REQUEST_TIMEOUT}s.')
+
+        # Native cancellation bypasses an inline AnyIO shield; let setup settle in its own task.
+        task = asyncio.create_task(setup())
+        cancelled = False
+        result: _DaytonaProcess | None = None
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+            task.cancel()
+            # Cleanup belongs to the child, so parent scope cancellation cannot cut it off.
+            with anyio.CancelScope(shield=True):
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        task.cancel()
+                    except Exception:
+                        break
+                if not task.cancelled() and task.exception() is None:
+                    await stop_shielded(task.result().kill)
+        if cancelled:
+            await anyio.lowlevel.checkpoint_if_cancelled()
+            raise asyncio.CancelledError
+        assert result is not None
+        return result
 
 
 async def _restart_if_stopped(sandbox: AsyncSandbox) -> bool:

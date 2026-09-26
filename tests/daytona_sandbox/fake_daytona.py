@@ -76,6 +76,8 @@ class FakeProcess:
         if self.owner.process_create_gate is not None:
             await self.owner.process_create_gate.wait()
         self.owner.process_sessions.add(session_id)
+        if self.owner.process_create_ack_gate is not None:
+            await self.owner.process_create_ack_gate.wait()
 
     async def execute_session_command(
         self,
@@ -421,6 +423,7 @@ class FakeSandbox:
         self.process_stored_stderr: str | None = None
         self.process_stored_logs_error: Exception | None = None
         self.process_create_gate: asyncio.Event | None = None
+        self.process_create_ack_gate: asyncio.Event | None = None
         self.process_logs_started = asyncio.Event()
         self.process = FakeProcess(self)
         self.fs = FakeFileSystem(self)
