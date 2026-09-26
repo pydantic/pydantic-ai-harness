@@ -248,6 +248,21 @@ class TestCommands:
         assert sandbox.process_delete_calls > 1
         assert 'may still be running' in caplog.text
 
+    async def test_failed_delete_obeys_stop_grace(
+        self, fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._TEARDOWN_TIMEOUT', 5)
+        monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._RETRY_DELAY', 0.01)
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_hangs = True
+        sandbox.process_delete_errors = itertools.repeat(DaytonaConnectionError('offline'))
+        start = anyio.current_time()
+        with pytest.raises(WorkspaceTimeoutError):
+            await backend.run(['sleep', '30'], timeout=0.01)
+        assert anyio.current_time() - start < 2.6
+        assert 'may still be running' in caplog.text
+
     async def test_kill_on_a_deleted_sandbox_does_not_retry(
         self, fake_daytona: FakeDaytona, caplog: pytest.LogCaptureFixture
     ) -> None:

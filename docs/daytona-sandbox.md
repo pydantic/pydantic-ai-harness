@@ -140,7 +140,7 @@ agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(), Coder
 
 ## What a timeout stops
 
-A `run(timeout=...)` deadline starts after sandbox acquisition. Daytona deletes the command session to stop its foreground work, leaving the sandbox available for other commands; session deletion can take around 10 seconds. `WorkspaceTimeoutError` carries partial stdout and stderr. Cancellation also attempts to stop the session. If Daytona cannot confirm deletion, the command may still be running: inspect or delete the sandbox yourself. `timeout=None` removes the command deadline, not Daytona's idle auto-stop or transport limits.
+A `run(timeout=...)` deadline starts after sandbox acquisition. Daytona deletes the command session to stop its foreground work, leaving the sandbox available for other commands; a failed deletion is retried for up to two seconds during timeout or cancellation cleanup. `WorkspaceTimeoutError` carries partial stdout and stderr. Cancellation also attempts to stop the session. If Daytona cannot confirm deletion, the command may still be running: inspect or delete the sandbox yourself. `timeout=None` removes the command deadline, not Daytona's idle auto-stop or transport limits.
 
 ## Configuration
 

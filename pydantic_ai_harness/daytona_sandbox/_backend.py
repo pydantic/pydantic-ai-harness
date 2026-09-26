@@ -99,22 +99,26 @@ async def _delete_session(process: AsyncProcess, session_id: str) -> None:
     until `_TEARDOWN_TIMEOUT`, then logged. Its failure must not replace the outcome the caller is
     already raising or returning.
     """
-    last_error: Exception | None = None
-    with anyio.CancelScope(shield=True), anyio.move_on_after(_TEARDOWN_TIMEOUT):
-        while True:
-            try:
-                await process.delete_session(session_id, request_timeout=_REQUEST_TIMEOUT)
-                return
-            except daytona.DaytonaNotFoundError:
-                return  # already gone, and its command with it
-            except Exception as error:
-                last_error = error
-            await anyio.sleep(_RETRY_DELAY)
-    _logger.warning(
-        'Could not delete Daytona command session %s; its command may still be running.',
-        session_id,
-        exc_info=last_error,
-    )
+    _deleted = False
+    try:
+        # The independent stop child supplies cancellation safety; an inner shield would
+        # defeat its two-second grace when the control plane keeps refusing deletion.
+        with anyio.move_on_after(_TEARDOWN_TIMEOUT):
+            while True:
+                try:
+                    await process.delete_session(session_id, request_timeout=_REQUEST_TIMEOUT)
+                    _deleted = True
+                    return
+                except daytona.DaytonaNotFoundError:
+                    _deleted = True
+                    return  # already gone, and its command with it
+                except Exception:
+                    await anyio.sleep(_RETRY_DELAY)
+    finally:
+        if not _deleted:
+            _logger.warning(
+                'Could not delete Daytona command session %s; its command may still be running.', session_id
+            )
 
 
 def _command_line(
