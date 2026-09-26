@@ -15,7 +15,7 @@ from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 from pydantic_ai.toolsets import AgentToolset
 from pydantic_ai.workspaces import Workspace
 
-from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, HarnessDeprecationWarning, warn_argument_ignored
+from pydantic_ai_harness._warn import SET_WORKING_DIR_ON_THE_WORKSPACE, HarnessDeprecationWarning, warn_argument_ignored
 from pydantic_ai_harness._workspace import require_workspace, workspace_path
 from pydantic_ai_harness.filesystem import DirectoryListedEvent, FileReadEvent
 from pydantic_ai_harness.repo_context._loader import (
@@ -133,7 +133,7 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     _seen_dirs: set[str] = field(default_factory=set[str], init=False, repr=False, compare=False)
     """Run-scoped set of directories already surfaced by Strategy 3."""
 
-    _resolved_workspace_dir: Path | None = field(default=None, init=False, repr=False, compare=False)
+    _cached_working_dir: Path | None = field(default=None, init=False, repr=False, compare=False)
     """The workspace's working directory for this run."""
 
     _toolset: RepoContextToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
@@ -143,7 +143,7 @@ class RepoContext(AbstractCapability[AgentDepsT]):
 
     def __post_init__(self) -> None:
         if self.workspace_dir is not None:
-            warn_argument_ignored('RepoContext', 'workspace_dir', WORKING_DIR_IS_THE_WORKSPACES)
+            warn_argument_ignored('RepoContext', 'workspace_dir', SET_WORKING_DIR_ON_THE_WORKSPACE)
         self._sniff_traversal_tools = (
             self.traversal_tool_names != _DEFAULT_TRAVERSAL_TOOL_NAMES
             or self.traversal_path_arg != _DEFAULT_TRAVERSAL_PATH_ARG
@@ -159,7 +159,7 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         run = replace_no_init(self)
         run._context_files = None
         run._seen_dirs = set()
-        run._resolved_workspace_dir = None
+        run._cached_working_dir = None
         return run
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
@@ -168,11 +168,11 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         if not self.autoload_instructions:
             return
         workspace = ctx.workspace
-        workspace_dir = await self._workspace(workspace)
+        working_dir = await self._working_dir(workspace)
         home = None
         if self.home_dir is not None:
             home = Path(await workspace.resolve(workspace_path(Path(self.home_dir))))
-        self._context_files = await discover_instruction_files(workspace, workspace_dir, home, self.filenames)
+        self._context_files = await discover_instruction_files(workspace, working_dir, home, self.filenames)
 
     def get_instructions(self) -> str | Callable[[RunContext[AgentDepsT]], str | None] | None:
         """Cache-stable instructions resolved after `before_run` loads workspace files."""
@@ -187,8 +187,8 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     def _render_instructions(self) -> str | None:
         parts: list[str] = []
         if self._context_files:
-            assert self._resolved_workspace_dir is not None, '`before_run` resolves it before loading files'
-            parts.append(render_context_files(self._context_files, relative_to=self._resolved_workspace_dir))
+            assert self._cached_working_dir is not None, '`before_run` resolves it before loading files'
+            parts.append(render_context_files(self._context_files, relative_to=self._cached_working_dir))
         if self.expose_inventory_tool:
             parts.append(_INVENTORY_HINT.format(tool_name=self.inventory_tool_name))
         return '\n\n'.join(parts) or None
@@ -232,11 +232,11 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         """Enqueue nested context after an authorized filesystem traversal."""
         if not self.nested_traversal:
             return
-        workspace = await self._workspace(ctx.workspace)
+        working_dir = await self._working_dir(ctx.workspace)
         path = Path(await ctx.workspace.resolve(event.path, base=event.root_dir))
         directory = path.parent if isinstance(event, FileReadEvent) else path
         try:
-            directory.relative_to(workspace)
+            directory.relative_to(working_dir)
         except ValueError:
             return
         await self._enqueue_context(ctx, directory)
@@ -253,8 +253,8 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         ctx.enqueue(self._render_note(context_file))
 
     async def _resolve_directory(self, workspace: Workspace, raw_path: str) -> Path:
-        workspace_dir = await self._workspace(workspace)
-        text = await workspace.resolve(raw_path, base=workspace_dir.as_posix())
+        working_dir = await self._working_dir(workspace)
+        text = await workspace.resolve(raw_path, base=working_dir.as_posix())
         candidate = Path(text)
         try:
             entry = await workspace.stat(text)
@@ -272,16 +272,16 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         )
 
     def _label(self, path: Path) -> str:
-        assert self._resolved_workspace_dir is not None, 'a note is only rendered once the directory is resolved'
+        assert self._cached_working_dir is not None, 'a note is only rendered once the directory is resolved'
         try:
-            return path.relative_to(self._resolved_workspace_dir).as_posix()
+            return path.relative_to(self._cached_working_dir).as_posix()
         except ValueError:
             return path.as_posix()
 
-    async def _workspace(self, workspace: Workspace) -> Path:
-        if self._resolved_workspace_dir is None:
-            self._resolved_workspace_dir = Path(await workspace.working_dir())
-        return self._resolved_workspace_dir
+    async def _working_dir(self, workspace: Workspace) -> Path:
+        if self._cached_working_dir is None:
+            self._cached_working_dir = Path(await workspace.working_dir())
+        return self._cached_working_dir
 
     @classmethod
     def get_serialization_name(cls) -> str | None:

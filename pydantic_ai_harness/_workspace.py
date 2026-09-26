@@ -134,11 +134,16 @@ async def metadata_dir(workspace: Workspace, name: str) -> str:
     `.pydantic-ai-harness` gets a `.gitignore` holding `*` whenever it has none, including a
     directory that already existed, so none of it shows up in `git status`. Only filesystem operations are used, so a workspace that
     cannot run commands works too. A path in the way raises `WorkspaceError`: it is no tool
-    argument's fault, so a retry cannot fix it.
+    argument's fault, so a retry cannot fix it. So does a symlink in place of either directory,
+    before anything is created: it could lead outside the working directory.
     """
-    root = posixpath.join(await workspace.working_dir(), METADATA_DIR)
+    working_dir = await workspace.working_dir()
+    root = posixpath.join(working_dir, METADATA_DIR)
     directory = posixpath.join(root, name)
     gitignore = posixpath.join(root, '.gitignore')
+    expected = posixpath.join(await workspace.realpath(working_dir), METADATA_DIR, name)
+    if await workspace.realpath(directory) != expected:
+        raise WorkspaceError(f'`{METADATA_DIR}/{name}` in the workspace is a symlink, so it is not used.')
     try:
         await workspace.make_dir(directory)
         if not await workspace.exists(gitignore):
