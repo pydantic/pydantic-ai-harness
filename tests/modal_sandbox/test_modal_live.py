@@ -46,6 +46,8 @@ async def owned_backend(**settings: Any) -> AsyncGenerator[ModalSandboxBackend, 
     }
     backend = ModalSandboxBackend(**(defaults | settings))
     native = await backend.get_client()
+    with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
+        refs.write(f'modal modal {native.object_id}\n')
     try:
         yield backend
     finally:
