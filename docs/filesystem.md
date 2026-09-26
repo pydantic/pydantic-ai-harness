@@ -73,6 +73,8 @@ so they are left out when it can't run commands; `search_files` and
 | `list_files` | Opt-in, ripgrep-backed: files under a directory, recursively, sorted by path, with an optional `glob`. |
 | `grep` | Opt-in, ripgrep-backed: content search with `glob`, `file_type`, `ignore_case`, `literal`, and `context` (0 to 20) options; a `path` may name a file or a directory. |
 
+For remote workspaces, use the file tools (`grep`, `find_files`, `read_file`) rather than `cat` through a shell. Install `rg` and `git` in the sandbox image for fast searches; installing `rg` on the agent host does not install it in a remote workspace. For large or generated trees, use Shell with `rg -n 'pattern' path` and cap its output. Without `rg`, searches walk files using many remote calls; filesystem-only backends use this slower, bounded path. Check ignore and hidden-file handling on the fallback.
+
 ### Tool selection and the ripgrep tools
 
 `tools` names the tools to register, from `FILE_SYSTEM_TOOL_NAMES`. The default,
@@ -294,7 +296,7 @@ need `**`.
 | `denied_patterns` | Matching paths are rejected (denylist), even when `allowed_patterns` matches them. |
 | `read_only_patterns` | Matching paths are read-only: reads succeed, writes are rejected. |
 
-`read_only_patterns` defaults to `.git/*`, `.env`, `.env.*`, `*.pem`, `*.key`,
+`read_only_patterns` defaults to `**/.git/*`, `**/.env`, `**/.env.*` (at any depth), `*.pem`, `*.key`,
 and `**/secrets*`, and `**/.pydantic-ai-harness/**`, where harness capabilities keep
 their own files (spilled tool output, background job status). Pass an empty list to make every path writable.
 `protected_patterns` is its deprecated name and still works, with a warning.
@@ -355,7 +357,7 @@ FileSystem(
     denied_patterns=[],            # denylist globs
     read_only_patterns=[...],      # read-only globs (defaults to secrets/.git)
     max_read_lines=2000,           # cap for a single read_file
-    max_read_chars=None,           # optional cap on a whole read_file result, ending on a complete line
+    max_read_chars=50_000,         # cap on a whole read_file result, ending on a complete line
     max_list_results=1000,         # cap for list_directory
     max_search_results=1000,       # cap for search_files and grep
     max_find_results=1000,         # cap for find_files and list_files

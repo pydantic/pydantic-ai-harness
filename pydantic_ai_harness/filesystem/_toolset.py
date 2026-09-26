@@ -752,6 +752,10 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
     async def _read_file(
         self, scope: _Scope, ctx: RunContext[AgentDepsT] | None, path: str, *, offset: int = 0, limit: int | None = None
     ) -> str:
+        if offset < 0:
+            raise ValueError('offset must be non-negative.')
+        if limit is not None and limit < 1:
+            raise ValueError('limit must be at least 1.')
         if limit is None:
             limit = self._max_read_lines
         resolved = await self._safe_resolve(scope, path)
@@ -902,7 +906,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         except FileNotFoundError as e:
             parent_rel = posixpath.relpath(parent, scope.root)
             raise FileNotFoundError(
-                f"Parent directory '{parent_rel}' does not exist. Use create_directory first."
+                f"Parent directory '{parent_rel}' does not exist. Create the parent directory first."
             ) from e
         except NotADirectoryError as e:
             raise ModelRetry(f'Path {path!r} has a parent that is not a directory.') from e

@@ -301,6 +301,8 @@ Each run gets a fresh toolset instance, so the tracked directory is isolated
 between concurrent runs and always starts back at the workspace's working
 directory.
 
+The model sees a capped preview of command output. For large output, redirect it to a file in the workspace, then use `grep` or `tail` to inspect bounded portions rather than printing the whole file.
+
 ## Configuration
 
 Every field of `Shell` with its default:

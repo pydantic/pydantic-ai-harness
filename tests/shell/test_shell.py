@@ -689,6 +689,16 @@ class TestRunCommand:
         result = await ts.run_command(_ctx(shell_dir), 'pwd')
         assert 'subdir' in result
 
+    async def test_persist_cwd_keeps_directory_trailing_space(
+        self, persist_toolset: ShellToolset[None], shell_dir: Path
+    ) -> None:
+        (shell_dir / 'trailing ').mkdir()
+        ctx = _ctx(shell_dir)
+        await persist_toolset.run_command(ctx, command="cd 'trailing '")
+        result = await persist_toolset.run_command(ctx, command='pwd')
+        assert 'trailing ' in result
+        assert persist_toolset._cwd == str(shell_dir / 'trailing ')
+
     async def test_persist_cwd_only_on_success(self, shell_dir: Path) -> None:
         ts = ShellToolset(
             allowed_commands=[],
