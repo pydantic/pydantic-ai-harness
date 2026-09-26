@@ -64,9 +64,7 @@ class TestLiveModalSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover - 
         backend = ModalSandboxBackend(
             image='python:3.12-slim', sandbox_timeout=LIVE_SANDBOX_TIMEOUT, idle_timeout=LIVE_IDLE_TIMEOUT
         )
-        native = await backend.get_client()
-        with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
-            refs.write(f'modal-adopt modal {native.object_id}\n')
+        await backend.get_client()
         try:
             yield backend
         finally:

@@ -13,7 +13,6 @@ import asyncio
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 import anyio
@@ -46,8 +45,6 @@ async def owned_backend(**settings: Any) -> AsyncGenerator[ModalSandboxBackend, 
     }
     backend = ModalSandboxBackend(**(defaults | settings))
     native = await backend.get_client()
-    with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
-        refs.write(f'modal-adopt modal {native.object_id}\n')
     try:
         yield backend
     finally:
@@ -73,8 +70,6 @@ async def test_cancel_stops_foreground_descendants_without_destroying_sandbox() 
     marker = uuid.uuid4().hex
     backend = ModalSandboxBackend(sandbox_timeout=LIVE_SANDBOX_TIMEOUT, idle_timeout=LIVE_IDLE_TIMEOUT)
     native = await backend.get_client()
-    with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
-        refs.write(f'modal-adopt modal {native.object_id}\n')
     try:
         task = asyncio.create_task(
             backend.run(
