@@ -659,6 +659,19 @@ class TestLazyOperations:
             assert result.exit_code == 0
         assert 'echo ready' in fake_daytona.sandboxes[0].process_command
 
+    async def test_native_cancellation_during_committed_creation_keeps_ref(self, fake_daytona: FakeDaytona) -> None:
+        gate = fake_daytona.create_gate = asyncio.Event()
+        backend = DaytonaSandboxBackend()
+        task = asyncio.create_task(backend.get_client())
+        await fake_daytona.create_started.wait()
+        task.cancel()
+        task.cancel()
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert backend.ref == WorkspaceRef(provider='daytona', id=fake_daytona.sandboxes[0].id)
+        assert len(fake_daytona.sandboxes) == 1
+
     async def test_cancellation_during_creation_keeps_the_created_sandbox(self, fake_daytona: FakeDaytona) -> None:
         gate = fake_daytona.create_gate = asyncio.Event()
         backend = DaytonaSandboxBackend()
@@ -782,9 +795,10 @@ async def test_supplied_client_survives_acquisition_failure(fake_daytona: FakeDa
 async def test_create_timeout_is_transient(fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._CREATE_TIMEOUT', 0.05)
     fake_daytona.create_gate = asyncio.Event()
-    with pytest.raises(TimeoutError, match='creation did not complete'):
-        await DaytonaSandboxBackend().get_client()
-    assert fake_daytona.closed_clients == 1
+    backend = DaytonaSandboxBackend()
+    sandbox = await backend.get_client()
+    assert backend.ref == WorkspaceRef(provider='daytona', id=sandbox.id)
+    assert fake_daytona.closed_clients == 0
 
 
 async def test_attach_timeout_is_transient(fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch) -> None:

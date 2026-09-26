@@ -288,6 +288,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         create a replacement. Creation is not cut short by cancellation, so
         a sandbox Daytona created is always recorded in `ref` before the cancellation propagates.
         """
+        cancelled = False
         async with self._lock:
             if (sandbox := self._sandbox) is not None:
                 return sandbox
@@ -305,7 +306,28 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                     except Exception as error:
                         _raise_translated(error, 'Could not configure the Daytona client')
                 client = self._client
-                sandbox = await self._attach(client, ref.id) if ref is not None else await self._create(client)
+                if ref is not None:
+                    sandbox = await self._attach(client, ref.id)
+                else:
+
+                    async def create_and_record() -> AsyncSandbox:
+                        created = await self._create(client)
+                        # A native Task.cancel interrupts inline shields; record the accepted ID in
+                        # the independent task before allowing cancellation to escape the caller.
+                        self._ref = WorkspaceRef(provider='daytona', id=created.id)
+                        return created
+
+                    task = asyncio.create_task(create_and_record())
+                    while True:
+                        try:
+                            sandbox = await asyncio.shield(task)
+                            break
+                        except asyncio.CancelledError:
+                            cancelled = True
+                            if task.done():
+                                sandbox = task.result()
+                                break
+                    self._sandbox = sandbox
             except BaseException:
                 await self._close_owned_client()
                 raise
@@ -314,6 +336,8 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             self._ref = WorkspaceRef(provider='daytona', id=sandbox.id)
         # A caller cancelled during the shielded creation stops here, with the sandbox recorded.
         await anyio.lowlevel.checkpoint_if_cancelled()
+        if cancelled:
+            raise asyncio.CancelledError
         return sandbox
 
     async def aclose(self) -> None:
@@ -485,9 +509,8 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             network_block_all=self._network_block_all,
             labels={'created-by': 'pydantic-ai'},
         )
-        # Shielded: cancelling the request after Daytona accepted it would leave a sandbox nothing
-        # names. The caller records the ref first, then a pending cancellation is delivered.
-        with anyio.CancelScope(shield=True), anyio.move_on_after(_CREATE_TIMEOUT):
+        # The create RPC can outlive its acknowledgement; recover by the stable name on timeout.
+        with anyio.move_on_after(_CREATE_TIMEOUT) as deadline:
             try:
                 return await client.create(params, timeout=_LIFECYCLE_TIMEOUT)
             except Exception as error:
@@ -504,8 +527,12 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                     # model turn can fix it, so the run ends instead of handing the model an error.
                     translated = WorkspaceUnavailableError(str(translated))
                 raise translated from error
-        # A stalled control plane is transient, so it is a plain `TimeoutError`, which durable engines
-        # retry; `WorkspaceTimeoutError` is reserved for command deadlines.
+        if deadline.cancelled_caught:
+            try:
+                return await client.get(name, request_timeout=_REQUEST_TIMEOUT)
+            except (daytona.DaytonaNotFoundError, daytona.DaytonaConnectionError, daytona.DaytonaTimeoutError):
+                pass
+        # A stalled control plane is transient, not a command deadline.
         raise TimeoutError(f'Daytona sandbox creation did not complete within {_CREATE_TIMEOUT}s.')
 
     async def _attach(self, client: AsyncDaytona, workspace_id: str) -> AsyncSandbox:
