@@ -124,7 +124,7 @@ async def delete_sprite(ref: WorkspaceRef) -> None:
 
 `get_client()` returns the `sprites.AsyncSprite`, and `aclose()` closes the Sprites client the backend opened. See [Sprite lifecycle](https://docs.sprites.dev/concepts/lifecycle/).
 
-A failed run returns no result, so there is no ref to store. To terminate its sandbox, clean up in an `on_run_error` hook; `after_run` doesn't run when a run fails:
+A failed run returns no result, so there is no ref to store. To terminate its sandbox, clean up in an `on_run_error` hook; `after_run` doesn't run when a run fails. If creation's reply was lost, the ref may identify a Sprite that is not yet visible to the API; a lookup failure does not prove it was never created:
 
 ```python
 from typing import Any

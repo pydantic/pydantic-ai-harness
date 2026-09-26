@@ -160,6 +160,7 @@ class SpriteTransport:
         self.execs: list[FakeExecSocket] = []
         self.exec_started = asyncio.Event()
         self.get_error: Exception | None = None
+        self.get_error_once: Exception | None = None
         self.create_error: Exception | None = None
         self.create_error_after_commit: Exception | None = None
         self.close_error: Exception | None = None
@@ -206,6 +207,10 @@ class SpriteTransport:
         return socket
 
     async def get(self, client: AsyncSpritesClient, name: str) -> AsyncSprite:
+        if self.get_error_once is not None:
+            error = self.get_error_once
+            self.get_error_once = None
+            raise error
         if self.get_error is not None:
             raise self.get_error
         if self.release_get is not None:

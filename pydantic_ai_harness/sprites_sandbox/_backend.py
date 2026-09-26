@@ -233,6 +233,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         self._sandbox = workspace
         self._ref = ref if workspace is None else WorkspaceRef(provider='sprites', id=workspace.name)
         self._new_sprite_name = f'pydantic-ai-{uuid.uuid4().hex}'
+        self._uncertain_create = False
         self._runtime = runtime
         self._working_dir = absolute_path('working_dir', working_dir)
         self._env = dict(env or {})
@@ -276,7 +277,13 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             async def acquire() -> AsyncSprite:
                 with anyio.move_on_after(_ACQUIRE_TIMEOUT):
                     if ref is not None:
-                        workspace = await client.get_sprite(ref.id)
+                        try:
+                            workspace = await client.get_sprite(ref.id)
+                        except NotFoundError as error:
+                            if self._uncertain_create:
+                                # A 404 during eventual visibility is not proof that creation failed.
+                                raise NetworkError(f'Sprite {ref.id!r} may still be becoming visible') from error
+                            raise
                     else:
                         try:
                             workspace = await client.create_sprite(self._new_sprite_name, runtime=self._runtime)
@@ -285,19 +292,26 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                                 isinstance(error, NetworkError) or '(status 409)' in str(error)
                             ):
                                 raise
-                            # A lost create reply can leave a billed Sprite. The random name is ours alone;
-                            # do not enumerate or delete any other Sprite to recover it.
+                            # The create may have committed even if lookup is not yet visible. Keep its
+                            # preallocated name for failure hooks and use lookup only on future attempts.
+                            self._ref = WorkspaceRef(provider='sprites', id=self._new_sprite_name)
+                            self._uncertain_create = True
                             try:
                                 workspace = await client.get_sprite(self._new_sprite_name)
-                            except NotFoundError:
+                            except (NotFoundError, NetworkError, TimeoutError):
                                 raise error from None
                     # Recorded as soon as the SDK returns, so a cancelled caller still leaves it named.
                     self._sandbox = workspace
                     self._ref = WorkspaceRef(provider='sprites', id=workspace.name)
+                    self._uncertain_create = False
                     return workspace
                 # Only our own bound lands here; an SDK `TimeoutError` propagates as raised. A stalled
                 # control plane is a transport failure, which propagates for a retry;
                 # `WorkspaceTimeoutError` is reserved for command deadlines.
+                if ref is None:
+                    # A timed-out create may have committed; a subsequent call must only look it up.
+                    self._ref = WorkspaceRef(provider='sprites', id=self._new_sprite_name)
+                    self._uncertain_create = True
                 action = 'creation' if ref is None else 'connection'
                 raise TimeoutError(
                     f'Sprite {action} did not complete within {_ACQUIRE_TIMEOUT:g}s; '

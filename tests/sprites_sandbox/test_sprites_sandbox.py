@@ -289,6 +289,19 @@ class TestSpritesSandbox:
         assert transport.created == [sprite.name]
         assert await backend.get_client() is sprite
 
+    async def test_lost_create_reply_before_lookup_visible_preserves_cleanup_ref(
+        self, transport: SpriteTransport
+    ) -> None:
+        backend = SpritesSandboxBackend()
+        transport.create_error_after_commit = NetworkError('lost reply')
+        transport.get_error_once = NotFoundError('not visible yet')
+        with pytest.raises(NetworkError, match='lost reply'):
+            await backend.get_client()
+        [name] = transport.created
+        assert backend.ref == WorkspaceRef(provider='sprites', id=name)
+        assert (await backend.get_client()).name == name
+        assert transport.created == [name]
+
     async def test_missing_token(self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('SPRITE_TOKEN')
         with pytest.raises(WorkspaceUnavailableError, match='SPRITE_TOKEN'):
