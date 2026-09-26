@@ -615,6 +615,13 @@ async def test_acquisition_errors_map_to_protocol_failures(
         assert exc.value is error
 
 
+def test_ripgrep_template_recipe_is_documented_without_running_a_build() -> None:
+    docs = (Path(__file__).parents[2] / 'docs/e2b-sandbox.md').read_text()
+    assert "Template().from_base_image().apt_install(['ripgrep'])" in docs
+    assert 'AsyncTemplate.build' in docs
+    assert "E2BSandbox(template='my-rg-template')" in docs
+
+
 def test_missing_e2b_extra_has_an_install_hint() -> None:
     result = subprocess.run(
         [

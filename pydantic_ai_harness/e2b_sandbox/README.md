@@ -37,7 +37,15 @@ result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summa
 
 A sandbox lives for 1 hour by default. When that runs out it pauses, and the next run resumes it. On E2B's Pro plan you can pass up to `E2BSandbox(sandbox_timeout=86400)`.
 
-`Coder` searches with ripgrep (`rg`) when the sandbox has it and with its built-in search otherwise. For faster searches, pass an E2B [template](https://e2b.dev/docs/template/quickstart) with ripgrep installed as `E2BSandbox(template='<name>')`.
+E2B's default template does not include ripgrep (`rg`). `Coder` can search without it, but installing `rg` makes searches faster. Build a reusable [template](https://e2b.dev/docs/template/quickstart) once, outside an agent run (building can take a minute):
+
+```text
+from e2b import AsyncTemplate, Template
+await AsyncTemplate.build(Template().from_base_image().apt_install(['ripgrep']), 'my-rg-template')
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[E2BSandbox(template='my-rg-template'), Coder()])
+```
+
+The build snippet is illustrative and not part of the runnable agent examples below.
 
 ## Continue in the same sandbox
 
