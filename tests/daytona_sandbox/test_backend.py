@@ -388,6 +388,26 @@ class TestErrorsAndFilesystem:
             assert type(exc_info.value) is expected
             assert exc_info.value.__cause__ is sdk_error
 
+    @pytest.mark.parametrize(
+        ('error', 'expected'),
+        [
+            (DaytonaAuthenticationError('bad key', status_code=401), WorkspaceUnavailableError),
+            (DaytonaAuthorizationError('forbidden', status_code=403), WorkspaceUnavailableError),
+            (DaytonaRateLimitError('rate limited', status_code=429), DaytonaRateLimitError),
+        ],
+    )
+    async def test_precreate_lookup_translates_credentials_but_not_rate_limits(
+        self, fake_daytona: FakeDaytona, error: Exception, expected: type[Exception]
+    ) -> None:
+        fake_daytona.get_error = error
+        with pytest.raises(expected) as exc_info:
+            await DaytonaSandboxBackend().get_client()
+        if expected is WorkspaceUnavailableError:
+            assert 'DAYTONA_API_KEY' in str(exc_info.value)
+        else:
+            assert exc_info.value is error
+        assert not fake_daytona.create_params
+
     async def test_lost_creation_reply_recovers_the_accepted_sandbox(self, fake_daytona: FakeDaytona) -> None:
         fake_daytona.lose_create_reply = True
         backend = DaytonaSandboxBackend()

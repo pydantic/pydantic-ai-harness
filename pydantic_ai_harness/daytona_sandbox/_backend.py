@@ -523,6 +523,8 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             return await client.get(name, request_timeout=_REQUEST_TIMEOUT)
         except daytona.DaytonaNotFoundError:
             pass
+        except Exception as error:
+            _raise_translated(error, 'Could not start Daytona sandbox')
         params = daytona.CreateSandboxFromSnapshotParams(
             name=name,
             snapshot=self._snapshot,

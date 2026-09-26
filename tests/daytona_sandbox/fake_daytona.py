@@ -486,6 +486,8 @@ class FakeClient:
         return sandbox
 
     async def get(self, sandbox_id: str, request_timeout: float | None = None) -> FakeSandbox:
+        if self.owner.get_error is not None:
+            raise self.owner.get_error
         if self.owner.get_gate is not None:
             await self.owner.get_gate.wait()
         for sandbox in self.owner.sandboxes:
@@ -516,6 +518,7 @@ class FakeDaytona:
         self.close_errors: Iterator[Exception] = iter(())
         self.close_gate: asyncio.Event | None = None
         self.get_gate: asyncio.Event | None = None
+        self.get_error: Exception | None = None
         # What constructing `AsyncDaytona()` raises, e.g. for a missing API key.
         self.client_error: Exception | None = None
         # When set, new sandboxes run commands and file operations on the host under this directory.
