@@ -66,7 +66,7 @@ before writing cleanup.
   themselves. The `shell` tool stops a cancelled job and removes its files under
   `anyio.move_on_after(..., shield=True)` (`shell/_persistent.py`),
   `ModalSandboxBackend.run` cancels its reader tasks first and only then shields
-  the wait for them, so the shield cannot hang (`modal_sandbox/_backend.py`), and
+  the wait for them (`modal_sandbox/_backend.py`), and
   `_monty_exec.py` shields the interpreter's cleanup. Do not shield task-group
   exit alone: `TaskGroup.__aexit__` already shields the parent's remaining wait
   once the first cancel reaches it (anyio #695).

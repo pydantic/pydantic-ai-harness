@@ -69,18 +69,6 @@ _SIGKILL_EXIT = 137
 _RESULT_GRACE = 30
 
 
-def _is_shutting_down(e: BaseException) -> bool:
-    """Whether Modal refused an exec because the sandbox has been terminated.
-
-    For up to about 30 seconds after `terminate()`, Modal still reports the sandbox as running
-    from `poll()` while refusing exec with this `ConflictError`. Only the message separates it
-    from a transient conflict.
-    """
-    import modal
-
-    return isinstance(e, modal.exception.ConflictError) and 'shutting down' in str(e).lower()
-
-
 def _translate(error: Exception, *, context: str, unavailable: str, path: str | None = None) -> Exception | None:
     """Map a Modal SDK exception onto the workspace protocol's typed failures.
 
@@ -97,8 +85,10 @@ def _translate(error: Exception, *, context: str, unavailable: str, path: str | 
         return WorkspaceUnavailableError(_AUTH_MESSAGE)
     # `SandboxTimeoutError` is the sandbox reaching its lifetime (`sandbox_timeout`), not a
     # command timing out; a command's own deadline is handled in `run()`.
+    # For about 30 seconds after `terminate()`, Modal still polls the sandbox as running while
+    # refusing exec with a `ConflictError`; only its message separates it from a transient conflict.
     if isinstance(error, (exc.NotFoundError, exc.SandboxTerminatedError, exc.SandboxTimeoutError)) or (
-        _is_shutting_down(error)
+        isinstance(error, exc.ConflictError) and 'shutting down' in str(error).lower()
     ):
         return WorkspaceUnavailableError(unavailable)
     if path is not None:
@@ -468,24 +458,23 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         workdir = absolute_path('cwd', cwd) or self._working_dir
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
-        merged = {**self._env, **(env or {})}
-        variables: dict[str, str | None] | None = dict(merged) if merged else None
+        variables: dict[str, str | None] | None = {**self._env, **(env or {})} or None
         # Acquiring the sandbox has its own bound; the timeout is the command's alone.
         sandbox = await self.get_client()
         # Modal takes whole seconds and reads 0 as no deadline, so round up. Messages quote the
         # caller's `timeout`; the exception's `timeout` attribute is the deadline Modal enforced.
         deadline = None if timeout is None else max(1, math.ceil(timeout))
         timed_out = f'Command timed out after {timeout} seconds.'
-        server_started_at = time.monotonic()
-        start: anyio.CancelScope | None = None
+        exec_started_at = time.monotonic()
+        start_scope: anyio.CancelScope | None = None
         try:
-            with anyio.fail_after(timeout) as start:
+            with anyio.fail_after(timeout) as start_scope:
                 async with self._mapped_errors(sandbox, 'Command could not run in the workspace'):
                     process = await sandbox.exec.aio(
                         *argv, timeout=deadline, workdir=workdir, env=variables, text=False
                     )
         except TimeoutError as error:
-            if start is None or not start.cancelled_caught:
+            if start_scope is None or not start_scope.cancelled_caught:
                 # The SDK's own `TimeoutError`, a transient failure rather than this deadline.
                 raise
             raise WorkspaceTimeoutError(
@@ -510,18 +499,18 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             asyncio.create_task(wait()),
         )
         result_timeout = (
-            None if deadline is None else max(0.0, server_started_at + deadline - time.monotonic()) + _RESULT_GRACE
+            None if deadline is None else max(0.0, exec_started_at + deadline - time.monotonic()) + _RESULT_GRACE
         )
-        collect: anyio.CancelScope | None = None
+        collect_scope: anyio.CancelScope | None = None
         try:
-            with anyio.fail_after(result_timeout) as collect:
+            with anyio.fail_after(result_timeout) as collect_scope:
                 stdout, stderr, exit_code = await asyncio.gather(*tasks)
         except BaseException as error:
             for task in tasks:
                 task.cancel()
             with anyio.CancelScope(shield=True):
                 await asyncio.gather(*tasks, return_exceptions=True)
-            if isinstance(error, TimeoutError) and collect is not None and collect.cancelled_caught:
+            if isinstance(error, TimeoutError) and collect_scope is not None and collect_scope.cancelled_caught:
 
                 def captured(task: asyncio.Task[str]) -> str:
                     if task.cancelled() or task.exception() is not None:
@@ -539,7 +528,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                 raise mapped from error
             raise
 
-        elapsed = exited_at - server_started_at
+        elapsed = exited_at - exec_started_at
         if deadline is not None and (
             exit_code == _CLIENT_DEADLINE_EXIT or (exit_code == _SIGKILL_EXIT and elapsed >= deadline)
         ):
