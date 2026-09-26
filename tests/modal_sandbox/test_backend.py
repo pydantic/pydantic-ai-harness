@@ -25,6 +25,14 @@ from .fake_modal import FakeImage, FakeModal, FileInfo
 pytestmark = pytest.mark.anyio(backends=['asyncio'])
 
 
+def test_modal_guides_describe_best_effort_stop() -> None:
+    root = Path(__file__).resolve().parents[2]
+    for guide in (root / 'docs/modal-sandbox.md', root / 'pydantic_ai_harness/modal_sandbox/README.md'):
+        text = guide.read_text()
+        assert 'What a timeout stops' in text
+        assert "Modal can't stop a command" not in text
+
+
 async def started(**settings: Any) -> ModalSandboxBackend:
     backend = ModalSandboxBackend(**settings)
     await backend.get_client()

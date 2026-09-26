@@ -79,7 +79,7 @@ async def run_python(ctx: RunContext, code: str) -> str:
 
 See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for more.
 
-Modal can't stop a command once it starts: cancelling a run stops waiting, but the command runs on until its timeout, or until the sandbox ends if it has none. `Shell` sets a 30-second timeout for you; in your own tools, pass a `timeout`, as above.
+Cancellation and command deadlines attempt to stop the foreground command without ending the sandbox; see [What a timeout stops](#what-a-timeout-stops) for the best-effort caveat. `Shell` sets a 30-second timeout; in your own tools, pass a `timeout`, as above.
 
 If only your own tools use the sandbox, pass `ModalSandbox(warn_if_no_tools=False)` to silence the missing-tools warning.
 
