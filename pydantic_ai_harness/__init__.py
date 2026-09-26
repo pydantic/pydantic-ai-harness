@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from .tool_output_limits import ToolOutputLimits
     from .trajectory_judge import TrajectoryJudge
     from .warn_on_cache_busts import WarnOnCacheBusts
+    from .xberg import Xberg
     from .youdotcom import YouResearch, YouSearch
 
 __all__ = [
@@ -126,6 +127,7 @@ __all__ = [
     'TrajectoryJudge',
     'WarnNearLimits',
     'WarnOnCacheBusts',
+    'Xberg',
     'YouResearch',
     'YouSearch',
 ]
@@ -178,6 +180,7 @@ _CAPABILITY_EXPORTS = {
     'TrajectoryJudge': 'trajectory_judge',
     'WarnNearLimits': 'compaction',
     'WarnOnCacheBusts': 'warn_on_cache_busts',
+    'Xberg': 'xberg',
     'YouResearch': 'youdotcom',
     'YouSearch': 'youdotcom',
 }

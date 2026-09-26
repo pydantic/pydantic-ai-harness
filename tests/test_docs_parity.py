@@ -170,6 +170,7 @@ _CAPABILITY_PAGE_META = {
     'pylon.md': ('pylon', 'Pylon'),
     'stackone.md': ('stackone', 'StackOne'),
     'slack.md': ('slack', 'Slack'),
+    'xberg.md': ('xberg', 'Xberg'),
     'acp.md': ('experimental/acp', 'ACP (Agent Client Protocol)'),
 }
 
