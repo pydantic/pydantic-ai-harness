@@ -34,13 +34,15 @@ command, filesystem, or error handling.
 
 from __future__ import annotations
 
+# Native Task.cancel can pierce AnyIO shields; lifecycle and session setup need
+# detached asyncio tasks to record accepted sandboxes and finish cleanup.
 import asyncio
 import logging
 import math
 import posixpath
 import shlex
 import uuid
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn
@@ -165,35 +167,65 @@ class _DaytonaProcess:
     stdout: list[str]
     stderr: list[str]
     marker: str
-    _logs: asyncio.Task[None]
-    _ended: asyncio.Event
+    _ended: anyio.Event
+    _on_stdout: Callable[[str], None]
+    _on_stderr: Callable[[str], None]
 
     async def wait(self) -> CommandResult:
-        marker_waiter = asyncio.create_task(self._ended.wait())
+        logs_finished = anyio.Event()
+        logs_error: list[Exception] = []
+        failure: Exception | None = None
+        exit_code: int | None = None
+        follow_closed_at: float | None = None
+
+        async def read_logs() -> None:
+            try:
+                await self._process.get_session_command_logs_async(
+                    self._session_id, self._command_id, self._on_stdout, self._on_stderr
+                )
+            except Exception as error:
+                logs_error.append(error)
+            finally:
+                logs_finished.set()
+
         try:
-            while True:
-                done, _ = await asyncio.wait(
-                    (self._logs, marker_waiter), timeout=0.2, return_when=asyncio.FIRST_COMPLETED
-                )
-                if self._logs in done:
-                    await self._logs  # preserve stream errors even if the websocket closed early
-                # The real follow websocket may withhold even the wrapper's markers until a
-                # detached child closes its inherited descriptors; status is authoritative.
-                command = await self._process.get_session_command(
-                    self._session_id, self._command_id, request_timeout=_REQUEST_TIMEOUT
-                )
-                if command.exit_code is not None or self._logs in done:
-                    break
-                if marker_waiter in done:
-                    await anyio.sleep(0.1)
-            if not self._logs.done():
-                self._logs.cancel()
-                await asyncio.gather(self._logs, return_exceptions=True)
+            # The follow reader belongs to this wait: status errors and cancellation must
+            # drain it before the command session or its client can be closed.
+            async with anyio.create_task_group() as readers:
+                readers.start_soon(read_logs)
+                try:
+                    try:
+                        while True:
+                            with anyio.move_on_after(0.2):
+                                await self._ended.wait()
+                            if logs_error:
+                                raise logs_error[0]
+                            # The follow websocket may withhold markers while a child holds descriptors;
+                            # the polled command status is authoritative in that case.
+                            command = await self._process.get_session_command(
+                                self._session_id, self._command_id, request_timeout=_REQUEST_TIMEOUT
+                            )
+                            exit_code = command.exit_code
+                            if exit_code is not None:
+                                break
+                            if logs_finished.is_set():
+                                # The SDK can close its follow socket before the status RPC catches
+                                # up; allow a short grace, but do not poll forever on a lost status.
+                                follow_closed_at = follow_closed_at or anyio.current_time()
+                                if anyio.current_time() - follow_closed_at >= 2:
+                                    break
+                                await anyio.sleep(0.1)
+                            elif self._ended.is_set():
+                                await anyio.sleep(0.1)
+                    except Exception as error:
+                        failure = error
+                finally:
+                    readers.cancel_scope.cancel()
+            if failure is not None:
+                raise failure
         except Exception as error:
             await _raise_failure(self._sandbox, error, 'Could not read the command result')
-        finally:
-            marker_waiter.cancel()
-        if command.exit_code is None:
+        if exit_code is None:
             raise WorkspaceError('Daytona closed the command output before reporting an exit status.')
         # The streamed copy is only for partial output on a timeout: SDK 0.198.0's stream
         # demultiplexer misreads a stream prefix split across websocket frames, corrupting output
@@ -205,9 +237,9 @@ class _DaytonaProcess:
         except Exception as error:
             await _raise_failure(self._sandbox, error, 'Could not read the command output')
         if f'{self.marker}-cwd' in (logs.stderr or ''):
-            return CommandResult(exit_code=command.exit_code, stdout='', stderr=f'{self.marker}-cwd')
+            return CommandResult(exit_code=exit_code, stdout='', stderr=f'{self.marker}-cwd')
         return CommandResult(
-            exit_code=command.exit_code,
+            exit_code=exit_code,
             stdout=_until_marker([logs.stdout or ''], self.marker),
             stderr=_until_marker([logs.stderr or ''], self.marker),
         )
@@ -215,9 +247,6 @@ class _DaytonaProcess:
     async def kill(self) -> None:
         """Delete the Daytona process session, which kills its command."""
         await _delete_session(self._process, self._session_id)
-        self._logs.cancel()
-        with anyio.CancelScope(shield=True):
-            await asyncio.gather(self._logs, return_exceptions=True)
 
 
 class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem, SupportsRealpath):
@@ -292,7 +321,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         self._resolved_working_dir: str | None = None
         self._lock = anyio.Lock()
         self._active_runs = 0
-        self._runs_drained = asyncio.Event()
+        self._runs_drained = anyio.Event()
         self._runs_drained.set()
 
     @property
@@ -348,6 +377,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                         self._ref = WorkspaceRef(provider='daytona', id=created.id)
                         return created
 
+                    # Keep the child handle until creation completes even after native cancellation.
                     task = asyncio.create_task(create_and_record())
                     while True:
                         try:
@@ -676,7 +706,8 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             return _until_marker(process.stdout, process.marker), _until_marker(process.stderr, process.marker)
 
         self._active_runs += 1
-        self._runs_drained.clear()
+        if self._active_runs == 1:
+            self._runs_drained = anyio.Event()
         try:
             async with command_deadline(timeout, stop=stop, output=output):
                 try:
@@ -729,7 +760,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                     )
                 stdout: list[str] = []
                 stderr: list[str] = []
-                ended = asyncio.Event()
+                ended = anyio.Event()
 
                 def on_stdout(chunk: str) -> None:
                     stdout.append(chunk)
@@ -741,9 +772,6 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                     if marker in ''.join(stdout) and marker in ''.join(stderr):
                         ended.set()
 
-                logs = asyncio.create_task(
-                    process.get_session_command_logs_async(session_id, response.cmd_id, on_stdout, on_stderr)
-                )
                 return _DaytonaProcess(
                     _process=process,
                     _sandbox=sandbox,
@@ -752,8 +780,9 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                     stdout=stdout,
                     stderr=stderr,
                     marker=marker,
-                    _logs=logs,
                     _ended=ended,
+                    _on_stdout=on_stdout,
+                    _on_stderr=on_stderr,
                 )
             except BaseException as error:
                 # The server may commit create_session before its acknowledgement. The preallocated
@@ -768,6 +797,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                 raise
 
         # Native cancellation bypasses an inline AnyIO shield; let setup settle in its own task.
+        # The setup child owns cleanup of a session accepted before cancellation.
         task = asyncio.create_task(setup())
         cancelled = False
         result: _DaytonaProcess | None = None

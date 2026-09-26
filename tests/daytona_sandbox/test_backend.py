@@ -184,6 +184,27 @@ class TestCommands:
         result = await backend.run(['seq', '1', '2'])
         assert (result.stdout, result.stderr) == ('1\n2\n', '')
 
+    async def test_status_catches_up_after_follow_stream_closes(
+        self, fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = await started()
+        process = fake_daytona.sandboxes[0].process
+        original = process.get_session_command
+        calls = 0
+
+        async def delayed_status(*args: Any, **kwargs: Any) -> Any:
+            nonlocal calls
+            result = await original(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                result.exit_code = None
+            return result
+
+        monkeypatch.setattr(process, 'get_session_command', delayed_status)
+        result = await backend.run(['true'])
+        assert result.exit_code == 0
+        assert calls >= 2
+
     async def test_completed_markers_end_a_follow_stream_left_open(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         sandbox = fake_daytona.sandboxes[0]

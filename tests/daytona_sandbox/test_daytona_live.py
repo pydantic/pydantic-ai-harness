@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -67,13 +67,34 @@ async def client() -> AsyncIterator[daytona.AsyncDaytona]:
         yield client
 
 
+@pytest.fixture(autouse=True)
+def record_created_sandboxes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record every accepted create, including sandboxes started by documentation examples."""
+    original = daytona.AsyncDaytona.create
+
+    async def create(
+        client: daytona.AsyncDaytona,
+        params: daytona.CreateSandboxFromSnapshotParams | daytona.CreateSandboxFromImageParams | None = None,
+        *,
+        timeout: float = 60,
+        on_snapshot_create_logs: Callable[[str], None] | None = None,
+    ) -> daytona.AsyncSandbox:
+        if isinstance(params, daytona.CreateSandboxFromSnapshotParams):
+            native = await original(client, params, timeout=timeout)
+        else:
+            native = await original(client, params, timeout=timeout, on_snapshot_create_logs=on_snapshot_create_logs)
+        with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as log:
+            log.write(f'anyio-daytona daytona {native.id}\n')
+        return native
+
+    monkeypatch.setattr(daytona.AsyncDaytona, 'create', create)
+
+
 @asynccontextmanager
 async def _owned(client: daytona.AsyncDaytona) -> AsyncGenerator[DaytonaSandboxBackend]:
     """Create a sandbox and delete it on the way out, even when the test deleted it already."""
     backend = DaytonaSandboxBackend(client=client, auto_stop_interval=LIVE_AUTO_STOP_INTERVAL)
     native = await backend.get_client()
-    with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as log:
-        log.write(f'daytona-adopt daytona {native.id}\n')
     try:
         yield backend
     finally:
