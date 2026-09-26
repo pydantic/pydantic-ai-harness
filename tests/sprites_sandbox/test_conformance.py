@@ -38,6 +38,11 @@ class TestFakeSpritesSandboxBackend(WorkspaceBackendSuite):
         return SpritesSandboxBackend()
 
     @pytest.fixture
+    def can_detect_exit_with_inherited_output_pipes(self) -> bool:
+        # The Sprite exec socket withholds EXIT until descendants close inherited pipes.
+        return False
+
+    @pytest.fixture
     def attach_backend(self) -> Callable[[WorkspaceRef], WorkspaceBackend]:
         return _attach
 
