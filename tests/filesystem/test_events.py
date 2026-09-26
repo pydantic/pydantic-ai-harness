@@ -351,7 +351,7 @@ class TestFileSystemEvents:
 
         searched = [event for event in events if isinstance(event, FilesSearchedEvent)]
         assert [(event.match_count, event.truncated) for event in searched] == [(2, True)]
-        assert 'truncated at 2 matches' in _tool_result(events)
+        assert f'truncated at 2 {"lines" if tool_name == "search_files" else "matches"}' in _tool_result(events)
 
     @pytest.mark.parametrize(
         ('tool_name', 'json_args'),
