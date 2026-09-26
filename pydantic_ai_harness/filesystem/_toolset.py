@@ -30,6 +30,7 @@ from pydantic_ai_harness._events import event_ctx
 from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored, warn_argument_renamed
 from pydantic_ai_harness._workspace import raise_tool_failure, supports_commands, workspace_path
 from pydantic_ai_harness.filesystem._changes import Change
+from pydantic_ai_harness.filesystem._command_search import run_posix_search
 from pydantic_ai_harness.filesystem._events import (
     MAX_DIFF_SOURCE_CHARS,
     DirectoryCreatedEvent,
@@ -1348,9 +1349,20 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             )
         except RipgrepMissing:
             scope.lacks_ripgrep = True
-            # Like ripgrep's, a glob without a `/` matches a file name at any depth.
-            pattern = '**' if glob is None else glob if '/' in glob else f'**/{glob}'
-            return await self._find_files(scope, ctx, pattern, path=path, files_only=True)
+            # File-only workspaces retain the bounded walk; command workspaces scan in situ.
+            if not supports_commands(scope.workspace):
+                pattern = '**' if glob is None else glob if '/' in glob else f'**/{glob}'
+                return await self._find_files(scope, ctx, pattern, path=path, files_only=True)
+            results, capped = await run_posix_search(
+                scope.workspace,
+                cwd=resolved,
+                limit=self._max_find_results,
+                accept=lambda record: (
+                    self._ripgrep_entry(scope, resolved, record)
+                    if glob is None or fnmatch.fnmatch(posixpath.normpath(record.path), glob)
+                    else None
+                ),
+            )
         if ctx is not None:
             await ctx.emit(
                 self._searched(scope, resolved, glob or '', search='find', match_count=len(results), truncated=capped)
@@ -1481,9 +1493,25 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             scope.lacks_ripgrep = True
             if file_type is not None:
                 raise ValueError('`file_type` needs ripgrep, which the workspace lacks; use `glob` instead.')
-            regex = re.escape(pattern) if literal else pattern
-            return await self._search_files(
-                scope, ctx, f'(?i){regex}' if ignore_case else regex, path=path, include_glob=glob
+            if not supports_commands(scope.workspace):
+                regex = re.escape(pattern) if literal else pattern
+                return await self._search_files(
+                    scope, ctx, f'(?i){regex}' if ignore_case else regex, path=path, include_glob=glob
+                )
+            results, capped = await run_posix_search(
+                scope.workspace,
+                cwd=cwd,
+                target=target,
+                pattern=pattern,
+                literal=literal,
+                ignore_case=ignore_case,
+                context=context,
+                limit=self._max_search_results,
+                accept=lambda record: (
+                    self._match_line(scope, cwd, record)
+                    if glob is None or fnmatch.fnmatch(posixpath.normpath(record.path), glob)
+                    else None
+                ),
             )
         if ctx is not None:
             await ctx.emit(

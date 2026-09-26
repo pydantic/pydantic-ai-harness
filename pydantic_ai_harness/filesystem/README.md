@@ -57,7 +57,7 @@ so they are left out when it can't run commands; `search_files` and
 | `list_files` | Opt-in, ripgrep-backed: files under a directory, recursively, sorted by path, with an optional `glob`. |
 | `grep` | Opt-in, ripgrep-backed: content search with `glob`, `file_type`, `ignore_case`, `literal`, and `context` (0 to 20) options; a `path` may name a file or a directory. |
 
-For remote workspaces, use the file tools (`grep`, `find_files`, `read_file`) rather than `cat` through a shell. Install `rg` and `git` in the sandbox image for fast searches; installing `rg` on the agent host does not install it in a remote workspace. For large or generated trees, use Shell with `rg -n 'pattern' path` and cap its output. Without `rg`, searches walk files using many remote calls; filesystem-only backends use this slower, bounded path. Check ignore and hidden-file handling on the fallback.
+For remote workspaces, use the file tools (`grep`, `find_files`, `read_file`) rather than `cat` through a shell. Install `rg` and `git` in the sandbox image for fast searches; installing `rg` on the agent host does not install it in a remote workspace. For large or generated trees, use Shell with `rg -n 'pattern' path` and cap its output. Without `rg`, command-capable POSIX workspaces use one in-sandbox git/grep/find command for `grep` and `list_files`; filesystem-only backends use slower, bounded file walks. Git repositories honor `.gitignore`; non-git directories do not honor `.ignore` on this fallback.
 
 ### Tool selection and the ripgrep tools
 
@@ -65,8 +65,7 @@ For remote workspaces, use the file tools (`grep`, `find_files`, `read_file`) ra
 `DEFAULT_TOOL_NAMES`, is the eight tools that need only the workspace's
 filesystem. `list_files` and `grep` run the `rg` executable inside the
 workspace when it is on its `PATH`, so they are opt-in by name. The
-`coder` extra installs `rg` for a local workspace. Without `rg`, both walk the
-files instead, without ignore files or `grep`'s `context` and `file_type`.
+`coder` extra installs `rg` for a local workspace. Without `rg`, both use an in-workspace POSIX command. The fallback lacks ripgrep `file_type` support and some ignore-file rules; `search_files` and `find_files` remain available for filesystem-only workspaces.
 
 ```python
 from pydantic_ai_harness import FileSystem
