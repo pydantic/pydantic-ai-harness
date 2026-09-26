@@ -398,6 +398,7 @@ class FakeSandbox:
         self.object_id = object_id
         self.name = name
         self.exec_calls: list[ExecCall] = []
+        self.start_scripts: list[str] = []
         self.exec = _HangingExec(self._exec) if control.exec_hangs else _AioCallable(self._exec)
         self.poll = _AioCallable(self._poll)
         # Filesystem state the tests read and write.
@@ -445,6 +446,7 @@ class FakeSandbox:
         # The fake host lacks Linux `setsid`; emulate the wrapper while preserving command
         # records for tests of the public argv contract.
         if argv[:4] == ['setsid', '-w', 'sh', '-c']:
+            self.start_scripts.append(argv[4])
             argv = argv[8:]
         self.exec_calls.append(ExecCall(argv=argv, timeout=timeout, text=text, workdir=workdir, env=env))
         if self.shutting_down:
@@ -475,6 +477,7 @@ class FakeSandbox:
         argv = list(args)
         stopping = argv[:4] == ['sh', '-c', argv[2] if len(argv) > 2 else '', 'modal-stop']
         if argv[:4] == ['setsid', '-w', 'sh', '-c']:
+            self.start_scripts.append(argv[4])
             argv = argv[8:]
         self.exec_calls.append(ExecCall(argv=argv, timeout=timeout, text=text, workdir=workdir, env=env))
         if stopping:

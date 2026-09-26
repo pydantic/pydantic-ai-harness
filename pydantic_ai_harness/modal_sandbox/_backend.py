@@ -540,7 +540,13 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         # Register a killable group before running user code; a tombstone prevents a late
         # exec-start reply from launching work after its caller has been cancelled.
         # `setsid -w` waits for its child; without -w Modal reports success after the fork.
-        start_script = 'test ! -e "$1" || exit 143; echo $$ > "$2"; test ! -e "$1" || exit 143; shift 2; exec "$@"'
+        # Keep the group leader alive while the child runs, so it can remove its marker
+        # after completion. A cancelled late start still sees the tombstone before user code.
+        start_script = (
+            'test ! -e "$1" || exit 143; pid_file=$2; echo $$ > "$pid_file"; '
+            'if test -e "$1"; then rm -f "$pid_file"; exit 143; fi; '
+            'shift 2; "$@" </dev/null; status=$?; rm -f "$pid_file"; exit "$status"'
+        )
         wrapped = ['setsid', '-w', 'sh', '-c', start_script, 'modal-command', cancel_file, pid_file, *argv]
         # dash's builtin kill rejects `--`; the negative PID addresses the group. Give TERM
         # a short grace period, then KILL survivors (including TERM-ignoring descendants).

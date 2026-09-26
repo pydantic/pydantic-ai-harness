@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -261,6 +262,14 @@ class TestRun:
         )
         assert not sandbox.shutting_down
         assert backend.ref == WorkspaceRef(provider='modal', id=sandbox.object_id)
+
+    async def test_successful_command_removes_pid_marker(self, fake_modal: FakeModal, tmp_path: Path) -> None:
+        backend = await started()
+        await backend.run(['true'])
+        script = fake_modal.sandboxes[0].start_scripts[-1]
+        marker = tmp_path / 'pid'
+        subprocess.run(['sh', '-c', script, 'modal-command', str(tmp_path / 'cancel'), str(marker), 'true'], check=True)
+        assert not marker.exists()
 
     async def test_stop_uses_stable_directory_after_command_cwd_is_removed(self, fake_modal: FakeModal) -> None:
         fake_modal.wait_hangs = True
