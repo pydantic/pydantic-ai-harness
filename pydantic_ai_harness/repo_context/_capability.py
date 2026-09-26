@@ -136,6 +136,9 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     _resolved_workspace_dir: Path | None = field(default=None, init=False, repr=False, compare=False)
     """The workspace's working directory for this run."""
 
+    _toolset: RepoContextToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
+    """The one inventory toolset, shared with every per-run copy so durable execution sees the leaf it registered."""
+
     _sniff_traversal_tools: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -194,7 +197,11 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         """The asset-inventory toolset, or `None` when the tool is disabled."""
         if not self.expose_inventory_tool:
             return None
-        return RepoContextToolset[AgentDepsT](self.asset_roots, self.inventory_tool_name)
+        if self._toolset is None:
+            self._toolset = RepoContextToolset[AgentDepsT](
+                self.asset_roots, self.inventory_tool_name, id=self.id or 'repo_context'
+            )
+        return self._toolset
 
     async def after_tool_execute(
         self,

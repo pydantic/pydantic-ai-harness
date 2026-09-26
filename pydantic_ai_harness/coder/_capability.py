@@ -82,7 +82,10 @@ class Coder(CombinedCapability[AgentDepsT]):
             )
         capabilities: list[AbstractCapability[AgentDepsT]] = [
             RequireWorkspace[AgentDepsT]('Coder'),
-            Capability[AgentDepsT](instructions=INSTRUCTIONS + ('\n' + instructions if instructions else '')),
+            # The id also names its (empty) function toolset, which durable execution requires.
+            Capability[AgentDepsT](
+                id='coder_instructions', instructions=INSTRUCTIONS + ('\n' + instructions if instructions else '')
+            ),
             _file_system(unrestricted=unrestricted_filesystem),
             Shell[AgentDepsT](
                 denied_commands=[],

@@ -40,7 +40,7 @@ agent = Agent(
 agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caught.')
 ```
 
-File paths resolve from the workspace's working directory, and commands start there. To work in an isolated cloud machine instead, swap `LocalWorkspace` for a sandbox capability (Modal, E2B, Daytona, or Sprites); nothing else changes. Commands run without an allowlist, and the file tools' path limits don't apply to them.
+File paths resolve from the workspace's working directory, and commands start there. To work in an isolated cloud machine instead, swap `LocalWorkspace` for a sandbox capability (Modal, E2B, or Sprites); nothing else changes. Commands run without an allowlist, and the file tools' path limits don't apply to them.
 
 [`agent.to_cli_sync()`](https://pydantic.dev/docs/ai/cli/) and [`agent.to_web()`](https://pydantic.dev/docs/ai/web/) use the same workspace.
 
@@ -176,6 +176,13 @@ intent. It does not supply a schema to the repair library or bypass exact edit m
 Each attempt emits a `repair_tool_arguments` span through `ctx.tracer`, without arguments or file
 contents. Other Coder operations rely on core tool spans and on the events its `FileSystem` and `Shell`
 capabilities emit.
+
+## Durable execution
+
+`Coder` works under DBOS, Temporal and Prefect durable execution. Under Temporal its tools run
+in activities, which cannot reach the run's event stream yet ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)), so
+they emit no `FileSystem` or `Shell` events there and a `FileChangeRequestEvent` listener cannot
+refuse a change.
 
 ## Upgrading
 

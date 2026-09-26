@@ -286,6 +286,15 @@ Pass `custom_capability_types` so the spec loader knows how to instantiate
 `Shell`, and attach a workspace to the run (`workspace=` on the run method, or a
 workspace capability in Python).
 
+## Durable execution
+
+`Shell` works under DBOS, Temporal and Prefect durable execution, with these limits:
+
+- Under Temporal, the `shell` tool emits no command events: tools run in activities, which cannot
+  reach the run's event stream yet ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
+- `persist_cwd=True` fails under Prefect, and under Temporal the directory a `cd` moved to carries
+  over to later runs on the same worker.
+
 ## Further reading
 
 - [Pydantic AI capabilities](https://ai.pydantic.dev/capabilities/)

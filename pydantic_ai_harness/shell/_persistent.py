@@ -18,6 +18,7 @@ import anyio
 from pydantic_ai import ModelRetry, RunContext
 from pydantic_ai.tools import AgentDepsT
 
+from pydantic_ai_harness._events import event_ctx
 from pydantic_ai_harness.shell._events import CommandFinishedEvent, CommandOutputEvent, CommandStartedEvent
 from pydantic_ai_harness.shell._jobs import CONTROL_TIMEOUT, POLL_MAX, POLL_MIN, Job
 
@@ -50,14 +51,15 @@ async def _count_lines(job: Job) -> int | None:
 class _CommandOutput(Generic[AgentDepsT]):
     """Emit at most `_OUTPUT_TAIL_BYTES` of the log as events, decoded incrementally."""
 
-    def __init__(self, job: Job, ctx: RunContext[AgentDepsT]) -> None:
+    def __init__(self, job: Job, ctx: RunContext[AgentDepsT] | None) -> None:
         self.job = job
+        # `None` where events cannot reach the run's event stream: then nothing is read or emitted.
         self.ctx = ctx
         self.offset = 0
         self.decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
 
     async def emit(self) -> bool:
-        if self.offset >= _OUTPUT_TAIL_BYTES:
+        if self.ctx is None or self.offset >= _OUTPUT_TAIL_BYTES:
             return False
         chunk = await self.job.read(
             self.job.output_path, self.offset, min(_EVENT_CHUNK_BYTES, _OUTPUT_TAIL_BYTES - self.offset)
@@ -72,6 +74,8 @@ class _CommandOutput(Generic[AgentDepsT]):
             pass
 
     async def finish(self) -> None:
+        if self.ctx is None:
+            return
         tail = self.decoder.decode(b'', final=True)
         if tail:
             await self.ctx.emit(CommandOutputEvent(text=tail))
@@ -105,10 +109,11 @@ async def run_persistent_command(
     if not 0 < timeout <= MAX_FOREGROUND_WAIT:
         raise ModelRetry(f'timeout must be greater than zero and at most {MAX_FOREGROUND_WAIT:g} seconds.')
     job = await Job.launch(ctx.workspace, command, base=base, cwd=cwd, env=env, combined=True)
-    output = _CommandOutput(job, ctx)
+    output = _CommandOutput(job, event_ctx(ctx))
 
     try:
-        await ctx.emit(CommandStartedEvent(tool_call_id=ctx.tool_call_id, command=command, pid=job.pid))
+        if output.ctx is not None:
+            await output.ctx.emit(CommandStartedEvent(tool_call_id=ctx.tool_call_id, command=command, pid=job.pid))
         if mode == 'foreground':
             interval = POLL_MIN
             with anyio.move_on_after(timeout):

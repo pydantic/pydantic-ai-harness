@@ -36,7 +36,6 @@ jobs:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
       E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
-      DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
       SPRITE_TOKEN: ${{ secrets.SPRITE_TOKEN }}
 
   report:
