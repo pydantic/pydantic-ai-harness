@@ -541,11 +541,15 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             try:
                 await sandbox.fs.upload_file(data, staged, timeout=_REQUEST_TIMEOUT)
                 command = (
+                    f'if [ -e {shlex.quote(destination)} ] && [ ! -w {shlex.quote(destination)} ]; then '
+                    'echo Permission denied >&2; exit 13; fi; '
                     f'if [ -e {shlex.quote(destination)} ]; then '
                     f'chmod --reference={shlex.quote(destination)} -- {shlex.quote(staged)}; fi && '
                     f'mv -fT -- {shlex.quote(staged)} {shlex.quote(destination)}'
                 )
                 result = await sandbox.process.exec(command, timeout=_REQUEST_TIMEOUT)
+                if result.exit_code == 13:
+                    raise PermissionError(f'Permission denied in the Daytona sandbox: {path!r}')
                 if result.exit_code != 0:
                     raise WorkspaceError(f'Could not replace {path!r}: {result.result}')
             except BaseException:

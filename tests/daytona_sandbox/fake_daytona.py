@@ -275,6 +275,8 @@ class _HostProcess(FakeProcess):
             return SimpleNamespace(result=f'{resolved}\n', exit_code=0)
         if command.startswith('if [ -e '):
             source, destination = shlex.split(command)[-2:]
+            if Path(destination).exists() and not os.access(destination, os.W_OK):
+                return SimpleNamespace(result='Permission denied', exit_code=13)
             if Path(destination).exists():
                 os.chmod(source, Path(destination).stat().st_mode)
             os.replace(source, destination)
