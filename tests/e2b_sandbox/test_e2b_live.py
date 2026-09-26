@@ -29,11 +29,13 @@ Run locally:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 
 import anyio
+import e2b
 import pytest
 from pydantic_ai.workspaces import Workspace, WorkspaceTimeoutError, WorkspaceUnavailableError
 from pytest_examples import CodeExample
@@ -61,7 +63,7 @@ async def _owned(**settings: object) -> AsyncGenerator[E2BSandboxBackend]:
     native = await backend.get_client()
     # Keep an audit record before using the live sandbox, even if the test fails.
     with open('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log', 'a') as refs:
-        refs.write(f'e2b e2b {native.sandbox_id}\n')
+        refs.write(f'e2b-r e2b {native.sandbox_id}\n')
     try:
         yield backend
     finally:
@@ -135,6 +137,40 @@ class TestRealExecution:
             await sandbox.run(f'(sleep 3; touch {marker}) & sleep 30', shell=True, timeout=1)
         await anyio.sleep(5)
         assert not await sandbox.exists(marker)
+
+    async def test_cancel_before_remote_start_fences_user_command(
+        self, sandbox: E2BSandboxBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        native = await sandbox.get_client()
+        original = native.commands.run
+        entered = anyio.Event()
+        release = anyio.Event()
+        launches: list[str] = []
+
+        async def delayed(cmd: str, **kwargs: object) -> object:
+            if cmd.startswith('setsid sh -c '):
+                launches.append(cmd)
+                entered.set()
+                await release.wait()
+            return await original(cmd, **kwargs)  # type: ignore[arg-type]
+
+        marker = f'/tmp/{_unique("late-start")}'
+        monkeypatch.setattr(native.commands, 'run', delayed)
+        task = asyncio.create_task(sandbox.run(f'touch {marker}', shell=True))
+        try:
+            await entered.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            release.set()
+            monkeypatch.setattr(native.commands, 'run', original)
+            late = await original(launches[0], background=True, timeout=0)
+            with pytest.raises(e2b.CommandExitException):
+                await late.wait()
+            assert not await sandbox.exists(marker)
+        finally:
+            release.set()
+            monkeypatch.setattr(native.commands, 'run', original)
 
     async def test_a_foreground_group_child_is_stopped(self, sandbox: E2BSandboxBackend) -> None:
         """The deadline stops children that remain in the foreground process group."""
