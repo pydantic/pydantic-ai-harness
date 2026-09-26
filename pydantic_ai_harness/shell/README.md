@@ -19,10 +19,13 @@ configurable allow/deny lists and background processes the model can check and
 stop by ID.
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import Shell
 
+Path('./workspace').mkdir(exist_ok=True)
 agent = Agent(
     'anthropic:claude-opus-5-5',
     capabilities=[
