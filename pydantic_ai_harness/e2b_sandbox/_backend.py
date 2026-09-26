@@ -81,15 +81,6 @@ _INTERNAL_EXEC_TIMEOUT = 10
 _SDK_STREAM_UNBOUNDED = 0
 
 
-def _command_line(command: WorkspaceCommand, shell: bool) -> str:
-    """The single string E2B runs: `commands.run` takes only a string, which it hands to `/bin/bash -l -c`.
-
-    The argv is joined with `shlex.join` so each element stays one word. A `shell=True` string
-    becomes `/bin/sh -c <string>`, so it runs under `sh` as on every other backend.
-    """
-    return shlex.join(command_argv(command, shell))
-
-
 def _path_error(error: Exception, path: str) -> OSError | None:
     """The builtin path error an untyped envd failure describes, or `None` if it is not one."""
     message = str(error).lower()
@@ -161,9 +152,6 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     expires or when the caller is cancelled, including while the command is still starting.
     That kill signals the command's own process; a
     process the command started in the background outlives it until the sandbox is torn down.
-
-    The protocol is structural, but subclassing it here makes a signature drift fail the type
-    check on this class instead of at a distant workspace call.
 
     Args:
         workspace: A live `e2b.AsyncSandbox` you already have. Whoever created it owns killing it.
@@ -237,16 +225,18 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
 
     @asynccontextmanager
     async def _sdk_errors(self, sandbox_id: str | None, context: str, path: str | None = None) -> AsyncGenerator[None]:
-        """Raise E2B's exceptions as the protocol's typed failures; see `_translate`."""
+        """Raise E2B's exceptions as the protocol's typed failures; see `_translate_sdk_error`."""
         try:
             yield
         except Exception as error:
-            translated = await self._translate(error, context, path, sandbox_id)
+            translated = await self._translate_sdk_error(error, context, path, sandbox_id)
             if translated is error:
                 raise
             raise translated from error
 
-    async def _translate(self, error: Exception, context: str, path: str | None, sandbox_id: str | None) -> Exception:
+    async def _translate_sdk_error(
+        self, error: Exception, context: str, path: str | None, sandbox_id: str | None
+    ) -> Exception:
         """Map one E2B exception onto the protocol's typed failures, or return it unchanged.
 
         Rejected credentials and a gone sandbox end the run. E2B types an unanswered envd request
@@ -352,7 +342,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             'the E2B control plane may be unreachable.'
         )
 
-    async def _attach(self, id: str) -> e2b.AsyncSandbox:
+    async def _attach(self, sandbox_id: str) -> e2b.AsyncSandbox:
         """Attach to an E2B sandbox that already exists, without taking over its lifecycle.
 
         E2B resumes a paused sandbox on connect, so attaching to one that was paused restarts
@@ -361,19 +351,19 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         must be told they are gone, not handed an empty workspace. A lifetime over the plan's
         limit is refused like on create, as `WorkspaceUnavailableError`.
         """
-        context = f'Could not connect to E2B sandbox {id!r}'
-        async with self._sdk_errors(id, context):
+        context = f'Could not connect to E2B sandbox {sandbox_id!r}'
+        async with self._sdk_errors(sandbox_id, context):
             try:
                 # Without `timeout`, a resumed sandbox gets E2B's 300 seconds; a running one keeps
                 # the longer of its current and the given lifetime.
-                return await e2b.AsyncSandbox.connect(id, timeout=self._sandbox_timeout)
+                return await e2b.AsyncSandbox.connect(sandbox_id, timeout=self._sandbox_timeout)
             except e2b.SandboxException as error:
                 if type(error) is not e2b.SandboxException or not _is_lifetime_refusal(error):
                     raise
                 raise WorkspaceUnavailableError(_refused_message(context, error)) from error
 
     async def working_dir(self) -> str:
-        """The sandbox's default working directory (absolute POSIX path)."""
+        """The canonical absolute directory commands start in."""
         if self._resolved_working_dir is None:
             result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.removesuffix('\n')
@@ -396,7 +386,9 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         timeout: float | None = None,
     ) -> CommandResult:
         """Run a command, killing it on timeout, cancellation, or a failed result read."""
-        line = _command_line(command, shell)
+        # `commands.run` takes only a string, which E2B hands to `/bin/bash -l -c`; `shlex.join`
+        # keeps each argv element one word, and a `shell=True` string runs under `/bin/sh -c`.
+        line = shlex.join(command_argv(command, shell))
         cwd = absolute_path('cwd', cwd)
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
@@ -438,7 +430,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
                     if handle is None
                     else 'Could not read the command result (the command may still be running)'
                 )
-                translated = await self._translate(error, context, None, sandbox.sandbox_id)
+                translated = await self._translate_sdk_error(error, context, None, sandbox.sandbox_id)
                 if translated is not error:
                     raise translated from error
             raise
