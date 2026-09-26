@@ -90,6 +90,10 @@ class TestConformance:
         assert await backend.get_client() is sandbox
         assert fake_daytona.sandboxes == [sandbox]
 
+    async def test_realpath_normalizes_a_path(self, fake_daytona: FakeDaytona) -> None:
+        backend = DaytonaSandboxBackend()
+        assert await backend.realpath('/tmp/../tmp/file') == '/tmp/file'
+
     async def test_run_and_filesystem_protocols(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         assert isinstance(backend, WorkspaceBackend)

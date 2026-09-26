@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import posixpath
+import shlex
 import shutil
 import signal
 import subprocess
@@ -60,6 +62,10 @@ class FakeProcess:
             if self.owner.workdir_error is not None:
                 raise self.owner.workdir_error
             return SimpleNamespace(result=(cwd or self.owner.workdir) + '\n', exit_code=0)
+        if command.startswith('realpath -m -- '):
+            target = shlex.split(command)[-1]
+            resolved = posixpath.normpath(posixpath.join(cwd or self.owner.workdir, target))
+            return SimpleNamespace(result=resolved + '\n', exit_code=0)
         assert command.startswith('mkdir -p -- ')
         return SimpleNamespace(result='', exit_code=self.owner.mkdir_exit_code)
 
@@ -243,6 +249,10 @@ class _HostProcess(FakeProcess):
         timeout: int | None = None,
     ) -> SimpleNamespace:
         self.owner.check_alive()
+        if command.startswith('realpath -m -- '):
+            target = shlex.split(command)[-1]
+            resolved = (Path(cwd or self.host_root) / target).resolve(strict=False)
+            return SimpleNamespace(result=f'{resolved}\n', exit_code=0)
         # `exec` reports stdout and stderr combined as `result`.
         done = await anyio.run_process(
             ['sh', '-c', command], cwd=cwd or self.host_root, check=False, stderr=subprocess.STDOUT

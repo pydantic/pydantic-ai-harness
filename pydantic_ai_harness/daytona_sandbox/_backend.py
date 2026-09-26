@@ -52,6 +52,7 @@ from pydantic_ai.workspaces import (
     FileEntry,
     SupportsCommands,
     SupportsFilesystem,
+    SupportsRealpath,
     WorkspaceBackend,
     WorkspaceError,
     WorkspaceRef,
@@ -191,7 +192,7 @@ class _DaytonaProcess:
             await asyncio.gather(self._logs, return_exceptions=True)
 
 
-class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
+class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem, SupportsRealpath):
     """A [Daytona](https://www.daytona.io) sandbox as a Pydantic AI [`WorkspaceBackend`][pydantic_ai.workspaces.WorkspaceBackend].
 
     Commands and file operations run inside a Daytona sandbox, so the host is never exposed.
@@ -368,6 +369,19 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         self._client = None
         self._sandbox = None
         self._resolved_working_dir = None
+
+    async def realpath(self, path: str) -> str:
+        _check_path(path)
+        sandbox = await self.get_client()
+        try:
+            result = await sandbox.process.exec(
+                f'realpath -m -- {shlex.quote(path)}', cwd=self._working_dir, timeout=_REQUEST_TIMEOUT
+            )
+        except Exception as error:
+            await _raise_failure(sandbox, error, f'Could not resolve {path!r}', path=path)
+        if result.exit_code != 0:
+            raise WorkspaceError(f'Could not resolve {path!r}: {result.result}')
+        return result.result.strip()
 
     async def read_bytes(self, path: str) -> bytes:
         _check_path(path)
