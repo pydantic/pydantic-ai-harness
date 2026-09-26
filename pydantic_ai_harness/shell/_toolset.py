@@ -21,7 +21,7 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset, ToolsetTool
 from pydantic_ai.workspaces import Workspace, WorkspaceTimeoutError
 
 from pydantic_ai_harness._output import truncate_tail
-from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACE, warn_argument_ignored
+from pydantic_ai_harness._warn import SET_WORKING_DIR_ON_THE_WORKSPACE, warn_argument_ignored
 from pydantic_ai_harness._workspace import metadata_dir
 from pydantic_ai_harness.shell._jobs import CONTROL_TIMEOUT, Job
 from pydantic_ai_harness.shell._limits import file_limit_status, limited_script, validate_file_limit
@@ -79,7 +79,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
     ) -> None:
         super().__init__(id=id)
         if cwd is not None:
-            warn_argument_ignored('ShellToolset', 'cwd', WORKING_DIR_IS_THE_WORKSPACE, stacklevel=3)
+            warn_argument_ignored('ShellToolset', 'cwd', SET_WORKING_DIR_ON_THE_WORKSPACE, stacklevel=3)
         # The absolute workspace path `persist_cwd` last recorded; `None` means the working directory.
         self._cwd: str | None = None
         self._allowed_commands = list(allowed_commands)
