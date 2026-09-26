@@ -369,6 +369,48 @@ workspace mutations run as durable activities. Read and post-write events from t
 in activities are not forwarded to workflow listeners yet
 ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
 
+For example, a Temporal worker can approve file changes in its workflow while the
+workspace operations run durably:
+
+```python
+import asyncio
+
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, PydanticAIWorkflow, TemporalDurability
+from pydantic_ai_harness.filesystem import FileChangeRequestEvent, FileSystem
+from temporalio import workflow
+from temporalio.client import Client
+from temporalio.worker import Worker
+
+agent = Agent(
+    'openai:gpt-5.2',
+    name='file_worker',
+    capabilities=[LocalWorkspace('.'), FileSystem(), TemporalDurability()],
+)
+
+@agent.on_event(FileChangeRequestEvent)
+async def approve(ctx: RunContext[None], event: FileChangeRequestEvent) -> None:
+    if event.path == 'protected.txt':
+        event.cancel('This file is protected.')
+
+@workflow.defn
+class FileWorkflow(PydanticAIWorkflow):
+    __pydantic_ai_agents__ = [agent]
+
+    @workflow.run
+    async def run(self, prompt: str) -> str:
+        return (await agent.run(prompt)).output
+
+async def main() -> None:
+    client = await Client.connect('localhost:7233', plugins=[PydanticAIPlugin()])
+    async with Worker(client, task_queue='files', workflows=[FileWorkflow]):
+        await asyncio.Event().wait()
+
+if __name__ == '__main__':
+    asyncio.run(main())
+```
+
 ## Further reading
 
 - [Pydantic AI capabilities](https://ai.pydantic.dev/capabilities/)

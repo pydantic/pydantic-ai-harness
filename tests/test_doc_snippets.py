@@ -50,6 +50,19 @@ _ROOT = Path(__file__).parent.parent
 _HARNESS = 'pydantic_ai_harness'
 
 
+def test_durable_file_veto_and_shell_run_state_guidance() -> None:
+    for name in ('coder', 'filesystem'):
+        for page in (f'docs/{name}.md', f'pydantic_ai_harness/{name}/README.md'):
+            text = (_ROOT / page).read_text()
+            assert 'FileChangeRequestEvent' in text
+            assert 'cannot refuse a change' not in text
+    for page in ('docs/shell.md', 'pydantic_ai_harness/shell/README.md'):
+        text = (_ROOT / page).read_text()
+        assert '.pydantic-ai-harness/shell/run-state/' in text
+        assert 'fails under Prefect' not in text
+    assert 'class FileWorkflow(PydanticAIWorkflow)' in (_ROOT / 'docs/filesystem.md').read_text()
+
+
 def test_remote_search_and_shell_output_guidance() -> None:
     for name in ('coder', 'filesystem'):
         for page in (f'docs/{name}.md', f'pydantic_ai_harness/{name}/README.md'):
