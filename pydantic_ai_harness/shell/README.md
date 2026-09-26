@@ -311,6 +311,8 @@ workspace capability in Python).
   reports a pending launch rather than starting a second process. Remove stale job files manually
   after confirming the process has stopped.
 
+Removing a capability while workflows using it are still running changes their replay history. Drain those workflows or use [Temporal worker versioning](https://docs.temporal.io/production-deployment/worker-deployments/worker-versioning) before deploying the change.
+
 ## Further reading
 
 - [Pydantic AI capabilities](https://ai.pydantic.dev/capabilities/)

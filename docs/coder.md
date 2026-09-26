@@ -207,6 +207,8 @@ listeners; file-change requests and write notifications run in the workflow.
 On replay, the workflow invokes file-change approval listeners again; make external listener effects idempotent
 ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
 
+Removing a capability while workflows using it are still running changes their replay history. Drain those workflows or use [Temporal worker versioning](https://docs.temporal.io/production-deployment/worker-deployments/worker-versioning) before deploying the change.
+
 ## Upgrading
 
 This release makes the workspace the single place that decides where an agent works. Removed arguments are still accepted, emit a `HarnessDeprecationWarning` naming the fix, and are ignored.
