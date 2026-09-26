@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import socket
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
@@ -252,13 +251,6 @@ def test_docs_example(example: CodeExample) -> None:
     cleanup work against the real service. A follow-up run, from the message history or a stored ref,
     works in the first run's sandbox.
     """
-    if "Client.connect('localhost:7233'" in example.source:
-        # This example runs a Temporal worker; the provider tier does not provision a dev server.
-        try:
-            with socket.create_connection(('localhost', 7233), timeout=1):
-                pass
-        except OSError:
-            pytest.skip('Temporal dev server is not running on localhost:7233')
     _, runs = run_block(example, cleanup=documented_cleanup(_DOCS_BLOCKS, 'delete_sandbox'))
     assert all(run.used_sandbox for run in runs), runs
     assert len({run.ref for run in runs}) <= 1, runs

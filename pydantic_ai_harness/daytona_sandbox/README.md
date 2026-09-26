@@ -145,6 +145,8 @@ agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(), Coder
 
 A `run(timeout=...)` deadline starts after sandbox acquisition. A FIFO read fails rather than waiting for a writer. Daytona deletes the command session to stop its foreground work, leaving the sandbox available for other commands; a failed deletion is retried for up to two seconds during timeout or cancellation cleanup. `WorkspaceTimeoutError` carries partial stdout and stderr. Cancellation also attempts to stop the session. If Daytona cannot confirm deletion, the command may still be running: inspect or delete the sandbox yourself. `timeout=None` removes the command deadline, not Daytona's idle auto-stop or transport limits.
 
+A background child that inherits stdout or stderr keeps `run()` waiting until that child exits, because Daytona keeps the session command open while its output is held. Redirect background output to a file when starting a long-running job; `Shell.start_command` manages its own output log.
+
 Daytona stages `write_bytes` uploads beside the resolved target before replacing it, preserving an existing file's mode and symlinks; interrupted uploads can leave a temporary sibling after a host kill.
 
 ## Configuration
