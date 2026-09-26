@@ -225,18 +225,16 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
 
     @asynccontextmanager
     async def _sdk_errors(self, sandbox_id: str | None, context: str, path: str | None = None) -> AsyncGenerator[None]:
-        """Raise E2B's exceptions as the protocol's typed failures; see `_translate_sdk_error`."""
+        """Raise E2B's exceptions as the protocol's typed failures; see `_translate`."""
         try:
             yield
         except Exception as error:
-            translated = await self._translate_sdk_error(error, context, path, sandbox_id)
+            translated = await self._translate(error, context, path, sandbox_id)
             if translated is error:
                 raise
             raise translated from error
 
-    async def _translate_sdk_error(
-        self, error: Exception, context: str, path: str | None, sandbox_id: str | None
-    ) -> Exception:
+    async def _translate(self, error: Exception, context: str, path: str | None, sandbox_id: str | None) -> Exception:
         """Map one E2B exception onto the protocol's typed failures, or return it unchanged.
 
         Rejected credentials and a gone sandbox end the run. E2B types an unanswered envd request
@@ -430,7 +428,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
                     if handle is None
                     else 'Could not read the command result (the command may still be running)'
                 )
-                translated = await self._translate_sdk_error(error, context, None, sandbox.sandbox_id)
+                translated = await self._translate(error, context, None, sandbox.sandbox_id)
                 if translated is not error:
                     raise translated from error
             raise
