@@ -156,6 +156,7 @@ agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(working_di
 | `sandbox_timeout` | Seconds a new sandbox lives before Modal stops it. Default: `86_400` (24 hours, Modal's maximum). |
 | `idle_timeout` | Seconds without activity before Modal stops a new sandbox. Default: `None`, no idle limit. |
 | `working_dir` | Absolute directory commands start in and relative paths resolve against. Default: the image's. |
+| `defer_loading` | `defer_loading=True` is unsupported: workspace selection happens at run setup. |
 | `env` | Environment variables every command gets. Nothing from your machine's environment reaches the sandbox. |
 | `warn_if_no_tools` | Warn when the agent has no `Shell` or `FileSystem` tool. Default: `True`. |
 
@@ -180,7 +181,7 @@ The previous `ModalSandbox` registered its own `run_command`, `read_file`, `writ
 | `sandbox_id` | Removed. Use `agent.run(..., workspace=WorkspaceRef(provider='modal', id=sandbox_id))`. |
 | `session`, `ModalSandboxSession` | Removed. Use `agent.run(..., workspace=ModalSandboxBackend(workspace=<modal.Sandbox>))`. |
 | `default_command_timeout` | Removed. Use `Shell(default_timeout=...)`. |
-| `max_command_timeout` | Removed. Use `sandbox_timeout`, which bounds every command. |
+| `max_command_timeout` | Removed. Set a command timeout on `Shell`; `sandbox_timeout` limits the lifetime of a new sandbox and does not apply to attached sandboxes. |
 | `max_output_bytes`, `max_output_lines` | Removed. Use `Shell(max_output_chars=...)` or `ToolOutputLimits`. |
 | `max_read_bytes` | Removed. Use `FileSystem(max_read_lines=..., max_read_chars=...)`. |
 | `instructions` | Removed. Use the agent's `instructions`. |

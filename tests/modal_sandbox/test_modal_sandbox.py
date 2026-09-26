@@ -179,6 +179,14 @@ def test_capability_takes_the_base_class_options_and_the_creation_settings() -> 
     assert capability.get_instructions() is None
 
 
+def test_modal_docs_distinguish_command_timeout_from_sandbox_lifetime() -> None:
+    for path in (Path('docs/modal-sandbox.md'), Path('pydantic_ai_harness/modal_sandbox/README.md')):
+        text = path.read_text()
+        assert 'defer_loading=True' in text
+        assert 'Removed. Use `sandbox_timeout`, which bounds every command.' not in text
+        assert 'does not apply to attached sandboxes' in text
+
+
 def test_modal_coder_examples_explain_eager_creation_and_set_working_dir() -> None:
     for path in (Path('docs/modal-sandbox.md'), Path('pydantic_ai_harness/modal_sandbox/README.md')):
         text = path.read_text()
