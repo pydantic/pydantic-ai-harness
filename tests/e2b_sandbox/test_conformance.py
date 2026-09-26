@@ -54,18 +54,7 @@ class TestLiveE2BSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover - li
     @pytest.fixture(scope='class')
     @classmethod
     def backend(cls) -> Iterator[E2BSandboxBackend]:
-        import e2b  # noqa: PLC0415 - live-only SDK
-
-        class LoggedBackend(E2BSandboxBackend):
-            async def get_client(self) -> e2b.AsyncSandbox:
-                had_ref = self.ref is not None
-                client = await super().get_client()
-                if not had_ref:
-                    with open('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log', 'a') as refs:
-                        refs.write(f'e2b-adopt e2b {client.sandbox_id}\n')
-                return client
-
-        backend = LoggedBackend(sandbox_timeout=600)
+        backend = E2BSandboxBackend(sandbox_timeout=600)
         yield backend
         if backend.ref is not None:
             import e2b  # noqa: PLC0415 - optional extra, absent on slim installs

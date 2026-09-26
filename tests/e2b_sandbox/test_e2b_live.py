@@ -61,9 +61,6 @@ async def _owned(**settings: object) -> AsyncGenerator[E2BSandboxBackend]:
     """Create a workspace and kill its native handle on the way out."""
     backend = E2BSandboxBackend(**settings)  # type: ignore[arg-type]
     native = await backend.get_client()
-    # Keep an audit record before using the live sandbox, even if the test fails.
-    with open('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log', 'a') as refs:
-        refs.write(f'anyio-e2b e2b {native.sandbox_id}\n')
     try:
         yield backend
     finally:
