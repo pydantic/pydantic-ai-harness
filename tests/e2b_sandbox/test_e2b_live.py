@@ -59,6 +59,9 @@ async def _owned(**settings: object) -> AsyncGenerator[E2BSandboxBackend]:
     """Create a workspace and kill its native handle on the way out."""
     backend = E2BSandboxBackend(**settings)  # type: ignore[arg-type]
     native = await backend.get_client()
+    # Keep an audit record before using the live sandbox, even if the test fails.
+    with open('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log', 'a') as refs:
+        refs.write(f'e2b e2b {native.sandbox_id}\n')
     try:
         yield backend
     finally:
@@ -117,6 +120,22 @@ class TestRealExecution:
         assert 'DIAGNOSTIC' in exc_info.value.stdout
         await anyio.sleep(25)
         assert await sandbox.exists(marker) is False
+
+    @pytest.mark.xfail(reason='e2b#6: envd waits for inherited output pipes to close', strict=True)
+    async def test_background_child_does_not_delay_main_process_exit(self, sandbox: E2BSandboxBackend) -> None:
+        """The fake does not model a background child holding the SDK output stream open."""
+        with anyio.fail_after(4):
+            result = await sandbox.run('sleep 7 & echo ready', shell=True, timeout=10)
+        assert result.stdout.startswith('ready')
+
+    @pytest.mark.xfail(reason='e2b#0: SDK kill does not signal the process group', strict=True)
+    async def test_timeout_stops_foreground_descendants(self, sandbox: E2BSandboxBackend) -> None:
+        """Check whether a timed-out foreground shell leaves a child able to mutate the sandbox."""
+        marker = f'/tmp/{_unique("descendant")}'
+        with pytest.raises(WorkspaceTimeoutError):
+            await sandbox.run(f'(sleep 3; touch {marker}) & sleep 30', shell=True, timeout=1)
+        await anyio.sleep(5)
+        assert not await sandbox.exists(marker)
 
     async def test_a_background_child_outlives_the_kill(self, sandbox: E2BSandboxBackend) -> None:
         """Pins the documented limitation that E2B's kill signals the command's own process only.

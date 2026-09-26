@@ -84,6 +84,12 @@ async def run_python(ctx: RunContext, code: str) -> str:
 
 File operations run with elevated privileges in E2B, even when shell commands run as the `user` account. File tools may access paths the shell cannot; do not use Unix permissions alone as a file-tool policy.
 
+A background child that inherits stdout or stderr can keep `run()` waiting for the SDK stream to close after the main command exits. Redirect background output to a file when starting a long-running job; `Shell.start_command` manages its own output log.
+
+### What a timeout stops
+
+On a command deadline or cancellation, E2B stops the command's process ID, not its whole foreground process group. Shell children can continue running and write files after the error. Check for surviving work or kill the sandbox you own when isolation matters; the backend does not destroy a shared sandbox for a single command.
+
 When a command is cancelled during startup, the backend waits up to 10 seconds for E2B to return its process ID, then attempts a bounded per-command stop. If no ID arrives, the command may still be running; retain the sandbox ref to inspect or kill it explicitly.
 
 A command killed by a signal may return `exit_code=-1` in E2B; the SDK does not identify the signal, so this is not converted to `128+signal`.
