@@ -405,11 +405,13 @@ class _HostCommandHandle(FakeCommandHandle):
 
     def close(self) -> None:
         """Stop the process if it still runs and release its output files."""
-        if self.process.poll() is None:
-            self.process.kill()
+        try:
+            if self.process.poll() is None:
+                self.process.kill()
             self.process.wait()
-        self._out.close()
-        self._err.close()
+        finally:
+            self._out.close()
+            self._err.close()
 
     async def wait(self) -> CommandResult:
         while (exit_code := self.process.poll()) is None:
@@ -450,14 +452,20 @@ class _HostCommands(FakeCommands):
         isolated = args[:3] == ['setsid', 'sh', '-c']
         if isolated:
             cmd = f'sh -c {shlex.quote(args[3])}'
-        process = subprocess.Popen(
-            ['/bin/bash', '-c', cmd],
-            start_new_session=isolated,
-            cwd=cwd or self._control.host_root,
-            env={**os.environ, **(envs or {})},
-            stdout=out,
-            stderr=err,
-        )
+        try:
+            process = subprocess.Popen(
+                ['/bin/bash', '-c', cmd],
+                start_new_session=isolated,
+                cwd=cwd or self._control.host_root,
+                env={**os.environ, **(envs or {})},
+                stdout=out,
+                stderr=err,
+            )
+        except BaseException:
+            # No handle exists yet to own these files if spawning fails.
+            out.close()
+            err.close()
+            raise
         handle = _HostCommandHandle(self._control, self._sandbox, process, out, err)
         self.handles.append(handle)
         return handle
@@ -687,6 +695,12 @@ class FakeE2B:
 
     def __post_init__(self) -> None:
         self.module = self._build_module()
+
+    def close(self) -> None:
+        """Reap host commands even when a test leaves the SDK handle unwaited."""
+        for sandbox in self.sandboxes:
+            for handle in sandbox.commands.handles:
+                handle.close()
 
     def new_sandbox(self, id: str) -> FakeSandbox:
         sandbox = FakeSandbox(self, id)

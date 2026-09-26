@@ -7,8 +7,9 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import anyio
 import pytest
@@ -33,7 +34,7 @@ from pydantic_ai.workspaces import (
 
 from pydantic_ai_harness.e2b_sandbox import E2BSandboxBackend
 
-from .fake_e2b import FakeCommandHandle, FakeE2B
+from .fake_e2b import FakeCommandHandle, FakeE2B, _HostCommandHandle
 
 
 def _user_line(launch: str) -> str:
@@ -244,6 +245,38 @@ class TestRun:
         assert shlex.split(launch)[:3] == ['setsid', 'sh', '-c']
         assert 'kill -KILL -' in commands.group_stops[0]
         assert 'pydantic-e2b-pgid-' in launch
+
+    async def test_host_fake_reaps_unfinished_commands_and_closes_output(
+        self, fake_e2b: FakeE2B, tmp_path: Path
+    ) -> None:
+        fake_e2b.host_root = tmp_path
+        sandbox = fake_e2b.new_sandbox('host')
+        handle = await sandbox.commands.run('sleep 30', background=True)
+        assert isinstance(handle, _HostCommandHandle)
+        process = handle.process
+        assert process.poll() is None
+        fake_e2b.close()
+        assert process.poll() is not None
+        assert handle._out.closed and handle._err.closed
+
+    async def test_host_fake_closes_output_when_spawn_fails(
+        self, fake_e2b: FakeE2B, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_e2b.host_root = tmp_path
+        sandbox = fake_e2b.new_sandbox('host')
+        opened: list[IO[bytes]] = []
+        original = tempfile.TemporaryFile
+
+        def track() -> IO[bytes]:
+            stream = original()
+            opened.append(stream)
+            return stream
+
+        monkeypatch.setattr('tests.e2b_sandbox.fake_e2b.tempfile.TemporaryFile', track)
+        with pytest.raises(FileNotFoundError):
+            await sandbox.commands.run('true', background=True, cwd=str(tmp_path / 'missing'))
+        assert len(opened) == 2
+        assert all(stream.closed for stream in opened)
 
     @pytest.mark.parametrize('delay_ack', [False, True])
     async def test_group_stop_prevents_a_real_child_from_writing(

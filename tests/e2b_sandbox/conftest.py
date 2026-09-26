@@ -75,4 +75,8 @@ if _HAS_E2B:  # pragma: no branch - the fixture cannot be defined without its SD
         """Inject a fake `e2b` module and yield its control surface."""
         control = FakeE2B()
         monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend.e2b', control.module)
-        yield control
+        try:
+            yield control
+        finally:
+            # Host-backed SDK fakes can retain background command handles after a timeout.
+            control.close()
