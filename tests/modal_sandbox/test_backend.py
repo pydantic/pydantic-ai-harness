@@ -77,7 +77,7 @@ class TestRun:
         fake_modal.sandboxes[0].directories.add('/srv')
         await backend.run(['env'])
         await backend.run(['env'], cwd='/srv', env={'B': '2'})
-        calls = fake_modal.sandboxes[0].exec_calls
+        calls = [call for call in fake_modal.sandboxes[0].exec_calls if 'command -v setsid' not in ' '.join(call.argv)]
         assert [(call.workdir, call.env) for call in calls] == [
             ('/work', {'A': '1', 'B': '1'}),
             ('/srv', {'A': '1', 'B': '2'}),
@@ -270,6 +270,24 @@ class TestRun:
         )
         assert not sandbox.shutting_down
         assert backend.ref == WorkspaceRef(provider='modal', id=sandbox.object_id)
+
+    async def test_custom_image_with_setsid_uses_group_isolation(self, fake_modal: FakeModal) -> None:
+        backend = await started(image='custom:full')
+        await backend.run(['true'])
+        sandbox = fake_modal.sandboxes[0]
+        assert len(sandbox.start_scripts) == 1
+        assert sum('command -v setsid' in ' '.join(call.argv) for call in sandbox.exec_calls) == 1
+
+    async def test_missing_setsid_uses_direct_exec_and_caches_probe(self, fake_modal: FakeModal) -> None:
+        fake_modal.responder = lambda argv, timeout: (
+            ('', '', 127) if 'command -v setsid' in ' '.join(argv) else ('ok', '', 0)
+        )
+        backend = await started(image='custom:minimal')
+        assert (await backend.run(['echo', 'ok'])).stdout == 'ok'
+        assert (await backend.run(['echo', 'ok'])).stdout == 'ok'
+        calls = fake_modal.sandboxes[0].exec_calls
+        assert sum('command -v setsid' in ' '.join(call.argv) for call in calls) == 1
+        assert not fake_modal.sandboxes[0].start_scripts
 
     async def test_successful_command_removes_pid_marker(self, fake_modal: FakeModal, tmp_path: Path) -> None:
         backend = await started()

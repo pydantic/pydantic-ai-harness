@@ -264,6 +264,9 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         self._lock = anyio.Lock()
         self._acquisition: asyncio.Task[modal.Sandbox] | None = None
         self._create_name: str | None = None
+        # The default Debian image includes setsid; custom and attached images need a probe.
+        self._setsid_available: bool | None = True if image is None and ref is None and workspace is None else None
+        self._setsid_lock = anyio.Lock()
 
     async def get_client(self) -> modal.Sandbox:
         """Return the typed `modal.Sandbox`, creating or attaching to it on first use.
@@ -502,6 +505,22 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             self._resolved_working_dir = printed
         return self._resolved_working_dir
 
+    async def _has_setsid(self, sandbox: modal.Sandbox) -> bool:
+        # Cache the probe across concurrent runs on custom or attached images.
+        async with self._setsid_lock:
+            if self._setsid_available is None:
+                async with self._mapped_errors(sandbox, 'Could not check Modal process isolation'):
+                    probe = await sandbox.exec.aio(
+                        'sh',
+                        '-c',
+                        'command -v setsid >/dev/null 2>&1 && setsid -w true',
+                        timeout=_INTERNAL_EXEC_TIMEOUT,
+                        workdir='/',
+                        text=False,
+                    )
+                    self._setsid_available = await probe.wait.aio() == 0
+            return self._setsid_available
+
     async def run(
         self,
         command: WorkspaceCommand,
@@ -537,6 +556,8 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         token = uuid4().hex
         pid_file = f'/tmp/.pydantic-modal-{token}.pid'
         cancel_file = f'/tmp/.pydantic-modal-{token}.cancel'
+        # Without setsid, only the wrapper leader can be signalled, not its descendants.
+        isolated = await self._has_setsid(sandbox)
         # Register a killable group before running user code; a tombstone prevents a late
         # exec-start reply from launching work after its caller has been cancelled.
         # `setsid -w` waits for its child; without -w Modal reports success after the fork.
@@ -547,15 +568,25 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             'if test -e "$1"; then rm -f "$pid_file"; exit 143; fi; '
             'shift 2; "$@" </dev/null; status=$?; rm -f "$pid_file"; exit "$status"'
         )
-        wrapped = ['setsid', '-w', 'sh', '-c', start_script, 'modal-command', cancel_file, pid_file, *argv]
+        wrapped = [
+            *(['setsid', '-w'] if isolated else []),
+            'sh',
+            '-c',
+            start_script,
+            'modal-command',
+            cancel_file,
+            pid_file,
+            *argv,
+        ]
         # dash's builtin kill rejects `--`; the negative PID addresses the group. Give TERM
         # a short grace period, then KILL survivors (including TERM-ignoring descendants).
+        target = '-"$pid"' if isolated else '"$pid"'
         stop_script = (
             'touch "$1"; if test -f "$2"; then '
-            'pid=$(cat "$2"); kill -TERM -"$pid" 2>/dev/null || true; '
-            'i=0; while kill -0 -"$pid" 2>/dev/null && test "$i" -lt 5; do '
+            f'pid=$(cat "$2"); kill -TERM {target} 2>/dev/null || true; '
+            f'i=0; while kill -0 {target} 2>/dev/null && test "$i" -lt 5; do '
             'sleep 0.2; i=$((i+1)); done; '
-            'if kill -0 -"$pid" 2>/dev/null; then kill -KILL -"$pid" 2>/dev/null || true; fi; '
+            f'if kill -0 {target} 2>/dev/null; then kill -KILL {target} 2>/dev/null || true; fi; '
             'fi; rm -f "$2"'
         )
 
