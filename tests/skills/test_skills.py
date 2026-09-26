@@ -368,21 +368,21 @@ class TestSkillValidation:
     async def test_explicit_name_must_match_directory(self, tmp_path: Path) -> None:
         _write_skill(tmp_path / 'skills', 'actual', frontmatter='name: different\ndescription: Help')
 
-        with pytest.raises(ValueError, match='must match its parent directory'):
+        with pytest.warns(UserWarning, match='must match its parent directory'):
             await _run(Skills('skills'), tmp_path)
 
     @pytest.mark.parametrize('name', ['', ' alpha '])
     async def test_invalid_explicit_name_is_not_normalized(self, tmp_path: Path, name: str) -> None:
         _write_skill(tmp_path / 'skills', 'alpha', frontmatter=f'name: "{name}"\ndescription: Help')
 
-        with pytest.raises(ValueError, match='Invalid skill name'):
+        with pytest.warns(UserWarning, match='Invalid skill name'):
             await _run(Skills('skills'), tmp_path)
 
     @pytest.mark.parametrize('name', ['Uppercase', '-leading', 'trailing-', 'two--hyphens', 'under_score', 'a' * 65])
     async def test_invalid_derived_name_is_rejected(self, tmp_path: Path, name: str) -> None:
         _write_skill(tmp_path / 'skills', name)
 
-        with pytest.raises(ValueError, match='Invalid skill name.*at most 64'):
+        with pytest.warns(UserWarning, match='Invalid skill name.*at most 64'):
             await _run(Skills('skills'), tmp_path)
 
     @pytest.mark.parametrize(
@@ -404,15 +404,23 @@ class TestSkillValidation:
         directory.mkdir(parents=True)
         (directory / 'SKILL.md').write_text(text, encoding='utf-8')
 
-        with pytest.raises(ValueError, match=error):
+        with pytest.warns(UserWarning, match=error):
             await _run(Skills('skills'), tmp_path)
 
     async def test_non_utf8_skill_names_its_file(self, tmp_path: Path) -> None:
         directory = tmp_path / 'skills' / 'latin'
         directory.mkdir(parents=True)
         (directory / 'SKILL.md').write_bytes(b'---\ndescription: \xe9\n---\n')
-        with pytest.raises(ValueError, match=r'SKILL.md is not valid UTF-8'):
+        with pytest.warns(UserWarning, match=r'SKILL.md is not valid UTF-8'):
             await _run(Skills('skills'), tmp_path)
+
+    async def test_invalid_skill_does_not_hide_valid_skills(self, tmp_path: Path) -> None:
+        _write_skill(tmp_path / 'skills', 'good', frontmatter='description: A valid skill.')
+        bad = tmp_path / 'skills' / 'bad'
+        bad.mkdir()
+        (bad / 'SKILL.md').write_text('not frontmatter')
+        with pytest.warns(UserWarning, match='SKILL.md'):
+            assert '- good: A valid skill.' in await _descriptions(Skills('skills'), tmp_path)
 
     async def test_multiline_description_continues_on_indented_lines(self, tmp_path: Path) -> None:
         # An indented `---` inside a block scalar is not a frontmatter delimiter.
