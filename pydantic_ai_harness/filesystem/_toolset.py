@@ -27,7 +27,7 @@ from pydantic_ai.workspaces import (
 )
 
 from pydantic_ai_harness._events import event_ctx
-from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACE, warn_argument_ignored, warn_argument_renamed
+from pydantic_ai_harness._warn import SET_WORKING_DIR_ON_THE_WORKSPACE, warn_argument_ignored, warn_argument_renamed
 from pydantic_ai_harness._workspace import raise_tool_failure, supports_commands, workspace_path
 from pydantic_ai_harness.filesystem._changes import Change
 from pydantic_ai_harness.filesystem._events import (
@@ -467,7 +467,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
     ) -> None:
         super().__init__(id=id)
         if cwd is not None:
-            warn_argument_ignored('FileSystemToolset', 'cwd', WORKING_DIR_IS_THE_WORKSPACE, stacklevel=3)
+            warn_argument_ignored('FileSystemToolset', 'cwd', SET_WORKING_DIR_ON_THE_WORKSPACE, stacklevel=3)
         if protected_patterns is not None:
             if read_only_patterns is not None:
                 raise TypeError('Pass `read_only_patterns` only: `protected_patterns` is its deprecated name.')
