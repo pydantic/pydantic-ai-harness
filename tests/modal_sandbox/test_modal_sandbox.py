@@ -115,6 +115,7 @@ async def test_command_start_timeout_is_bounded(fake_modal: FakeModal) -> None:
 async def test_create_timeout_is_a_retryable_timeout(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
     # An image build or pull may still be running: report a transient timeout.
     fake_modal.create_gate = anyio.Event()
+    fake_modal.create_before_gate = True
     monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._CREATE_TIMEOUT', 0.01)
     backend = ModalSandboxBackend()
     with pytest.raises(TimeoutError, match='image build or pull') as exc_info:

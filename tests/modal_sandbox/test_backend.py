@@ -319,6 +319,24 @@ class TestWorkingDir:
 
 
 class TestCreate:
+    async def test_lost_create_reply_recovers_sandbox_by_name(self, fake_modal: FakeModal) -> None:
+        fake_modal.create_reply_error = fake_modal.exception('ConnectionError')('reply lost')
+        backend = ModalSandboxBackend()
+        sandbox = await backend.get_client()
+        assert backend.ref == WorkspaceRef(provider='modal', id=sandbox.object_id)
+        assert fake_modal.owned_creates == 1
+        assert await backend.get_client() is sandbox
+
+    async def test_lost_create_reply_at_local_deadline_recovers_ref(
+        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_modal.create_gate = anyio.Event()
+        monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._CREATE_TIMEOUT', 0.01)
+        backend = ModalSandboxBackend()
+        sandbox = await backend.get_client()
+        assert backend.ref == WorkspaceRef(provider='modal', id=sandbox.object_id)
+        assert fake_modal.owned_creates == 1
+
     async def test_native_task_cancellation_records_in_flight_creation(self, fake_modal: FakeModal) -> None:
         backend = ModalSandboxBackend()
         fake_modal.create_gate = anyio.Event()
@@ -409,6 +427,7 @@ class TestCreate:
         self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake_modal.create_gate = anyio.Event()
+        fake_modal.create_before_gate = True
         monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._CREATE_TIMEOUT', 0.01)
         with pytest.raises(TimeoutError, match='image build or pull may still be running'):
             await ModalSandboxBackend().get_client()

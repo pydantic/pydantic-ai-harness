@@ -262,6 +262,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         self._resolved_working_dir: str | None = None
         self._lock = anyio.Lock()
         self._acquisition: asyncio.Task[modal.Sandbox] | None = None
+        self._create_name: str | None = None
 
     async def get_client(self) -> modal.Sandbox:
         """Return the typed `modal.Sandbox`, creating or attaching to it on first use.
@@ -380,6 +381,10 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         import modal
 
         sandbox: modal.Sandbox | None = None
+        create_attempted = False
+        if self._create_name is None:
+            self._create_name = f'pydantic-ai-{uuid4().hex}'
+        name = self._create_name
         try:
             # Shielded so that a caller cancelled mid-create still gets the sandbox Modal made:
             # `get_client` records it before the cancellation is delivered, so `ref` names it and
@@ -395,15 +400,19 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                 else:
                     built = self._image
                 variables: dict[str, str | None] | None = dict(self._env) if self._env else None
+                create_attempted = True
                 sandbox = await modal.Sandbox.create.aio(  # pyright: ignore[reportUnknownMemberType]
                     app=app,
                     image=built,
+                    name=name,
                     workdir=self._working_dir,
                     env=variables,
                     timeout=self._sandbox_timeout,
                     idle_timeout=self._idle_timeout,
                 )
         except Exception as error:
+            if create_attempted and (recovered := await self._recover_create(name)) is not None:
+                return recovered
             message = f'Could not start Modal sandbox: {error}'
             mapped = _translate(error, context=message, unavailable=message)
             # SDK releases disagree on whether image build errors live in modal.exception.
@@ -418,13 +427,28 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                 mapped if isinstance(mapped, WorkspaceUnavailableError) else WorkspaceUnavailableError(message)
             ) from error
         if sandbox is None:
-            # A plain `TimeoutError`: an unresponsive control plane is transient, so a durable
-            # engine retries it.
+            if create_attempted and (recovered := await self._recover_create(name)) is not None:
+                return recovered
+            # Keep the name across retries, so a late commit can still be recovered.
             raise TimeoutError(
                 f'Modal sandbox creation did not complete within {_CREATE_TIMEOUT}s; '
                 'an image build or pull may still be running. Check for an existing sandbox before retrying.'
             )
         return sandbox
+
+    async def _recover_create(self, name: str) -> modal.Sandbox | None:
+        """Reattach a sandbox whose create RPC committed but whose response was lost."""
+        import modal
+
+        try:
+            sandbox = await modal.Sandbox.from_name.aio(self._app_name, name)
+            return sandbox if await sandbox.poll.aio() is None else None
+        except modal.exception.NotFoundError:
+            return None
+        except Exception:
+            # Recovery is best effort; retain the original failure for retry policy.
+            logger.warning('Could not check whether named Modal sandbox creation completed')
+            return None
 
     async def _attach(self, sandbox_id: str) -> modal.Sandbox:
         """Attach to a Modal sandbox that already exists.

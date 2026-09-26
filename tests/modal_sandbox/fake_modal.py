@@ -86,10 +86,14 @@ class _GatedCreate(_AioCallable):
 
     async def aio(self, *args: Any, **kwargs: Any) -> Any:
         await anyio.lowlevel.checkpoint()
+        if self._control.create_before_gate and self._control.create_gate is not None:
+            await self._control.create_gate.wait()
         created = self._fn(*args, **kwargs)
         self._control.create_started = True
         if self._control.create_gate is not None:
             await self._control.create_gate.wait()
+        if self._control.create_reply_error is not None:
+            raise self._control.create_reply_error
         return created
 
 
@@ -389,9 +393,10 @@ class _HostFilesystem:
 
 
 class FakeSandbox:
-    def __init__(self, control: FakeModal, object_id: str) -> None:
+    def __init__(self, control: FakeModal, object_id: str, name: str | None = None) -> None:
         self._control = control
         self.object_id = object_id
+        self.name = name
         self.exec_calls: list[ExecCall] = []
         self.exec = _HangingExec(self._exec) if control.exec_hangs else _AioCallable(self._exec)
         self.poll = _AioCallable(self._poll)
@@ -512,7 +517,9 @@ class FakeModal:
         self.attach_ids: list[str] = []
         self.owned_creates = 0
         self.create_error: Exception | None = None
+        self.create_reply_error: Exception | None = None
         self.create_gate: anyio.Event | None = None
+        self.create_before_gate = False
         self.create_started = False
         self.attach_error: Exception | None = None
         self.attach_poll_result: int | None = None
@@ -549,6 +556,7 @@ class FakeModal:
             *,
             app: object,
             image: object,
+            name: str | None = None,
             timeout: int = 300,
             idle_timeout: int | None = None,
             workdir: str | None = None,
@@ -560,6 +568,7 @@ class FakeModal:
                 {
                     'app': app,
                     'image': image,
+                    'name': name,
                     'workdir': workdir,
                     'env': env,
                     'timeout': timeout,
@@ -568,7 +577,7 @@ class FakeModal:
             )
             control.owned_creates += 1
             suffix = '' if control.owned_creates == 1 else f'-{control.owned_creates}'
-            workspace = FakeSandbox(control, f'sb-owned{suffix}')
+            workspace = FakeSandbox(control, f'sb-owned{suffix}', name=name)
             workspace.workdir = workdir
             control.sandboxes.append(workspace)
             return workspace
@@ -585,6 +594,12 @@ class FakeModal:
             control.sandboxes.append(workspace)
             return workspace
 
+        def workspace_from_name(app_name: str, name: str) -> FakeSandbox:
+            existing = next((sandbox for sandbox in control.sandboxes if sandbox.name == name), None)
+            if existing is None:
+                raise _EXCEPTIONS['NotFoundError']('name not found')
+            return existing
+
         class App:
             lookup = _AioCallable(app_lookup)
 
@@ -598,6 +613,7 @@ class FakeModal:
         class Sandbox:
             create = _GatedCreate(workspace_create, control)
             from_id = _AioCallable(workspace_from_id)
+            from_name = _AioCallable(workspace_from_name)
 
         module.App = App  # type: ignore[attr-defined]
         module.Image = Image  # type: ignore[attr-defined]
