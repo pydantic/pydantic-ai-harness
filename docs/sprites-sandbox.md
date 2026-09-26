@@ -99,7 +99,7 @@ later = agent.run_sync('Which capability would you add next, and where would it 
 
 The ref holds no credentials, so the process that reattaches needs `SPRITE_TOKEN` too. Pass `workspace='new'` to start a fresh Sprite even when the message history names one.
 
-`runtime` only shapes a new Sprite, and an unknown one raises a clear error on first use; `working_dir` and `env` apply to every command, including after you reattach.
+`runtime` only shapes a new Sprite, and an unknown one raises a clear error on first use; `working_dir` and `env` apply to every command, including after you reattach. A selected command directory is checked before execution; a missing directory raises `FileNotFoundError`.
 
 Already have a `sprites.AsyncSprite`? Pass `workspace=SpritesSandboxBackend(workspace=sprite)` to a run, with `SpritesSandboxBackend` from `pydantic_ai_harness.sprites_sandbox`. `SpritesSandbox`'s settings don't apply to it; pass `working_dir=` and `env=` to the backend.
 

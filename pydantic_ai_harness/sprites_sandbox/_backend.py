@@ -378,6 +378,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
         _capture_stderr: bool = True,
+        _check_cwd: bool = True,
     ) -> CommandResult:
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
@@ -390,6 +391,11 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
         # Acquiring the Sprite has its own bound; the deadline is the command's alone.
         sprite = await self.get_client()
+        if directory is not None and _check_cwd:
+            # Sprites exec silently ignores a nonexistent `dir`; reject it before running user work.
+            check = await self.run(['test', '-d', directory], timeout=_INTERNAL_EXEC_TIMEOUT, _check_cwd=False)
+            if check.exit_code != 0:
+                raise FileNotFoundError(directory)
         exec_command = _ExecCommand(sprite.command(*args, cwd=directory))
         deadline = anyio.CancelScope(deadline=math.inf if timeout is None else anyio.current_time() + timeout)
         code = -1
@@ -452,6 +458,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                 ['sh', '-c', 'head -c 65536 -- "$1"; rm -f -- "$1"', 'sh', path],
                 timeout=1,
                 _capture_stderr=False,
+                _check_cwd=False,
             )
             output = result.stdout
 

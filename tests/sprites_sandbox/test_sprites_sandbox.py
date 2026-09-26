@@ -510,7 +510,8 @@ class TestSpritesSandbox:
     ) -> None:
         result = await SpritesSandboxBackend(working_dir=str(transport.root)).run(['echo', 'a b'])
         assert (result.exit_code, result.stdout) == (0, 'a b\n')
-        [socket] = transport.execs
+        check, socket = transport.execs
+        assert check.query['cmd'][-3:] == ['test', '-d', str(transport.root)]
         # The command runs under a `sh` that ends both streams with a marker line; the fake conformance suite checks the streams stay apart.
         assert socket.query['cmd'][:2] == ['sh', '-c']
         assert socket.query['cmd'][5:] == ['echo', 'a b']

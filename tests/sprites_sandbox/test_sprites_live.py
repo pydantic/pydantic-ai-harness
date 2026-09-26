@@ -27,7 +27,6 @@ import json
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import anyio
 import pytest
@@ -44,7 +43,7 @@ from pydantic_ai_harness.sprites_sandbox import SpritesSandbox, SpritesSandboxBa
 
 from .._docs_examples import documented_cleanup, python_blocks, run_block
 
-pytestmark = pytest.mark.sprites_live
+pytestmark = [pytest.mark.sprites_live, pytest.mark.usefixtures('log_live_sprite_ids')]
 
 
 def _unique(prefix: str) -> str:
@@ -84,6 +83,15 @@ async def test_creates_a_fresh_sprite_and_runs_a_command(client: AsyncSpritesCli
 
         assert backend.ref is not None
         assert (result.stdout.strip(), result.stderr.strip(), result.exit_code) == ('out', 'err', 3)
+
+
+async def test_destroy_ref_does_not_attach(client: AsyncSpritesClient) -> None:
+    """Only a live Sprite can prove the SDK destroys by id without resuming it."""
+    async with _owned(client) as backend:
+        assert backend.ref is not None
+        await SpritesSandbox(client=client).destroy(backend.ref)
+        with pytest.raises(NotFoundError):
+            await client.get_sprite(backend.ref.id)
 
 
 async def test_reattach_by_ref_reads_a_file_the_first_backend_wrote(client: AsyncSpritesClient) -> None:
@@ -176,8 +184,6 @@ async def test_timeout_and_cancellation_stop_foreground_child(client: AsyncSprit
     """The fake kills its subprocess group on close; only a real Sprite can prove child death."""
     backend = SpritesSandboxBackend(client=client)
     native = await backend.get_client()
-    with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
-        refs.write(f'sprites sprites {native.name}\n')
     try:
         for mode in ('timeout', 'cancel'):
             pid_file = f'/tmp/{_unique("child")}.pid'
@@ -201,8 +207,6 @@ async def test_timeout_keeps_stderr_and_cleans_capture(client: AsyncSpritesClien
     """The fake cannot prove the live exec stream preserves stderr after an interrupted command."""
     backend = SpritesSandboxBackend(client=client)
     native = await backend.get_client()
-    with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
-        refs.write(f'sprites sprites {native.name}\n')
     try:
         # A listing command creates its own empty capture while it runs; check only nonempty captures.
         check = ['find', '/tmp', '-maxdepth', '1', '-name', 'pydantic-ai-stderr-*', '-size', '+0c']

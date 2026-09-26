@@ -47,7 +47,7 @@ class TestFakeSpritesSandboxBackend(WorkspaceBackendSuite):
 
 
 @pytest.mark.sprites_live
-@pytest.mark.usefixtures('sprites_token')
+@pytest.mark.usefixtures('sprites_token', 'log_live_sprite_ids')
 class TestLiveSpritesSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover - live tier runs without coverage
     # One event loop for the class: the backend's `AsyncSpritesClient` holds an `httpx.AsyncClient`
     # whose pooled connections are bound to the loop they were opened on. A class-scoped async
@@ -59,6 +59,12 @@ class TestLiveSpritesSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover 
 
     # Class-scoped so the rules share one Sprite instead of creating one each; the suite runs its
     # destroy rule last.
+    @pytest.fixture
+    def filesystem_honors_shell_permissions(self) -> bool:
+        # Live Sprite (2026-09-26): uid 1001 reads chmod 000 files (`test -r` succeeds).
+        # The Sprite filesystem does not enforce ordinary POSIX mode checks for this user.
+        return False
+
     @pytest.fixture(scope='class')
     @classmethod
     async def backend(cls) -> AsyncIterator[SpritesSandboxBackend]:

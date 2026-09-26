@@ -54,6 +54,18 @@ def sprites_token() -> str:
 if _HAS_SPRITES:  # pragma: no branch - the fixture requires the SDK-backed fake
 
     @pytest.fixture
+    def log_live_sprite_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+        original = AsyncSpritesClient.create_sprite
+
+        async def create(client: AsyncSpritesClient, name: str, *, runtime: str | None = None) -> AsyncSprite:
+            # Log before the request: even a lost response may have created a billable Sprite.
+            with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
+                refs.write(f'sprites-adopt sprites {name}\n')
+            return await original(client, name, runtime=runtime)
+
+        monkeypatch.setattr(AsyncSpritesClient, 'create_sprite', create)
+
+    @pytest.fixture
     async def transport(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> AsyncIterator[SpriteTransport]:
         transport = SpriteTransport(tmp_path)
         monkeypatch.setenv('SPRITE_TOKEN', 'test-token')
