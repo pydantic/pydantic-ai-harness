@@ -32,7 +32,7 @@ from sprites.exceptions import (
     SpriteError,
 )
 from websockets.datastructures import Headers
-from websockets.exceptions import InvalidStatus
+from websockets.exceptions import InvalidMessage, InvalidStatus
 from websockets.http11 import Response
 
 from pydantic_ai_harness.coder import Coder
@@ -438,6 +438,18 @@ class TestSpritesSandbox:
         assert (result.exit_code, result.stdout) == (0, 'ok\n')
         assert transport.aborted == 1
         assert 'Could not close a Sprite exec connection' in caplog.text
+
+    async def test_exec_handshake_transport_failure_is_network_error(self, transport: SpriteTransport) -> None:
+        transport.connect_error = InvalidMessage('bad handshake')
+        with pytest.raises(NetworkError, match='handshake'):
+            await SpritesSandboxBackend().run(['true'])
+        assert transport.execs == []
+
+    async def test_exec_handshake_retries_when_command_cannot_have_started(self, transport: SpriteTransport) -> None:
+        transport.connect_error_once = TimeoutError('connect stalled')
+        result = await SpritesSandboxBackend().run(['echo', 'ok'])
+        assert result.stdout == 'ok\n'
+        assert len(transport.execs) == 1
 
     async def test_socket_closed_before_the_exit_status_propagates_the_sdk_error(
         self, transport: SpriteTransport

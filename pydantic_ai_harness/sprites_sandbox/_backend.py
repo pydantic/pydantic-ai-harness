@@ -75,6 +75,7 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 from pydantic_ai.workspaces.workspace import _ShellFilesystem  # pyright: ignore[reportPrivateUsage]
+from websockets.exceptions import InvalidHandshake, InvalidMessage
 
 from pydantic_ai_harness._workspace_provider import absolute_path, command_argv
 
@@ -377,7 +378,19 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         code = -1
         try:
             with deadline:
-                await exec_command.start()
+                try:
+                    await exec_command.start()
+                except (TimeoutError, InvalidMessage, InvalidHandshake) as error:
+                    # Stdin EOF gates execution: an unsuccessful handshake with no socket cannot
+                    # have started the command. Never retry after the connection is established.
+                    if exec_command.ws is not None:
+                        raise NetworkError(f'Sprites exec handshake failed: {error}') from error
+                    await anyio.sleep(0.1)
+                    exec_command = _ExecCommand(sprite.command(*args, cwd=directory))
+                    try:
+                        await exec_command.start()
+                    except (TimeoutError, InvalidMessage, InvalidHandshake) as retry_error:
+                        raise NetworkError(f'Sprites exec handshake failed: {retry_error}') from retry_error
                 code = await exec_command.wait()
             if timeout is not None and deadline.cancelled_caught:
                 partial = _split_output(exec_command.get_stdout(), exec_command.get_stderr(), marker)
