@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
@@ -53,7 +53,7 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
     """Absolute directory commands start in and relative paths resolve against; the sandbox's
     default when `None`. It applies to attached sandboxes too."""
 
-    env: Mapping[str, str] | None = None
+    env: Mapping[str, str] | None = field(default=None, repr=False)
     """Environment variables every command in the sandbox gets; a command's own `env` is layered on
     top. Nothing is read from the agent process's environment."""
 

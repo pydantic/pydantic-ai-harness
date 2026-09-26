@@ -26,6 +26,10 @@ from .fake_daytona import FakeDaytona
 pytestmark = pytest.mark.anyio(backends=['asyncio'])
 
 
+def test_capability_repr_hides_command_environment() -> None:
+    assert 'secret-sentinel' not in repr(DaytonaSandbox(env={'TOKEN': 'secret-sentinel'}))
+
+
 def _ctx() -> RunContext[None]:
     return RunContext(deps=None, model=TestModel(), usage=RunUsage())
 
