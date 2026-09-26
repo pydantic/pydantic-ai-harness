@@ -668,6 +668,12 @@ async def test_acquisition_errors_map_to_protocol_failures(
         assert exc.value is error
 
 
+def test_default_user_directory_and_relative_paths_are_documented() -> None:
+    docs = (Path(__file__).parents[2] / 'docs/e2b-sandbox.md').read_text()
+    assert '`user`' in docs and '`/home/user`' in docs
+    assert 'relative paths' in docs
+
+
 def test_signal_exit_code_limitation_is_documented() -> None:
     docs = (Path(__file__).parents[2] / 'docs/e2b-sandbox.md').read_text()
     assert 'exit_code=-1' in docs
