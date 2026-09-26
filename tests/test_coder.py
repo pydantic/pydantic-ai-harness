@@ -13,6 +13,7 @@ import pydantic_ai_harness.coder
 from pydantic_ai_harness.coder import FILE_TOOL_NAMES, Coder, coder_agent
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import Shell
+from pydantic_ai_harness.subagents import SubAgents
 
 pytestmark = pytest.mark.anyio
 
@@ -91,6 +92,7 @@ def test_coder_members_and_parameters() -> None:
         'FileSystem',
         'Shell',
         'RepoContext',
+        'SubAgents',
         'ClearToolResults',
         'WarnNearLimits',
         '_BoundToolOutputs',
@@ -105,6 +107,8 @@ def test_coder_members_and_parameters() -> None:
     instructions = str(guidance.get_instructions())
     for text in ('Custom instructions', 'DRY', 'YAGNI', 'SOLID', 'Zen of Python'):
         assert text in instructions
+    delegation = next(item for item in coder.capabilities if isinstance(item, SubAgents))
+    assert (delegation.include_self, delegation.agents, delegation.agent_folders) == (True, (), None)
     limits = next(item for item in coder.capabilities if type(item).__name__ == '_BoundToolOutputs')
     assert limits.id == 'coder_tool_output_limits'
     assert isinstance(coder.for_agent(Agent(TestModel())), Coder)
