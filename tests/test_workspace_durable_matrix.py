@@ -12,13 +12,9 @@ from uuid import uuid4
 
 import pytest
 from dbos import DBOS, DBOSConfig
-from prefect import flow
-from prefect.settings import PREFECT_SERVER_SERVICES_TASK_RUN_RECORDER_ENABLED, temporary_settings
-from prefect.testing.utilities import prefect_test_harness
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.durable_exec.dbos import DBOSDurability
-from pydantic_ai.durable_exec.prefect import PrefectDurability
 from pydantic_ai.messages import ModelMessage, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
@@ -34,6 +30,11 @@ def anyio_backend() -> str:
 
 @pytest.fixture
 def prefect_server() -> Generator[None, None, None]:
+    # Prefect is an optional core extra; its absence must not hide the DBOS cells.
+    pytest.importorskip('prefect')
+    from prefect.settings import PREFECT_SERVER_SERVICES_TASK_RUN_RECORDER_ENABLED, temporary_settings  # noqa: PLC0415
+    from prefect.testing.utilities import prefect_test_harness  # noqa: PLC0415
+
     with temporary_settings({PREFECT_SERVER_SERVICES_TASK_RUN_RECORDER_ENABLED: False}):
         with prefect_test_harness(server_startup_timeout=120):
             yield
@@ -86,7 +87,12 @@ def _agent(root: Path, engine: str, capability: str, vetoes: list[str]) -> Agent
                 yield {index: DeltaToolCall(name=part.tool_name, json_args=json.dumps(part.args))}
 
     cap = {'filesystem': FileSystem, 'shell': lambda: Shell(persist_cwd=True), 'coder': Coder}[capability]()
-    durability = PrefectDurability() if engine == 'prefect' else DBOSDurability()
+    if engine == 'prefect':
+        from pydantic_ai.durable_exec.prefect import PrefectDurability  # noqa: PLC0415
+
+        durability = PrefectDurability()
+    else:
+        durability = DBOSDurability()
     agent = Agent(
         FunctionModel(model, stream_function=stream),
         name=f'matrix_{engine}_{capability}_{uuid4().hex}',
@@ -105,6 +111,8 @@ def _agent(root: Path, engine: str, capability: str, vetoes: list[str]) -> Agent
 @pytest.mark.anyio
 @pytest.mark.parametrize('capability', ['coder', 'shell', 'filesystem'])
 async def test_prefect_workspace_capabilities(tmp_path: Path, prefect_server: None, capability: str) -> None:
+    from prefect import flow  # noqa: PLC0415
+
     (tmp_path / 'dir').mkdir()
     vetoes: list[str] = []
     agent = _agent(tmp_path, 'prefect', capability, vetoes)

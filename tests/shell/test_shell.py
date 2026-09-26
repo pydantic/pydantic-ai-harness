@@ -541,6 +541,21 @@ class TestDurableCwd:
         second.run_id = 'second'
         assert str(shell_dir / 'subdir') not in await other.run_command(second, 'pwd')
 
+    async def test_removed_run_cwd_retries_and_clears_workspace_state(
+        self, persist_toolset: ShellToolset[None], shell_dir: Path
+    ) -> None:
+        ctx = _ctx(shell_dir)
+        ctx.run_id = 'removed-directory-run'
+        await persist_toolset.run_command(ctx, 'cd subdir')
+        (shell_dir / 'subdir').rename(shell_dir / 'moved-subdir')
+
+        # A new worker reads the saved cwd rather than the original toolset's memory.
+        fresh = await persist_toolset.for_run(ctx)
+        assert isinstance(fresh, ShellToolset)
+        with pytest.raises(ModelRetry, match=f'The previous directory was removed; now in {shell_dir}'):
+            await fresh.run_command(ctx, 'pwd')
+        assert str(shell_dir) in await fresh.run_command(ctx, 'pwd')
+
 
 class TestCancelledRunCwd:
     async def test_worker_interruption_retains_cwd_for_recovery(self, shell_dir: Path) -> None:
