@@ -284,8 +284,9 @@ async def _close_sdk_client(client: AsyncDaytona) -> None:
     """Close an SDK client and its event transport even after a failed socket handshake."""
     # SDK 0.198.0 cancels its event connect task in close() without joining it.
     # If it has opened engineio's aiohttp session, disconnect cannot close it yet.
-    dispatcher = client._event_dispatcher  # pyright: ignore[reportPrivateUsage]
-    if dispatcher is not None and (connecting := dispatcher._connect_task) is not None:  # pyright: ignore[reportPrivateUsage]
+    # These are private SDK attributes; if a release renames them, fall back to a plain close.
+    dispatcher = getattr(client, '_event_dispatcher', None)
+    if dispatcher is not None and (connecting := getattr(dispatcher, '_connect_task', None)) is not None:
         with anyio.move_on_after(6, shield=True) as connect_deadline:
             try:
                 # This is an asyncio-only SDK task; do not cancel it on our grace timeout.
@@ -294,14 +295,14 @@ async def _close_sdk_client(client: AsyncDaytona) -> None:
                 pass  # A failed connection still needs the normal SDK close.
         if connect_deadline.cancelled_caught:
             _logger.warning('Daytona event connection did not settle before client close.')
-    sio = dispatcher._sio if dispatcher is not None else None  # pyright: ignore[reportPrivateUsage]
+    sio = getattr(dispatcher, '_sio', None)
     try:
         await client.close()
     finally:
-        if sio is not None:
+        if (eio := getattr(sio, 'eio', None)) is not None:
             # On a failed socket handshake socketio.disconnect() skips engineio's
             # aiohttp session; explicitly disconnect the underlying transport.
-            await sio.eio.disconnect()  # pyright: ignore[reportUnknownMemberType]
+            await eio.disconnect()
 
 
 class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem, SupportsRealpath):

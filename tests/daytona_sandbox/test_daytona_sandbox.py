@@ -20,6 +20,7 @@ from pydantic_ai.workspaces import ReadOnlyWorkspace, Workspace, WorkspaceReadOn
 
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox, DaytonaSandboxBackend
+from pydantic_ai_harness.daytona_sandbox._backend import _close_sdk_client  # pyright: ignore[reportPrivateUsage]
 
 from .._tool_calls import call_tools
 from .fake_daytona import FakeDaytona
@@ -201,6 +202,20 @@ async def test_cancelled_run_closes_owned_client_mid_command(fake_daytona: FakeD
         await task
     assert fake_daytona.closed_clients == 1
     assert sandbox.process_sessions == set()
+
+
+async def test_client_close_falls_back_when_sdk_internals_are_missing() -> None:
+    """A Daytona SDK release without the private event attributes still gets its public close."""
+
+    class ClientWithoutEvents:
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    client = ClientWithoutEvents()
+    await _close_sdk_client(client)  # pyright: ignore[reportArgumentType]
+    assert client.closed
 
 
 async def test_run_waits_for_sdk_event_connection_before_closing_client(fake_daytona: FakeDaytona) -> None:
