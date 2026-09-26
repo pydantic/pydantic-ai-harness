@@ -361,6 +361,17 @@ async def test_file_store_listing_walks_only_the_requested_scope(tmp_path: Path)
     assert await store.list_paths('missing/', limit=10) == []
 
 
+async def test_file_store_listing_rejects_symlinked_prefix(tmp_path: Path) -> None:
+    root = tmp_path / 'root'
+    outside = tmp_path / 'outside'
+    root.mkdir()
+    outside.mkdir()
+    (outside / 'secret.md').write_text('secret')
+    (root / 'alias').symlink_to(outside, target_is_directory=True)
+    store = FileStore('.', workspace=LocalWorkspaceBackend(root))
+    assert await store.list_paths('alias/', limit=10) == []
+
+
 async def test_file_store_search_skips_a_file_that_disappears_after_listing(tmp_path: Path) -> None:
     class Disappearing(LocalWorkspaceBackend):
         async def read_bytes(self, path: str) -> bytes:
