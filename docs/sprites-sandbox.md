@@ -97,7 +97,7 @@ The ref holds no credentials, so the process that reattaches needs `SPRITE_TOKEN
 
 `runtime` only shapes a new Sprite, and an unknown one raises a clear error on first use; `working_dir` and `env` apply to every command, including after you reattach.
 
-Already have a `sprites.AsyncSprite`? Pass `workspace=SpritesSandboxBackend(workspace=sprite)` to a run, with `SpritesSandboxBackend` from `pydantic_ai_harness.sprites_sandbox`. `SpritesSandbox`'s settings don't apply to it; pass `working_dir=` and `env=` to the backend.
+Already have a `sprites.AsyncSprite`? Pass `workspace=SpritesSandboxBackend(sandbox=sprite)` to a run, with `SpritesSandboxBackend` from `pydantic_ai_harness.sprites_sandbox`. `SpritesSandbox`'s settings don't apply to it; pass `working_dir=` and `env=` to the backend.
 
 ## Clean up
 
@@ -110,12 +110,12 @@ from pydantic_ai_harness.sprites_sandbox import SpritesSandboxBackend
 
 async def delete_sprite(ref: WorkspaceRef) -> None:
     backend = SpritesSandboxBackend(ref=ref)
-    sprite = await backend.get_client()
+    sprite = await backend.get_sandbox()
     await sprite.delete()
     await backend.aclose()
 ```
 
-`get_client()` returns the `sprites.AsyncSprite`, and `aclose()` closes the Sprites client the backend opened. See [Sprite lifecycle](https://docs.sprites.dev/concepts/lifecycle/).
+`get_sandbox()` returns the `sprites.AsyncSprite`, and `aclose()` closes the Sprites client the backend opened. See [Sprite lifecycle](https://docs.sprites.dev/concepts/lifecycle/).
 
 A failed run returns no result, so there is no ref to store. To terminate its sandbox, clean up in an `on_run_error` hook; `after_run` doesn't run when a run fails:
 

@@ -86,7 +86,7 @@ async def client(sprites_token: str) -> AsyncIterator[AsyncSpritesClient]:
 async def _owned(client: AsyncSpritesClient) -> AsyncGenerator[SpritesSandboxBackend]:
     """Create a Sprite and delete it on the way out, even when the test deleted it already."""
     backend = SpritesSandboxBackend(client=client)
-    native = await backend.get_client()
+    native = await backend.get_sandbox()
     try:
         yield backend
     finally:
@@ -143,7 +143,7 @@ async def test_reattach_to_a_deleted_sprite_is_unavailable(client: AsyncSpritesC
     async with _owned(client) as owner:
         assert (await owner.run(['true'], timeout=60)).exit_code == 0
         assert owner.ref is not None
-        await (await owner.get_client()).delete()
+        await (await owner.get_sandbox()).delete()
 
         with pytest.raises(WorkspaceUnavailableError):
             await SpritesSandboxBackend(client=client, ref=owner.ref).working_dir()

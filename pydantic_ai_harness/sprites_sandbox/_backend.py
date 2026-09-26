@@ -206,7 +206,8 @@ def _map_error(error: Exception, sprite_name: str | None) -> WorkspaceError | No
 class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     """A Fly.io Sprite behind the Pydantic AI `WorkspaceBackend` protocol.
 
-    Construction does no I/O. The typed `sprites.AsyncSprite` is available through `get_client()`.
+    Pass `sandbox=` to wrap a `sprites.AsyncSprite` you already have, or `ref=` to reattach to one.
+    Construction does no I/O. The typed `sprites.AsyncSprite` is available through `get_sandbox()`.
     Without `client=`, the backend creates an `AsyncSpritesClient` from `SPRITE_TOKEN` on first use
     and closes it in `aclose()`.
     The backend does not delete the Sprite; that is the application's job, through the native
@@ -218,7 +219,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     def __init__(
         self,
         *,
-        workspace: AsyncSprite | None = None,
+        sandbox: AsyncSprite | None = None,
         client: AsyncSpritesClient | None = None,
         ref: WorkspaceRef | None = None,
         runtime: str | None = None,
@@ -227,10 +228,10 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     ) -> None:
         if ref is not None and ref.provider != 'sprites':
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'sprites'")
-        if workspace is not None and ref is not None:
-            raise ValueError('pass either `workspace` or `ref`, not both')
-        self._sandbox = workspace
-        self._ref = ref if workspace is None else WorkspaceRef(provider='sprites', id=workspace.name)
+        if sandbox is not None and ref is not None:
+            raise ValueError('pass either `sandbox` or `ref`, not both')
+        self._sandbox = sandbox
+        self._ref = ref if sandbox is None else WorkspaceRef(provider='sprites', id=sandbox.name)
         self._new_sprite_name = f'pydantic-ai-{uuid.uuid4().hex}'
         self._runtime = runtime
         self._working_dir = absolute_path('working_dir', working_dir)
@@ -245,7 +246,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     def ref(self) -> WorkspaceRef | None:
         return self._ref
 
-    async def get_client(self) -> AsyncSprite:
+    async def get_sandbox(self) -> AsyncSprite:
         """Return the typed `sprites.AsyncSprite`, creating or attaching to it on first use.
 
         This is the Sprite handle, not the `AsyncSpritesClient` passed as `client=`. A handle
@@ -302,7 +303,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         """Close the `AsyncSpritesClient` this backend created, if it created one.
 
         The Sprite is untouched: the next operation opens a fresh client and reattaches by `ref`.
-        A caller-supplied `client=` or `workspace=` handle is never closed. `SpritesSandbox`
+        A caller-supplied `client=` or `sandbox=` handle is never closed. `SpritesSandbox`
         calls this for the backend it supplied when each run ends. A close that fails or times out
         is logged, not raised, and the client is kept so the next `aclose()` tries again.
         """
@@ -331,7 +332,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.removesuffix('\n')
             if result.exit_code != 0 or not posixpath.isabs(printed):
-                sandbox = await self.get_client()
+                sandbox = await self.get_sandbox()
                 raise WorkspaceError(
                     f'Could not determine the working directory of Sprite {sandbox.name!r}: '
                     f'`pwd -P` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
@@ -357,7 +358,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         args = _ending_with(marker, _with_env(command_argv(command, shell), {**self._env, **(env or {})}))
 
         # Acquiring the Sprite has its own bound; the deadline is the command's alone.
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         exec_command = _ExecCommand(sandbox.command(*args, cwd=directory))
         deadline = anyio.CancelScope(deadline=math.inf if timeout is None else anyio.current_time() + timeout)
         code = -1
@@ -384,7 +385,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         # Not through a command: the exec API sends argv in the URL, which caps a command at about 40 KB.
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         target = sandbox.filesystem() / path
         try:
             mode = 0o644

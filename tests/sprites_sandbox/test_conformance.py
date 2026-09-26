@@ -27,7 +27,7 @@ def _attach(ref: WorkspaceRef) -> WorkspaceBackend:
 
 async def _delete(backend: WorkspaceBackend) -> None:
     assert isinstance(backend, SpritesSandboxBackend)
-    sprite = await backend.get_client()
+    sprite = await backend.get_sandbox()
     await sprite.delete()
 
 
