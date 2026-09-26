@@ -1175,7 +1175,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         )
 
     @_recoverable
-    async def _search_files(
+    async def _search_files(  # noqa: C901  -- filesystem-only and command paths share output bookkeeping
         self,
         scope: _Scope,
         ctx: RunContext[AgentDepsT] | None,
@@ -1193,6 +1193,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             raise ValueError(f'Invalid regex pattern: {e}') from e
 
         entry = await self._stat(scope, resolved)
+        if entry is not None and supports_commands(scope.workspace) and scope.lacks_ripgrep:
+            return await self._command_search_files(scope, ctx, entry, resolved, pattern, include_glob)
         walk_cut = False
         if entry is None:
             files: list[WorkspaceFileEntry] = []
@@ -1248,6 +1250,63 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 f'{", ..." if len(skipped) > 10 else ""}]'
             )
         return _with_walk_notice(results, walk_cut)
+
+    async def _command_search_files(
+        self,
+        scope: _Scope,
+        ctx: RunContext[AgentDepsT] | None,
+        entry: WorkspaceFileEntry,
+        resolved: str,
+        pattern: str,
+        include_glob: str | None,
+    ) -> str:
+        cwd = resolved if entry.is_dir else posixpath.dirname(resolved)
+        target = '.' if entry.is_dir else posixpath.basename(resolved)
+
+        async def accept(record: Record) -> str | None:
+            if include_glob and not fnmatch.fnmatch(record.path, include_glob):
+                return None
+            return await self._authorized_match(scope, cwd, record)
+
+        try:
+            if scope.lacks_ripgrep:
+                raise RipgrepMissing
+            results, capped = await run_ripgrep(
+                scope.workspace,
+                [
+                    '--line-number',
+                    '--with-filename',
+                    '--sort',
+                    'path',
+                    '--max-columns',
+                    str(_MAX_MATCH_COLUMNS),
+                    '--max-columns-preview',
+                    '--regexp',
+                    pattern,
+                    '--',
+                    target,
+                ],
+                cwd=cwd,
+                limit=self._max_search_results,
+                accept=lambda record: self._match_line(scope, cwd, record),
+            )
+        except RipgrepMissing:
+            scope.lacks_ripgrep = True
+            results, capped = await run_posix_search(
+                scope.workspace,
+                cwd=cwd,
+                target=target,
+                pattern=pattern,
+                limit=self._max_search_results,
+                accept=accept,
+            )
+        if ctx is not None:
+            await ctx.emit(
+                self._searched(scope, resolved, pattern, search='grep', match_count=len(results), truncated=capped)
+            )
+        if capped:
+            results.append(f'[... truncated at {self._max_search_results} lines or search output byte limit]')
+        return '\n'.join(results) if results else 'No matches found.'
 
     def _searched(
         self, scope: _Scope, resolved: str, pattern: str, *, search: SearchKind, match_count: int, truncated: bool
@@ -1377,15 +1436,17 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if not supports_commands(scope.workspace):
                 pattern = '**' if glob is None else glob if '/' in glob else f'**/{glob}'
                 return await self._find_files(scope, ctx, pattern, path=path, files_only=True)
+
+            async def accept(record: Record) -> str | None:
+                if glob is not None and not fnmatch.fnmatch(posixpath.normpath(record.path), glob):
+                    return None
+                return await self._authorized_entry(scope, resolved, record)
+
             results, capped = await run_posix_search(
                 scope.workspace,
                 cwd=resolved,
                 limit=self._max_find_results,
-                accept=lambda record: (
-                    self._ripgrep_entry(scope, resolved, record)
-                    if glob is None or fnmatch.fnmatch(posixpath.normpath(record.path), glob)
-                    else None
-                ),
+                accept=accept,
             )
         if ctx is not None:
             await ctx.emit(
@@ -1460,7 +1521,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         )
 
     @_recoverable
-    async def _grep(
+    async def _grep(  # noqa: C901  -- ripgrep and POSIX fallback share output bookkeeping
         self,
         scope: _Scope,
         ctx: RunContext[AgentDepsT] | None,
@@ -1522,6 +1583,12 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 return await self._search_files(
                     scope, ctx, f'(?i){regex}' if ignore_case else regex, path=path, include_glob=glob
                 )
+
+            async def accept(record: Record) -> str | None:
+                if glob is not None and not fnmatch.fnmatch(posixpath.normpath(record.path), glob):
+                    return None
+                return await self._authorized_match(scope, cwd, record)
+
             results, capped = await run_posix_search(
                 scope.workspace,
                 cwd=cwd,
@@ -1531,11 +1598,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 ignore_case=ignore_case,
                 context=context,
                 limit=self._max_search_results,
-                accept=lambda record: (
-                    self._match_line(scope, cwd, record)
-                    if glob is None or fnmatch.fnmatch(posixpath.normpath(record.path), glob)
-                    else None
-                ),
+                accept=accept,
             )
         if ctx is not None:
             await ctx.emit(
@@ -1544,6 +1607,17 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if capped:
             results.append(f'[... truncated at {self._max_search_results} lines]')
         return '\n'.join(results) if results else 'No matches found.'
+
+    async def _authorized_entry(self, scope: _Scope, cwd: str, record: Record) -> str | None:
+        path = posixpath.normpath(posixpath.join(cwd, record.path))
+        if not await self._readable_entry(scope, path):
+            return None
+        return self._ripgrep_entry(scope, cwd, record)
+
+    async def _authorized_match(self, scope: _Scope, cwd: str, record: Record) -> str | None:
+        if await self._authorized_entry(scope, cwd, record) is None:
+            return None
+        return self._match_line(scope, cwd, record)
 
     def _ripgrep_entry(self, scope: _Scope, cwd: str, record: Record) -> str | None:
         """Authorize a path `rg` printed and return it relative to the working directory, or `None` to drop it.

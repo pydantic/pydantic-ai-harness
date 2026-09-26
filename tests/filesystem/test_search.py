@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.workspaces import CommandResult, LocalWorkspaceBackend, Workspace, WorkspaceCommand
 
 from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
@@ -53,3 +54,50 @@ async def test_no_rg_uses_one_command_and_preserves_ignores(tmp_path: Path) -> N
     assert await tools.list_files(glob='*.py', workspace=workspace) == 'src/visible.py'
     assert backend.commands == 3
     assert backend.reads == 0
+
+
+async def test_no_rg_search_files_is_one_command_and_confines_symlinks(tmp_path: Path) -> None:
+    (tmp_path / 'safe.txt').write_text('needle\n')
+    (tmp_path / 'secret.txt').write_text('needle\n')
+    (tmp_path / 'alias.txt').symlink_to('secret.txt')
+    outside = tmp_path.parent / f'{tmp_path.name}-outside'
+    outside.write_text('needle\n')
+    try:
+        (tmp_path / 'escape.txt').symlink_to(outside)
+        backend = CountingBackend(tmp_path)
+        tools = FileSystem[None](root_dir=tmp_path, denied_patterns=['secret.txt']).get_toolset()
+        assert isinstance(tools, FileSystemToolset)
+        workspace = Workspace(backend)
+        await tools.grep('absent', workspace=workspace)  # Discover the missing sandbox rg.
+        backend.commands = 0
+        result = await tools.search_files('needle', workspace=workspace)
+        assert 'safe.txt:1:needle' in result
+        assert 'secret.txt' not in result
+        assert 'alias.txt' not in result
+        assert 'escape.txt' not in result
+        assert backend.commands <= 2
+        assert backend.reads == 0
+    finally:
+        outside.unlink()
+
+
+async def test_no_rg_ignore_and_failure_are_not_silent(tmp_path: Path) -> None:
+    (tmp_path / 'visible.txt').write_text('needle\n')
+    (tmp_path / 'hidden.txt').write_text('needle\n')
+    (tmp_path / '.ignore').write_text('hidden.txt\n')
+    backend = CountingBackend(tmp_path)
+    tools = FileSystem[None](root_dir=tmp_path).get_toolset()
+    assert isinstance(tools, FileSystemToolset)
+    workspace = Workspace(backend)
+    await tools.grep('absent', workspace=workspace)
+    assert 'hidden.txt' not in await tools.search_files('needle', workspace=workspace)
+    assert backend.reads == 0
+
+
+async def test_no_rg_rejects_unsupported_regex(tmp_path: Path) -> None:
+    (tmp_path / 'file.txt').write_text('needle\n')
+    backend = CountingBackend(tmp_path)
+    tools = FileSystem[None](root_dir=tmp_path, tools=['grep']).get_toolset()
+    assert isinstance(tools, FileSystemToolset)
+    with pytest.raises((ModelRetry, ValueError), match='ripgrep|POSIX|unsupported'):
+        await tools.grep(r'\d+', workspace=backend)
