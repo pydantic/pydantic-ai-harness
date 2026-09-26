@@ -18,7 +18,7 @@ import posixpath
 import shlex
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import anyio
 from pydantic_ai.exceptions import ModelRetry
@@ -108,6 +108,7 @@ class Job:
     """The process group to signal, or `None` when only the wrapper's PID is safe to signal."""
     combined: bool
     """Whether stdout and stderr share `output.log`, rather than `stdout.log` and `stderr.log`."""
+    _final_status: str | None = field(default=None, init=False, repr=False)
 
     @classmethod
     async def launch(
@@ -177,10 +178,20 @@ class Job:
 
     async def status_text(self) -> str | None:
         """`status.json` as the wrapper published it, or `None` before the first publication."""
+        if self._final_status is not None:
+            return self._final_status
         try:
-            return (await self.workspace.read_bytes(self.status_path)).decode('utf-8', errors='replace')
+            text = (await self.workspace.read_bytes(self.status_path)).decode('utf-8', errors='replace')
         except FileNotFoundError:
             return None
+        try:
+            exit_code = json.loads(text)['exit_code']
+        except (ValueError, KeyError, TypeError):
+            exit_code = None
+        # A published exit code never changes; reuse it during drain and final rendering.
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+            self._final_status = text
+        return text
 
     async def status(self) -> tuple[bool, int | None]:
         """`(running, exit_code)`; a job whose status is not yet published counts as running."""

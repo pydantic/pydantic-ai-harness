@@ -1406,6 +1406,16 @@ class TestCodeModeInterop:
 
 
 class TestStopEscalation:
+    async def test_finished_job_status_is_read_once(self, shell_dir: Path) -> None:
+        ts = _shell_toolset(shell_dir)
+        command_id = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'true'))
+        job = await _job(ts, _ctx(shell_dir), command_id)
+        with anyio.fail_after(10):
+            while (await job.status())[0]:
+                await anyio.sleep(0.01)
+        await job.cleanup()
+        assert (await job.status())[0] is False
+
     async def test_stop_signals_group_after_wrapper_exits(self, shell_dir: Path) -> None:
         ts = _shell_toolset(shell_dir)
         command_id = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'exec sleep 30'))
