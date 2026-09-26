@@ -405,6 +405,14 @@ class TestCreate:
             await started()
         assert type(exc.value) is WorkspaceUnavailableError
 
+    async def test_create_timeout_mentions_image_build_or_pull(
+        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_modal.create_gate = anyio.Event()
+        monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._CREATE_TIMEOUT', 0.01)
+        with pytest.raises(TimeoutError, match='image build or pull may still be running'):
+            await ModalSandboxBackend().get_client()
+
     async def test_image_build_error_is_unavailable(self, fake_modal: FakeModal) -> None:
         fake_modal.create_error = fake_modal.exception('ImageBuildError')('bad image')
         with pytest.raises(WorkspaceUnavailableError, match='Could not start Modal sandbox: bad image'):

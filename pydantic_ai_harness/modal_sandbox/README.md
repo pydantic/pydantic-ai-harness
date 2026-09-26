@@ -37,7 +37,7 @@ result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summa
 
 `Coder`'s shell and file tools now run in the sandbox, not on your machine. With `Coder`, `RepoContext` creates the sandbox when the run starts, even without a tool call. Use `Coder(repo_context=False)` for lazy creation. It keeps running, and billing, after the run ends; see [Clean up](#clean-up).
 
-A new sandbox lives for up to 24 hours, Modal's maximum; pass `ModalSandbox(sandbox_timeout=3600)` to end it sooner. If Modal can't start the sandbox, for example because the image doesn't exist, the first tool call raises an error that says why.
+A new sandbox lives for up to 24 hours, Modal's maximum; pass `ModalSandbox(sandbox_timeout=3600)` to end it sooner. A first use may take several minutes while Modal builds or pulls an image. If Modal cannot start the sandbox, for example because the image does not exist, the first tool call raises an error that says why.
 
 ## Continue in the same sandbox
 

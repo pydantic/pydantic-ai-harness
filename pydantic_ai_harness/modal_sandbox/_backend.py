@@ -61,7 +61,7 @@ _MISSING_MODAL = (
 _AUTH_MESSAGE = 'Modal rejected the credentials. Set MODAL_TOKEN_ID / MODAL_TOKEN_SECRET or run `modal token new`.'
 
 # Bound the workspace-create RPCs so a wedged control plane cannot hang acquisition.
-_CREATE_TIMEOUT = 120
+_CREATE_TIMEOUT = 600
 
 
 _INTERNAL_EXEC_TIMEOUT = 10
@@ -422,7 +422,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             # engine retries it.
             raise TimeoutError(
                 f'Modal sandbox creation did not complete within {_CREATE_TIMEOUT}s; '
-                'the Modal control plane may be unreachable.'
+                'an image build or pull may still be running. Check for an existing sandbox before retrying.'
             )
         return sandbox
 
