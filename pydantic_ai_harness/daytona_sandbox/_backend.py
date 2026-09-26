@@ -533,8 +533,29 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                 await _raise_failure(sandbox, error, f'Could not create {parent!r}')
             if mkdir.exit_code != 0:
                 raise _mkdir_error(mkdir.result, parent)
+        # Resolve the destination before renaming: replacing the symlink itself would change
+        # write_bytes' previous follow-symlink behavior. A sibling stage keeps rename on one filesystem.
+        destination = await self.realpath(path)
+        staged = f'{destination}.pydantic-ai-{uuid.uuid4().hex}.tmp'
         async with _translated_filesystem_error(sandbox, path):
-            await sandbox.fs.upload_file(data, path, timeout=_REQUEST_TIMEOUT)
+            try:
+                await sandbox.fs.upload_file(data, staged, timeout=_REQUEST_TIMEOUT)
+                command = (
+                    f'if [ -e {shlex.quote(destination)} ]; then '
+                    f'chmod --reference={shlex.quote(destination)} -- {shlex.quote(staged)}; fi && '
+                    f'mv -fT -- {shlex.quote(staged)} {shlex.quote(destination)}'
+                )
+                result = await sandbox.process.exec(command, timeout=_REQUEST_TIMEOUT)
+                if result.exit_code != 0:
+                    raise WorkspaceError(f'Could not replace {path!r}: {result.result}')
+            except BaseException:
+                # SIGKILL cannot clean an in-flight upload, but ordinary errors and cancellation can.
+                with anyio.move_on_after(5, shield=True):
+                    try:
+                        await sandbox.fs.delete_file(staged, request_timeout=_REQUEST_TIMEOUT)
+                    except Exception:
+                        pass
+                raise
 
     async def stat(self, path: str) -> FileEntry:
         _check_path(path)

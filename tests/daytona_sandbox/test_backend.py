@@ -616,6 +616,40 @@ class TestErrorsAndFilesystem:
         await sandbox.remove('/workspace/pkg')
         assert await sandbox.exists('/workspace/pkg/a.py') is False
 
+    async def test_interrupted_upload_preserves_target_and_cleans_stage(
+        self, fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.files['/old'] = b'original'
+        original = sandbox.fs.upload_file
+
+        async def interrupted(data: bytes, path: str, timeout: int = 1800) -> None:
+            await original(data[:3], path, timeout=timeout)
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(sandbox.fs, 'upload_file', interrupted)
+        for path in ('/old', '/new'):
+            with pytest.raises(asyncio.CancelledError):
+                await backend.write_bytes(path, b'replacement')
+        assert sandbox.files == {'/old': b'original'}
+
+    async def test_staged_write_follows_symlink_and_preserves_mode(
+        self, fake_daytona: FakeDaytona, tmp_path: Path
+    ) -> None:
+        fake_daytona.host_root = tmp_path.resolve()
+        backend = await started()
+        target = tmp_path / 'target'
+        target.write_bytes(b'old')
+        target.chmod(0o640)
+        link = tmp_path / 'link'
+        link.symlink_to(target)
+        await backend.write_bytes(str(link), b'new')
+        assert link.is_symlink()
+        assert target.read_bytes() == b'new'
+        assert target.stat().st_mode & 0o777 == 0o640
+        assert sorted(item.name for item in tmp_path.iterdir()) == ['link', 'target']
+
     @pytest.mark.parametrize('below', ['file', 'file/sub'])
     async def test_writing_below_a_file_is_not_a_directory(
         self, fake_daytona: FakeDaytona, tmp_path: Path, below: str

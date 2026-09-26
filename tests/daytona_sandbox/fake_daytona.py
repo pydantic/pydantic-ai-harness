@@ -71,6 +71,12 @@ class FakeProcess:
             return SimpleNamespace(result='', exit_code=1)
         if command.startswith('find '):
             return SimpleNamespace(result='', exit_code=0)
+        if command.startswith('if [ -e '):
+            source, destination = shlex.split(command)[-2:]
+            if source not in self.owner.files:
+                return SimpleNamespace(result='missing stage', exit_code=1)
+            self.owner.files[destination] = self.owner.files.pop(source)
+            return SimpleNamespace(result='', exit_code=0)
         assert command.startswith('mkdir -p -- ')
         return SimpleNamespace(result='', exit_code=self.owner.mkdir_exit_code)
 
@@ -267,6 +273,12 @@ class _HostProcess(FakeProcess):
             target = shlex.split(command)[-1]
             resolved = (Path(cwd or self.host_root) / target).resolve(strict=False)
             return SimpleNamespace(result=f'{resolved}\n', exit_code=0)
+        if command.startswith('if [ -e '):
+            source, destination = shlex.split(command)[-2:]
+            if Path(destination).exists():
+                os.chmod(source, Path(destination).stat().st_mode)
+            os.replace(source, destination)
+            return SimpleNamespace(result='', exit_code=0)
         # `exec` reports stdout and stderr combined as `result`.
         done = await anyio.run_process(
             ['sh', '-c', command], cwd=cwd or self.host_root, check=False, stderr=subprocess.STDOUT
