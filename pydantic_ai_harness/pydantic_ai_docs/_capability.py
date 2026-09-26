@@ -54,7 +54,7 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
 
     agent = Agent(
         'anthropic:claude-sonnet-4-6',
-        capabilities=[LocalWorkspace('.'), PydanticAIDocs(local_docs_path=Path('/workspace/pydantic-ai/docs'))],
+        capabilities=[LocalWorkspace('.'), PydanticAIDocs(local_docs_path=Path('docs'))],
     )
     ```
     """

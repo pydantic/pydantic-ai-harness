@@ -8,7 +8,7 @@ from pathlib import Path
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored
+from pydantic_ai_harness._warn import SET_WORKING_DIR_ON_THE_WORKSPACE, warn_argument_ignored
 from pydantic_ai_harness.repo_context._inventory import AgentContextInventory, scan_assets
 
 
@@ -20,7 +20,7 @@ class RepoContextToolset(FunctionToolset[AgentDepsT]):
     ) -> None:
         super().__init__(id=id)
         if workspace_dir is not None:
-            warn_argument_ignored('RepoContextToolset', 'workspace_dir', WORKING_DIR_IS_THE_WORKSPACES, stacklevel=3)
+            warn_argument_ignored('RepoContextToolset', 'workspace_dir', SET_WORKING_DIR_ON_THE_WORKSPACE, stacklevel=3)
         self._asset_roots = asset_roots
         self.add_function(self.inventory_agent_context, name=tool_name)
 
