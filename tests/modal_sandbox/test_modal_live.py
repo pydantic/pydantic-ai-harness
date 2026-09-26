@@ -47,7 +47,7 @@ async def owned_backend(**settings: Any) -> AsyncGenerator[ModalSandboxBackend, 
     backend = ModalSandboxBackend(**(defaults | settings))
     native = await backend.get_client()
     with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
-        refs.write(f'modal modal {native.object_id}\n')
+        refs.write(f'modal-adopt modal {native.object_id}\n')
     try:
         yield backend
     finally:
@@ -58,12 +58,23 @@ async def owned_backend(**settings: Any) -> AsyncGenerator[ModalSandboxBackend, 
             await native.detach.aio()  # pyright: ignore[reportUnknownMemberType]
 
 
+async def test_destroy_ref_without_resuming_workspace() -> None:
+    async with owned_backend() as backend:
+        ref = backend.ref
+        assert ref is not None
+        await ModalSandbox().destroy(ref)
+        # Modal may keep poll() at running while it shuts down; refusal to exec
+        # proves the ref can no longer run work without waiting for poll convergence.
+        with pytest.raises(WorkspaceUnavailableError):
+            await backend.run(['true'], timeout=10)
+
+
 async def test_cancel_stops_foreground_descendants_without_destroying_sandbox() -> None:
     marker = uuid.uuid4().hex
     backend = ModalSandboxBackend(sandbox_timeout=LIVE_SANDBOX_TIMEOUT, idle_timeout=LIVE_IDLE_TIMEOUT)
     native = await backend.get_client()
     with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
-        refs.write(f'modal modal {native.object_id}\n')
+        refs.write(f'modal-adopt modal {native.object_id}\n')
     try:
         task = asyncio.create_task(
             backend.run(

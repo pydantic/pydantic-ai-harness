@@ -125,6 +125,8 @@ async def terminate_sandbox(ref: WorkspaceRef) -> None:
 
 `run(timeout=...)` starts its clock after sandbox acquisition and includes command start, execution, and output collection. On its deadline or cancellation, the backend attempts to stop the command's foreground process group, not the shared sandbox or detached background jobs. Partial stdout and stderr are available on `WorkspaceTimeoutError`; if the stop RPC fails, the command may still run, so retain the sandbox ref for explicit cleanup. `timeout=None` has no command deadline; the sandbox's own lifetime and idle settings still apply. Custom or attached images without `setsid -w` still run commands, but cancellation can signal only the wrapper process, not its descendants. Install util-linux (`setsid`) in the image for process-group stopping.
 
+File reads refuse FIFOs rather than waiting indefinitely for a writer. Writes through symlinks update the target, including when the target was created by a shell command.
+
 `get_client()` returns the `modal.Sandbox`. A sandbox you don't terminate ends when its `sandbox_timeout` runs out, or after `idle_timeout` seconds without activity if you set one. See [Modal's timeouts](https://modal.com/docs/guide/sandbox#timeouts).
 
 A failed run returns no result, so there is no ref to store. To terminate its sandbox, clean up in an `on_run_error` hook; `after_run` doesn't run when a run fails:

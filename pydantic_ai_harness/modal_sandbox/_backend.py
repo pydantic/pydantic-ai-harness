@@ -339,9 +339,29 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     async def write_bytes(self, path: str, data: bytes) -> None:
         absolute_path('path', path)
         # Modal takes the data first, creates missing parents, and replaces existing contents.
+        import modal
+
         sandbox = await self.get_client()
         async with self._mapped_errors(sandbox, f'Could not write {path!r}', path):
-            await sandbox.filesystem.write_bytes.aio(data, path)
+            # Modal replaces a symlink on write, unlike open(2). Resolve the leaf
+            # explicitly so writes through links update the same file the shell sees.
+            target = path
+            visited: set[str] = set()
+            for _ in range(_MAX_SYMLINK_HOPS):
+                normalized = posixpath.normpath(target)
+                if normalized in visited:
+                    raise OSError(f'Symlink loop in the Modal sandbox: {path!r}')
+                visited.add(normalized)
+                try:
+                    info = await sandbox.filesystem.stat.aio(target)
+                except modal.exception.SandboxFilesystemNotFoundError:
+                    break
+                if not info.is_symlink() or info.symlink_target is None:
+                    break
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(target), info.symlink_target))
+            else:
+                raise OSError(f'Too many symlinks in the Modal sandbox: {path!r}')
+            await sandbox.filesystem.write_bytes.aio(data, target)
 
     async def stat(self, path: str) -> FileEntry:
         absolute_path('path', path)
