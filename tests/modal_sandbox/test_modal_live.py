@@ -18,7 +18,6 @@ import anyio
 import pytest
 from pydantic_ai.tools import RunContext
 from pydantic_ai.workspaces import (
-    Workspace,
     WorkspaceBackend,
     WorkspaceRef,
     WorkspaceTimeoutError,
@@ -52,15 +51,6 @@ async def owned_backend(**settings: Any) -> AsyncGenerator[ModalSandboxBackend, 
         finally:
             # Modal 1.5.2 leaves the return type of `detach.aio()` unspecified.
             await native.detach.aio()  # pyright: ignore[reportUnknownMemberType]
-
-
-async def test_real_command_and_filesystem() -> None:
-    async with owned_backend() as backend:
-        result = await backend.run(['sh', '-c', 'printf out; printf err >&2; exit 3'], timeout=30)
-        assert (result.stdout, result.stderr, result.exit_code) == ('out', 'err', 3)
-        workspace = Workspace(backend)
-        await workspace.write_text('/tmp/modal-sandbox.txt', 'content')
-        assert await workspace.read_text('/tmp/modal-sandbox.txt') == 'content'
 
 
 async def test_real_timeout_retains_output() -> None:

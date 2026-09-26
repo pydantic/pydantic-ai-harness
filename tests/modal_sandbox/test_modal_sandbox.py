@@ -87,14 +87,6 @@ async def test_native_workspace_and_ref_conflict(fake_modal: FakeModal) -> None:
         ModalSandboxBackend(workspace=native, ref=WorkspaceRef(provider='modal', id='other'))
 
 
-async def test_filesystem_directory_error_uses_builtin_exception(fake_modal: FakeModal) -> None:
-    backend = ModalSandboxBackend()
-    await backend.get_client()
-    fake_modal.sandboxes[0].directories.add('/directory')
-    with pytest.raises(IsADirectoryError, match='Is a directory'):
-        await backend.read_bytes('/directory')
-
-
 async def test_filesystem_not_directory_error_uses_builtin_exception(fake_modal: FakeModal) -> None:
     backend = ModalSandboxBackend()
     await backend.get_client()

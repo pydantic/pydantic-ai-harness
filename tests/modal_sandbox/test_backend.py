@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,7 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 
-from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
+from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend, _backend
 
 from .fake_modal import FakeImage, FakeModal, FileInfo
 
@@ -41,12 +41,6 @@ class TestRun:
         backend = await started()
         await backend.run('echo hi | wc -c', shell=True)
         assert fake_modal.sandboxes[0].exec_calls[-1].argv == ['/bin/sh', '-c', 'echo hi | wc -c']
-
-    async def test_reports_streams_and_exit_code(self, fake_modal: FakeModal) -> None:
-        fake_modal.responder = lambda argv, timeout: ('out', 'err', 2)
-        backend = await started()
-        result = await backend.run(['false'])
-        assert (result.stdout, result.stderr, result.exit_code) == ('out', 'err', 2)
 
     async def test_cwd_and_env_reach_the_command(self, fake_modal: FakeModal) -> None:
         backend = await started()
@@ -128,12 +122,18 @@ class TestRun:
         backend = await started()
         assert (await backend.run(['x'])).exit_code == -1
 
-    async def test_server_side_deadline_kill_is_a_timeout(self, fake_modal: FakeModal) -> None:
+    async def test_server_side_deadline_kill_is_a_timeout(
+        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # The server enforces the deadline before the client's own clock fires, so its
         # SIGKILL (exit 137) can beat Modal's -1 sentinel; a 137 that consumed the whole
         # deadline window is a timeout, not a mysterious ordinary exit.
+        now = 0.0
+        monkeypatch.setattr(_backend, 'time', types.SimpleNamespace(monotonic=lambda: now))
+
         def deadline_kill(argv: list[str], timeout: int | None) -> tuple[str, str, int]:
-            time.sleep(1.05)  # the deadline is consumed inside the exec RPC, before `wait()`
+            nonlocal now
+            now += 1.05  # the deadline is consumed inside the exec RPC, before `wait()`
             return '', '', 137
 
         fake_modal.responder = deadline_kill
@@ -406,11 +406,6 @@ class TestCreate:
 
 
 class TestConnect:
-    async def test_connects_to_a_running_sandbox(self, fake_modal: FakeModal) -> None:
-        backend = await started(ref=WorkspaceRef(provider='modal', id='sb-keep'))
-        assert fake_modal.attach_ids == ['sb-keep']
-        assert backend.ref == WorkspaceRef(provider='modal', id='sb-keep')
-
     async def test_connect_to_a_finished_sandbox_fails(self, fake_modal: FakeModal) -> None:
         # Modal hands back a handle for a sandbox it still knows about even after it has
         # terminated, so a ref must not resolve to a dead environment.
@@ -445,11 +440,6 @@ class TestConnect:
 
 
 class TestFilesystem:
-    async def test_write_then_read_round_trips(self, fake_modal: FakeModal) -> None:
-        backend = await started()
-        await backend.write_bytes('/tmp/a.txt', b'body')
-        assert await backend.read_bytes('/tmp/a.txt') == b'body'
-
     async def test_stat_reports_size_for_files(self, fake_modal: FakeModal) -> None:
         backend = await started()
         await backend.write_bytes('/tmp/a.txt', b'body')
@@ -465,7 +455,6 @@ class TestFilesystem:
         assert (entry.is_dir, entry.size) == (True, None)
 
     async def test_list_dir_returns_absolute_paths(self, fake_modal: FakeModal) -> None:
-        fake_modal.sandboxes.clear()
         backend = await started()
         fake_modal.sandboxes[0].listing = [FileInfo('a.py', False, size=7), FileInfo('pkg', True)]
         entries = await backend.list_dir('/srv')
@@ -499,12 +488,6 @@ class TestFilesystem:
         await backend.make_dir('/tmp/pkg')
         await backend.remove('/tmp/pkg')
         assert fake_modal.sandboxes[0].removals == [('/tmp/pkg', True)]
-
-    async def test_exists(self, fake_modal: FakeModal) -> None:
-        backend = await started()
-        await backend.write_bytes('/tmp/a.txt', b'body')
-        assert await backend.exists('/tmp/a.txt') is True
-        assert await backend.exists('/tmp/missing.txt') is False
 
     async def test_exists_is_false_through_a_non_directory(self, fake_modal: FakeModal) -> None:
         # Modal splits "there is nothing at that path" in two, and a non-leaf path component

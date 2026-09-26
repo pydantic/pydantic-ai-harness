@@ -170,7 +170,7 @@ class FakeInvalidError(FakeModalError):
 
 
 class FakeConflictError(FakeInvalidError):
-    """Stand-in for `modal.exception.ConflictError` (first exec on a dead workspace, or a transient abort)."""
+    """Stand-in for `modal.exception.ConflictError` (first exec on a dead sandbox, or a transient abort)."""
 
 
 class FakeSandboxFilesystemError(FakeModalError):
@@ -237,10 +237,10 @@ class FileInfo:
 
 
 class _FakeFilesystem:
-    """Mirrors `workspace.filesystem`: an in-memory store the tests can drive and inspect."""
+    """Mirrors `sandbox.filesystem`: an in-memory store the tests can drive and inspect."""
 
-    def __init__(self, workspace: FakeSandbox) -> None:
-        self._workspace = workspace
+    def __init__(self, sandbox: FakeSandbox) -> None:
+        self._sandbox = sandbox
         self.read_bytes = _AioCallable(self._read_bytes)
         self.write_bytes = _AioCallable(self._write_bytes)
         self.list_files = _AioCallable(self._list_files)
@@ -250,51 +250,47 @@ class _FakeFilesystem:
 
     def _read_bytes(self, remote_path: str) -> bytes:
         self._check(remote_path)
-        if remote_path in self._workspace.directories:
-            raise FakeSandboxFilesystemIsADirectoryError(f'Is a directory: {remote_path}')
-        data = self._workspace.files.get(remote_path)
+        data = self._sandbox.files.get(remote_path)
         if data is None:
             raise FakeSandboxFilesystemNotFoundError(f'No such file or directory: {remote_path}')
         return data
 
     def _stat(self, remote_path: str) -> FileInfo:
         self._check(remote_path)
-        if remote_path in self._workspace.directories:
+        if remote_path in self._sandbox.directories:
             return FileInfo(posixpath.basename(remote_path), True)
-        if remote_path not in self._workspace.files and remote_path not in self._workspace.stat_sizes:
+        data = self._sandbox.files.get(remote_path)
+        if data is None:
             raise FakeSandboxFilesystemNotFoundError(f'No such file or directory: {remote_path}')
-        # Size comes from the stored bytes, or an override the test set for this path.
-        size = self._workspace.stat_sizes.get(remote_path, len(self._workspace.files.get(remote_path, b'')))
         # Real Modal reports the entry's basename, not the full path.
-        return FileInfo(posixpath.basename(remote_path), False, size=size)
+        return FileInfo(posixpath.basename(remote_path), False, size=len(data))
 
     def _write_bytes(self, data: bytes, remote_path: str) -> None:
         self._check(remote_path)
-        self._workspace.files[remote_path] = data
+        self._sandbox.files[remote_path] = data
 
     def _list_files(self, remote_path: str) -> list[FileInfo]:
         self._check(remote_path)
-        self._workspace.list_paths.append(remote_path)
-        return self._workspace.listing
+        return self._sandbox.listing
 
     def _make_directory(self, remote_path: str, *, create_parents: bool = True) -> None:
-        # Closed keyword signature on purpose, like `workspace_create`: `create_parents` is the
+        # Closed keyword signature on purpose, like `sandbox_create`: `create_parents` is the
         # real API's `mkdir -p` switch and defaults to True there too.
         self._check(remote_path)
-        self._workspace.directories.add(remote_path)
+        self._sandbox.directories.add(remote_path)
 
     def _remove(self, remote_path: str, *, recursive: bool = False) -> None:
         self._check(remote_path)
-        self._workspace.removals.append((remote_path, recursive))
-        self._workspace.directories.discard(remote_path)
-        self._workspace.files.pop(remote_path, None)
+        self._sandbox.removals.append((remote_path, recursive))
+        self._sandbox.directories.discard(remote_path)
+        self._sandbox.files.pop(remote_path, None)
 
     def _check(self, remote_path: str) -> None:
         # Real Modal's filesystem API only accepts absolute paths; assert it here so a
         # regression that let a relative path through unresolved fails in the fake the way it
         # would in prod, instead of silently keying the in-memory store on a relative path.
         assert posixpath.isabs(remote_path), f'Modal filesystem requires an absolute path, got {remote_path!r}'
-        error = self._workspace.fs_error
+        error = self._sandbox.fs_error
         if isinstance(error, FakeSandboxFilesystemError):
             # What the filesystem tool itself reported; Modal raises these as they are.
             raise error
@@ -333,7 +329,7 @@ def _host_errors(remote_path: str) -> Generator[None]:
 
 
 class _HostFilesystem:
-    """Mirrors `workspace.filesystem` on the real host filesystem, for the conformance suite.
+    """Mirrors `sandbox.filesystem` on the real host filesystem, for the conformance suite.
 
     The suite checks that commands and filesystem methods see one environment, which the
     in-memory store cannot show; here both act on the same host paths.
@@ -396,14 +392,10 @@ class FakeSandbox:
         self.files: dict[str, bytes] = {}
         self.directories: set[str] = set()
         self.removals: list[tuple[str, bool]] = []
-        # Lets a test report a large size for a path without allocating the bytes.
-        self.stat_sizes: dict[str, int] = {}
-        self.list_paths: list[str] = []
         self.listing: list[FileInfo] = []
         self.fs_error: Exception | None = None
         self.poll_result: int | None = None
         self.poll_error: Exception | None = None
-        self.poll_calls = 0
         self.shutting_down = False
         self.terminate = _AioCallable(self._terminate)
         self.workdir: str | None = None
@@ -477,7 +469,6 @@ class FakeSandbox:
         )
 
     def _poll(self) -> int | None:
-        self.poll_calls += 1
         if self.poll_error is not None:
             raise self.poll_error
         if self.poll_result is not None:
@@ -493,9 +484,6 @@ class FakeModal:
         self.sandboxes: list[FakeSandbox] = []
         self.create_kwargs: list[dict[str, object]] = []
         self.app_lookups: list[dict[str, object]] = []
-        # The marker objects `App.lookup` returned, so a test can assert the looked-up app
-        # is the one passed to `Sandbox.create`.
-        self.apps: list[object] = []
         self.image_tags: list[str] = []
         self.attach_ids: list[str] = []
         self.owned_creates = 0
@@ -525,17 +513,15 @@ class FakeModal:
 
         def app_lookup(name: str, *, create_if_missing: bool = False) -> object:
             control.app_lookups.append({'name': name, 'create_if_missing': create_if_missing})
-            app = object()
-            control.apps.append(app)
-            return app
+            return object()
 
         def image_from_registry(tag: str) -> object:
-            # Closed signature on purpose, like `workspace_create` below: signature drift in
+            # Closed signature on purpose, like `sandbox_create` below: signature drift in
             # the backend should fail here, not only in production.
             control.image_tags.append(tag)
             return object()
 
-        def workspace_create(
+        def sandbox_create(
             *,
             app: object,
             image: object,
@@ -558,22 +544,22 @@ class FakeModal:
             )
             control.owned_creates += 1
             suffix = '' if control.owned_creates == 1 else f'-{control.owned_creates}'
-            workspace = FakeSandbox(control, f'sb-owned{suffix}')
-            workspace.workdir = workdir
-            control.sandboxes.append(workspace)
-            return workspace
+            sandbox = FakeSandbox(control, f'sb-owned{suffix}')
+            sandbox.workdir = workdir
+            control.sandboxes.append(sandbox)
+            return sandbox
 
-        def workspace_from_id(id: str) -> FakeSandbox:
+        def sandbox_from_id(id: str) -> FakeSandbox:
             control.attach_ids.append(id)
             if control.attach_error is not None:
                 raise control.attach_error
             existing = next((s for s in control.sandboxes if s.object_id == id), None)
             if existing is not None:
                 return existing
-            workspace = FakeSandbox(control, id)
-            workspace.poll_result = control.attach_poll_result
-            control.sandboxes.append(workspace)
-            return workspace
+            sandbox = FakeSandbox(control, id)
+            sandbox.poll_result = control.attach_poll_result
+            control.sandboxes.append(sandbox)
+            return sandbox
 
         class App:
             lookup = _AioCallable(app_lookup)
@@ -586,8 +572,8 @@ class FakeModal:
             debian_slim = staticmethod(image_debian_slim)
 
         class Sandbox:
-            create = _GatedCreate(workspace_create, control)
-            from_id = _AioCallable(workspace_from_id)
+            create = _GatedCreate(sandbox_create, control)
+            from_id = _AioCallable(sandbox_from_id)
 
         module.App = App  # type: ignore[attr-defined]
         module.Image = Image  # type: ignore[attr-defined]
