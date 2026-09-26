@@ -498,6 +498,40 @@ class TestForRunIsolation:
         assert run2._cwd is None
 
 
+class TestDurableJob:
+    async def test_retry_of_same_tool_call_reuses_background_job(self, shell_dir: Path) -> None:
+        toolset = _shell_toolset(shell_dir)
+        ctx = _ctx(shell_dir)
+        ctx.run_id = 'durable-run'
+        ctx.tool_call_id = 'launch-1'
+        command = 'echo one >> side-effects.txt'
+        first = await toolset.start_command(ctx, command)
+        second = await toolset.start_command(ctx, command)
+        assert first == second
+        command_id = first.split('ID: ')[-1]
+        with anyio.fail_after(5):
+            while 'finished' not in await toolset.check_command(ctx, command_id):
+                await anyio.sleep(0.05)
+        assert (shell_dir / 'side-effects.txt').read_text().splitlines() == ['one']
+
+
+class TestDurableCwd:
+    async def test_run_cwd_rehydrates_from_workspace_without_leaking(
+        self, persist_toolset: ShellToolset[None], shell_dir: Path
+    ) -> None:
+        first = _ctx(shell_dir)
+        first.run_id = 'first'
+        await persist_toolset.run_command(first, 'cd subdir')
+
+        # A different toolset instance stands in for an activity on a new worker.
+        other = await persist_toolset.for_run(_ctx(shell_dir))
+        assert isinstance(other, ShellToolset)
+        assert str(shell_dir / 'subdir') in await other.run_command(first, 'pwd')
+        second = _ctx(shell_dir)
+        second.run_id = 'second'
+        assert str(shell_dir / 'subdir') not in await other.run_command(second, 'pwd')
+
+
 class TestPersistCwdHardening:
     """B4: regression tests for the old stdout-sentinel footguns -- a command's
     output spoofing the cwd, and `;` silently disabling tracking."""

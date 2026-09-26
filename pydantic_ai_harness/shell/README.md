@@ -294,8 +294,14 @@ workspace capability in Python).
 
 - Under Temporal, the `shell` tool emits no command events: tools run in activities, which cannot
   reach the run's event stream yet ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
-- `persist_cwd=True` fails under Prefect, and under Temporal the directory a `cd` moved to carries
-  over to later runs on the same worker.
+- With `persist_cwd=True`, the cwd is kept per run in the workspace under
+  `.pydantic-ai-harness/shell/run-state/`, so it can be restored by another worker.
+  Commands in the same run should execute in order; simultaneous commands that change cwd
+  can overwrite each other's state.
+- `start_command` uses the run and tool-call IDs to reattach to a job after an activity retry.
+  If the launcher claims the job directory but fails before publishing its handle, a retry
+  reports a pending launch rather than starting a second process. Remove stale job files manually
+  after confirming the process has stopped.
 
 ## Further reading
 
