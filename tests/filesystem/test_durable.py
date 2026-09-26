@@ -33,9 +33,63 @@ class FileWorkflow(PydanticAIWorkflow):
         return result.output
 
 
+def _default_model(messages: object, info: object) -> ModelResponse:
+    if not any(p.part_kind == 'tool-return' for m in messages for p in m.parts):  # type: ignore[attr-defined]
+        path = messages[0].parts[0].content  # type: ignore[attr-defined]
+        return ModelResponse(parts=[ToolCallPart('write_file', {'path': path, 'content': 'changed'})])
+    return ModelResponse(parts=[TextPart('done')])
+
+
+async def _default_stream(messages: object, info: object):
+    for index, part in enumerate(_default_model(messages, info).parts):
+        if isinstance(part, TextPart):
+            yield part.content
+        elif isinstance(part, ToolCallPart):
+            yield {index: DeltaToolCall(name=part.tool_name, json_args=json.dumps(part.args))}
+
+
+_default_agent = Agent(
+    FunctionModel(_default_model, stream_function=_default_stream),
+    name='default_runner_file_veto',
+    capabilities=[LocalWorkspace('/'), FileSystem(), TemporalDurability()],
+)
+
+
+@_default_agent.on_event(FileChangeRequestEvent)
+async def _default_veto(ctx: RunContext[None], event: FileChangeRequestEvent) -> None:
+    event.cancel('denied')
+
+
+@workflow.defn
+class DefaultFileWorkflow(PydanticAIWorkflow):
+    __pydantic_ai_agents__ = [_default_agent]
+
+    @workflow.run
+    async def run(self, root: str) -> list[str]:
+        result = await _default_agent.run(root + '/protected.txt')
+        return [str(p.content) for m in result.all_messages() for p in m.parts if p.part_kind == 'tool-return']
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return 'asyncio'  # Temporal's test server requires an asyncio event loop.
+
+
+@pytest.mark.anyio
+async def test_temporal_default_runner_veto(tmp_path: Path) -> None:
+    (tmp_path / 'protected.txt').write_text('original')
+    async with await WorkflowEnvironment.start_local() as env:  # pyright: ignore[reportUnknownMemberType]
+        client = await Client.connect(env.client.service_client.config.target_host, plugins=[PydanticAIPlugin()])
+        async with Worker(client, task_queue='default-veto', workflows=[DefaultFileWorkflow]):
+            returns = await client.execute_workflow(
+                DefaultFileWorkflow.run,
+                str(tmp_path),
+                id=uuid4().hex,
+                task_queue='default-veto',
+                execution_timeout=timedelta(seconds=15),
+            )
+    assert 'denied' in str(returns)
+    assert (tmp_path / 'protected.txt').read_text() == 'original'
 
 
 @pytest.mark.parametrize('capability', [FileSystem(), Coder()], ids=['filesystem', 'coder'])
@@ -48,7 +102,7 @@ def anyio_backend() -> str:
     ],
 )
 @pytest.mark.anyio
-async def test_temporal_default_runner_vetoes_before_mutation(
+async def test_temporal_vetoes_before_mutation(
     tmp_path: Path, capability: FileSystem | Coder, tool_name: str, args: dict[str, str]
 ) -> None:
     if isinstance(capability, Coder) and tool_name == 'create_directory':
