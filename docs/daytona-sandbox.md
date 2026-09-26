@@ -101,7 +101,6 @@ Already have a `daytona.AsyncSandbox`? Pass `workspace=DaytonaSandboxBackend(wor
 The sandbox keeps running, and billing, after the run ends. Pydantic AI never stops or deletes it. Sandboxes created by this backend carry the `created-by=pydantic-ai` label; filter by that label when auditing your Daytona account. Delete one with the ref you kept:
 
 ```python {names="defined"}
-from daytona import AsyncDaytona
 from pydantic_ai.workspaces import WorkspaceRef
 
 
@@ -157,23 +156,62 @@ Daytona stages `write_bytes` uploads beside the resolved target before replacing
 
 ## Durable execution
 
-Under [Temporal](https://pydantic.dev/docs/ai/capabilities/durable_execution/temporal/) or another durable engine, create one client when the worker starts and pass it as `client=`. Otherwise every activity opens its own client and never closes it.
+A shared client is created at module import so activities on this worker reuse it. Close it when the worker stops. Run a Temporal dev server on `localhost:7233` first.
 
-```python {names="defined"}
-from daytona import AsyncDaytona
+```python
+import asyncio
+import uuid
+
 from pydantic_ai import Agent
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, PydanticAIWorkflow, TemporalDurability
+from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
+from temporalio import workflow
+from temporalio.client import Client
+from temporalio.worker import Worker
+
+# The provider SDK must not be re-imported inside Temporal's restricted workflow sandbox.
+with workflow.unsafe.imports_passed_through():
+    from daytona import AsyncDaytona
+
+CLIENT = AsyncDaytona()
+agent = Agent(
+    'anthropic:claude-opus-5-5',
+    name='daytona_coder',
+    capabilities=[DaytonaSandbox(client=CLIENT), Coder(), TemporalDurability()],
+)
 
 
-async def run_worker() -> None:
-    async with AsyncDaytona() as client:
-        agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(client=client)])
-        ...  # wrap `agent` for Temporal and start the worker
+@workflow.defn
+class SandboxWorkflow(PydanticAIWorkflow):
+    __pydantic_ai_agents__ = [agent]
+
+    @workflow.run
+    async def run(self, prompt: str) -> str:
+        return (await agent.run(prompt)).output
+
+
+async def main() -> None:
+    client = await Client.connect('localhost:7233', plugins=[PydanticAIPlugin()])
+    async with CLIENT:
+        async with Worker(client, task_queue='sandbox', workflows=[SandboxWorkflow]):
+            print(
+                await client.execute_workflow(
+                    SandboxWorkflow.run,
+                    'Use the shell tool to run pwd.',
+                    id=f'sandbox-{uuid.uuid4()}', task_queue='sandbox',
+                )
+            )
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
 ```
 
-`Coder`, `Shell`, and `FileSystem` work under DBOS, Temporal and Prefect. See their [Coder](coder.md#durable-execution), [Shell](shell.md#durable-execution), and [FileSystem](filesystem.md#durable-execution) guides for engine-specific limits (including activity event delivery and persisted shell state). Keep a shared `client=` alive for the worker's lifetime.
+`Coder`, `Shell`, and `FileSystem` work under DBOS, Temporal and Prefect. See the [Coder](coder.md#durable-execution), [Shell](shell.md#durable-execution), and [FileSystem](filesystem.md#durable-execution) guides for engine-specific limits.
 
-See [Workspaces: Durable execution](https://pydantic.dev/docs/ai/core-concepts/workspace/#durable-execution) for how workspaces work under durable engines.
+Removing a capability while workflows using it are still running changes their replay history. Drain those workflows or use [Temporal worker versioning](https://docs.temporal.io/production-deployment/worker-deployments/worker-versioning) before deploying the change.
+
 
 ## API reference
 
