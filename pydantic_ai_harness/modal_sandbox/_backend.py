@@ -287,33 +287,39 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             raise mapped from error
 
     async def read_bytes(self, path: str) -> bytes:
+        absolute_path('path', path)
         sandbox = await self.get_client()
         async with self._mapped_errors(sandbox, f'Could not read {path!r}', path):
             return await sandbox.filesystem.read_bytes.aio(path)
 
     async def write_bytes(self, path: str, data: bytes) -> None:
+        absolute_path('path', path)
         # Modal takes the data first, creates missing parents, and replaces existing contents.
         sandbox = await self.get_client()
         async with self._mapped_errors(sandbox, f'Could not write {path!r}', path):
             await sandbox.filesystem.write_bytes.aio(data, path)
 
     async def stat(self, path: str) -> FileEntry:
+        absolute_path('path', path)
         sandbox = await self.get_client()
         async with self._mapped_errors(sandbox, f'Could not stat {path!r}', path):
             return await _file_entry(sandbox, await sandbox.filesystem.stat.aio(path), path)
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
+        absolute_path('path', path)
         sandbox = await self.get_client()
         async with self._mapped_errors(sandbox, f'Could not list {path!r}', path):
             entries = await sandbox.filesystem.list_files.aio(path)
             return [await _file_entry(sandbox, entry, posixpath.join(path, entry.name)) for entry in entries]
 
     async def make_dir(self, path: str) -> None:
+        absolute_path('path', path)
         sandbox = await self.get_client()
         async with self._mapped_errors(sandbox, f'Could not create directory {path!r}', path):
             await sandbox.filesystem.make_directory.aio(path)
 
     async def remove(self, path: str) -> None:
+        absolute_path('path', path)
         sandbox = await self.get_client()
         async with self._mapped_errors(sandbox, f'Could not remove {path!r}', path):
             await sandbox.filesystem.remove.aio(path, recursive=True)
@@ -396,6 +402,9 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             )
             if mapped is None:
                 raise
+            # A malformed stored ref cannot become valid by retrying an attach.
+            if isinstance(error, modal.exception.InvalidError):
+                raise WorkspaceUnavailableError(_unavailable_message(sandbox_id)) from error
             raise mapped from error
         if finished is not None:
             raise WorkspaceUnavailableError(_unavailable_message(sandbox_id))

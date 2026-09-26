@@ -387,6 +387,11 @@ class TestCreate:
 
 
 class TestConnect:
+    async def test_invalid_ref_is_unavailable(self, fake_modal: FakeModal) -> None:
+        fake_modal.attach_error = fake_modal.exception('InvalidError')('bad id')
+        with pytest.raises(WorkspaceUnavailableError, match='sb-invalid'):
+            await started(ref=WorkspaceRef(provider='modal', id='sb-invalid'))
+
     async def test_connects_to_a_running_sandbox(self, fake_modal: FakeModal) -> None:
         backend = await started(ref=WorkspaceRef(provider='modal', id='sb-keep'))
         assert fake_modal.attach_ids == ['sb-keep']
@@ -426,6 +431,17 @@ class TestConnect:
 
 
 class TestFilesystem:
+    @pytest.mark.parametrize('method', ['read_bytes', 'write_bytes', 'stat', 'list_dir', 'make_dir', 'remove'])
+    async def test_relative_paths_fail_before_creating_sandbox(self, fake_modal: FakeModal, method: str) -> None:
+        backend = ModalSandboxBackend()
+        with pytest.raises(ValueError, match='absolute workspace path'):
+            if method == 'write_bytes':
+                await backend.write_bytes('relative', b'data')
+            else:
+                await getattr(backend, method)('relative')
+        assert backend.ref is None
+        assert not fake_modal.sandboxes
+
     async def test_write_then_read_round_trips(self, fake_modal: FakeModal) -> None:
         backend = await started()
         await backend.write_bytes('/tmp/a.txt', b'body')
