@@ -174,6 +174,17 @@ class TestCommands:
         result = await backend.run(['seq', '1', '2'])
         assert (result.stdout, result.stderr) == ('1\n2\n', '')
 
+    async def test_completed_markers_end_a_follow_stream_left_open(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_stdout = ['complete out']
+        sandbox.process_stderr = ['complete err']
+        sandbox.process_follow_open = True
+        with anyio.fail_after(1):
+            result = await backend.run(['true'], timeout=0.5)
+        assert (result.exit_code, result.stdout, result.stderr) == (0, 'complete out', 'complete err')
+        assert sandbox.process_sessions == set()
+
     async def test_stored_log_read_failure_propagates(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         fake_daytona.sandboxes[0].process_stored_logs_error = RuntimeError('stored logs failed')

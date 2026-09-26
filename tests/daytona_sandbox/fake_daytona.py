@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import os
 import posixpath
+import re
 import shlex
 import shutil
 import signal
@@ -109,7 +110,12 @@ class FakeProcess:
         ):
             for chunk in chunks:
                 handler(chunk)
-        if self.owner.process_hangs:
+        if self.owner.process_follow_open:
+            marker = re.search(r'pydantic-ai-end-[0-9a-f]{32}', self.owner.process_command)
+            assert marker is not None
+            on_stdout(marker.group())
+            on_stderr(marker.group())
+        if self.owner.process_hangs or self.owner.process_follow_open:
             await asyncio.Event().wait()
 
     async def get_session_command_logs(
@@ -411,6 +417,7 @@ class FakeSandbox:
         self.process_stdout: list[str] = []
         self.process_stderr: list[str] = []
         self.process_hangs = False
+        self.process_follow_open = False
         self.process_exit_code: int | None = 0
         # Raised by successive `delete_session` calls; deletion succeeds once it is exhausted.
         self.process_delete_errors: Iterator[Exception] = iter(())

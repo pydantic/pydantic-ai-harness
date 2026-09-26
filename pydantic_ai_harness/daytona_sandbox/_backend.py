@@ -156,15 +156,33 @@ class _DaytonaProcess:
     stderr: list[str]
     marker: str
     _logs: asyncio.Task[None]
+    _ended: asyncio.Event
 
     async def wait(self) -> CommandResult:
+        marker_waiter = asyncio.create_task(self._ended.wait())
         try:
-            await self._logs
+            done, _ = await asyncio.wait((self._logs, marker_waiter), return_when=asyncio.FIRST_COMPLETED)
+            if self._logs in done:
+                await self._logs  # preserve stream errors even if the websocket closed early
+            else:
+                # A detached child may hold the follow websocket open after the wrapper exits.
+                self._logs.cancel()
+                await asyncio.gather(self._logs, return_exceptions=True)
             command = await self._process.get_session_command(
                 self._session_id, self._command_id, request_timeout=_REQUEST_TIMEOUT
             )
+            if command.exit_code is None and self._ended.is_set():
+                # The follow stream can deliver the last marker before Daytona persists exit status.
+                with anyio.move_on_after(_REQUEST_TIMEOUT):
+                    while command.exit_code is None:
+                        await anyio.sleep(0.1)
+                        command = await self._process.get_session_command(
+                            self._session_id, self._command_id, request_timeout=_REQUEST_TIMEOUT
+                        )
         except Exception as error:
             await _raise_failure(self._sandbox, error, 'Could not read the command result')
+        finally:
+            marker_waiter.cancel()
         if command.exit_code is None:
             raise WorkspaceError('Daytona closed the command output before reporting an exit status.')
         # The streamed copy is only for partial output on a timeout: SDK 0.198.0's stream
@@ -654,8 +672,20 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                     )
                 stdout: list[str] = []
                 stderr: list[str] = []
+                ended = asyncio.Event()
+
+                def on_stdout(chunk: str) -> None:
+                    stdout.append(chunk)
+                    if marker in ''.join(stdout) and marker in ''.join(stderr):
+                        ended.set()
+
+                def on_stderr(chunk: str) -> None:
+                    stderr.append(chunk)
+                    if marker in ''.join(stdout) and marker in ''.join(stderr):
+                        ended.set()
+
                 logs = asyncio.create_task(
-                    process.get_session_command_logs_async(session_id, response.cmd_id, stdout.append, stderr.append)
+                    process.get_session_command_logs_async(session_id, response.cmd_id, on_stdout, on_stderr)
                 )
                 return _DaytonaProcess(
                     _process=process,
@@ -666,6 +696,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                     stderr=stderr,
                     marker=marker,
                     _logs=logs,
+                    _ended=ended,
                 )
             except BaseException as error:
                 # The server may commit create_session before its acknowledgement. The preallocated
