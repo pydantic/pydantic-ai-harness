@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 import posixpath
 import shlex
+import uuid
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -157,10 +158,9 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     shell word string first and login startup files run before the command does; a
     `shell=True` string runs under `/bin/sh -c` inside that login shell. E2B's own
     command `timeout` abandons the output stream and leaves the command running, so the
-    deadline is enforced client-side instead and the command is killed with SIGKILL when it
-    expires or when the caller is cancelled, if E2B has returned the process ID. Cancellation
-    during startup waits up to 10 seconds for a PID; if none arrives the command may remain running. That kill signals the command's own process; a
-    process the command started in the background outlives it until the sandbox is torn down.
+    deadline is enforced client-side instead. On timeout or cancellation, a separate command
+    signals the foreground process group. A lost start acknowledgement can still leave work
+    running if the remote command starts after the bounded stop rendezvous has expired.
 
     The protocol is structural, but subclassing it here makes a signature drift fail the type
     check on this class instead of at a distant workspace call.
@@ -423,22 +423,44 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         sandbox = await self.get_client()
         handle: e2b.AsyncCommandHandle | None = None
         result: e2b.CommandResult | None = None
+        # The token is allocated before the start RPC: a lost ACK must not make the
+        # remote group undiscoverable. setsid isolates this invocation from other jobs.
+        pgid_file = f'/tmp/pydantic-e2b-pgid-{uuid.uuid4().hex}'
+        launch = f'echo $$ > {pgid_file}; exec {line}'
+        launch = f'setsid sh -c {shlex.quote(launch)}'
+
+        async def stop() -> None:
+            # A new SDK command can run even when the original output stream is blocked.
+            # Poll briefly for a late start ACK; a start later than this grace remains uncertain.
+            script = (
+                f'i=0; while [ ! -s {pgid_file} ] && [ "$i" -lt 12 ]; do '
+                'sleep 0.1; i=$((i+1)); done; '
+                f'if [ -s {pgid_file} ]; then p=$(cat {pgid_file}); '
+                'kill -TERM -"$p" 2>/dev/null || true; sleep 0.1; '
+                'kill -KILL -"$p" 2>/dev/null || true; fi; '
+                f'rm -f {pgid_file}'
+            )
+            try:
+                stopper = await sandbox.commands.run(
+                    f'sh -c {shlex.quote(script)}', background=True, timeout=_SDK_STREAM_UNBOUNDED
+                )
+                await stopper.wait()
+            except Exception:
+                pass  # A failed control-plane stop must not mask the original failure.
+
         try:
             with anyio.move_on_after(timeout):
-                # The remote start may commit before returning its PID. Wait briefly for
-                # the handle under cancellation so cleanup can stop it.
-                with anyio.move_on_after(_INTERNAL_EXEC_TIMEOUT, shield=True) as start_scope:
-                    handle = await sandbox.commands.run(
-                        line,
-                        background=True,
-                        # C.UTF-8 needs no locale package on the default image; libc falls back to C
-                        # on images without it. Explicit caller settings take precedence.
-                        envs={'LC_ALL': 'C.UTF-8', **(self._env or {}), **(env or {})},
-                        cwd=cwd if cwd is not None else self._working_dir,
-                        timeout=_SDK_STREAM_UNBOUNDED,
-                    )
-                if start_scope.cancelled_caught:
-                    raise TimeoutError('E2B command start did not return a process ID; it may still be running')
+                # The rendezvous file lets stop find a committed start even when its SDK
+                # acknowledgement has not returned; do not shield the start RPC itself.
+                handle = await sandbox.commands.run(
+                    launch,
+                    background=True,
+                    # C.UTF-8 needs no locale package on the default image; libc falls back to C
+                    # on images without it. Explicit caller settings take precedence.
+                    envs={'LC_ALL': 'C.UTF-8', **(self._env or {}), **(env or {})},
+                    cwd=cwd if cwd is not None else self._working_dir,
+                    timeout=_SDK_STREAM_UNBOUNDED,
+                )
                 assert handle is not None
                 result = await handle.wait()
             if result is None:
@@ -452,15 +474,8 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         except e2b.CommandExitException as error:
             return CommandResult(exit_code=error.exit_code, stdout=error.stdout, stderr=error.stderr)
         except BaseException as error:
-            if handle is not None:
-                # Cleanup must not replace a timeout, cancellation, or SDK failure.
-                async def stop() -> None:
-                    try:
-                        await sandbox.commands.kill(handle.pid)
-                    except Exception:
-                        pass
-
-                await stop_shielded(stop)
+            # A child task shields the side-channel stop from repeated task cancellation.
+            await stop_shielded(stop)
             if isinstance(error, Exception):
                 context = (
                     'Command could not run in the E2B sandbox'
@@ -471,6 +486,14 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
                 if translated is not error:
                     raise translated from error
             raise
+        finally:
+            # The token file is no longer useful once the command has exited or stop
+            # completed. If the start RPC is still in flight, stop's poll is the rendezvous.
+            with anyio.move_on_after(0.5, shield=True):
+                try:
+                    await sandbox.files.remove(pgid_file)
+                except Exception:
+                    pass
 
 
 async def _is_running(sandbox: e2b.AsyncSandbox) -> bool:

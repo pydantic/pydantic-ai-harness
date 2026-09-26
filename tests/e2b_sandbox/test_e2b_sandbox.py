@@ -144,7 +144,9 @@ async def test_post_acquisition_operations_overlap(fake_e2b: FakeE2B) -> None:
             while len(fake_e2b.sandboxes[0].commands.calls) < 2:
                 await anyio.sleep(0)
         tg.cancel_scope.cancel()
-    assert len(fake_e2b.sandboxes[0].commands.calls) == 2
+    calls = fake_e2b.sandboxes[0].commands.calls
+    assert len([call for call in calls if call.command.startswith('setsid sh -c ')]) == 2
+    assert len(fake_e2b.sandboxes[0].commands.group_stops) == 2
 
 
 async def test_agent_preserves_explicit_read_only_workspace(fake_e2b: FakeE2B) -> None:

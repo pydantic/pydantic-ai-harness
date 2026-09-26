@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +34,12 @@ from pydantic_ai.workspaces import (
 from pydantic_ai_harness.e2b_sandbox import E2BSandboxBackend
 
 from .fake_e2b import FakeCommandHandle, FakeE2B
+
+
+def _user_line(launch: str) -> str:
+    args = shlex.split(launch)
+    assert args[:3] == ['setsid', 'sh', '-c']
+    return args[3].split('; exec ', 1)[1]
 
 
 async def started(**settings: Any) -> E2BSandboxBackend:
@@ -195,18 +203,90 @@ class TestConnect:
 
 
 class TestRun:
+    @pytest.mark.parametrize('mode', ['deadline', 'cancel', 'double-cancel', 'before-ack'])
+    async def test_stop_reaches_foreground_child(
+        self, fake_e2b: FakeE2B, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        backend = await started()
+        commands = fake_e2b.sandboxes[0].commands
+        marker = tmp_path / 'survivor'
+        fake_e2b.command_hangs = True
+        entered = anyio.Event()
+        if mode == 'before-ack':
+            original = commands.run
+
+            async def delayed(*args: Any, **kwargs: Any) -> Any:
+                handle = await original(*args, **kwargs)
+                if not entered.is_set():
+                    entered.set()
+                    await anyio.sleep(0.3)
+                return handle
+
+            monkeypatch.setattr(commands, 'run', delayed)
+        task = asyncio.create_task(
+            backend.run(
+                f'(sleep 0.7; touch {marker}) & sleep 30', shell=True, timeout=0.1 if mode == 'deadline' else None
+            )
+        )
+        if mode == 'before-ack':
+            await entered.wait()
+        elif mode != 'deadline':
+            await anyio.sleep(0.1)
+        if mode != 'deadline':
+            task.cancel()
+            if mode == 'double-cancel':
+                task.cancel()
+        with anyio.fail_after(5):
+            with pytest.raises(WorkspaceTimeoutError if mode == 'deadline' else asyncio.CancelledError):
+                await task
+        assert len(commands.group_stops) == 1
+        launch = commands.calls[0].command
+        assert shlex.split(launch)[:3] == ['setsid', 'sh', '-c']
+        assert 'kill -KILL -' in commands.group_stops[0]
+        assert 'pydantic-e2b-pgid-' in launch
+
+    @pytest.mark.parametrize('delay_ack', [False, True])
+    async def test_group_stop_prevents_a_real_child_from_writing(
+        self, fake_e2b: FakeE2B, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delay_ack: bool
+    ) -> None:
+        fake_e2b.host_root = tmp_path
+        backend = await started()
+        commands = fake_e2b.sandboxes[0].commands
+        if delay_ack:
+            original = commands.run
+
+            async def delayed(*args: Any, **kwargs: Any) -> Any:
+                handle = await original(*args, **kwargs)
+                if not str(args[0]).startswith('sh -c '):
+                    await anyio.sleep(0.3)
+                return handle
+
+            monkeypatch.setattr(commands, 'run', delayed)
+        marker = tmp_path / 'child-marker'
+        try:
+            with anyio.fail_after(5):
+                with pytest.raises(WorkspaceTimeoutError):
+                    await backend.run(
+                        f'(sleep 0.6; touch {shlex.quote(str(marker))}) & sleep 20', shell=True, timeout=0.1
+                    )
+            await anyio.sleep(0.7)
+            assert not marker.exists()
+        finally:
+            for handle in fake_e2b.sandboxes[0].commands.handles:
+                handle.close()
+
     async def test_argv_is_quoted_into_one_shell_word_string(self, fake_e2b: FakeE2B) -> None:
         # E2B has no argv form: every command goes through `/bin/bash -l -c`, so the quoting
         # is what keeps an argument with a space or a `$` one literal word.
         backend = await started()
         await backend.run(['echo', 'a b', '$HOME'])
-        assert fake_e2b.sandboxes[0].commands.calls[-1].command == "echo 'a b' '$HOME'"
+        assert _user_line(fake_e2b.sandboxes[0].commands.calls[0].command) == "echo 'a b' '$HOME'"
 
     async def test_shell_string_runs_under_sh(self, fake_e2b: FakeE2B) -> None:
         # E2B's login bash would otherwise interpret it; `sh -c` matches every other workspace.
         backend = await started()
         await backend.run('echo hi | wc -c', shell=True)
-        assert fake_e2b.sandboxes[0].commands.calls[-1].command == "/bin/sh -c 'echo hi | wc -c'"
+        assert _user_line(fake_e2b.sandboxes[0].commands.calls[0].command) == "/bin/sh -c 'echo hi | wc -c'"
 
     async def test_reports_streams_and_exit_code(self, fake_e2b: FakeE2B) -> None:
         # E2B raises `CommandExitException` on a non-zero exit; the protocol calls that a
@@ -280,9 +360,9 @@ class TestRun:
             await backend.run(['sleep', '99'], timeout=0.05)
         assert isinstance(exc.value, TimeoutError)
         assert (exc.value.stdout, exc.value.stderr) == ('partial', 'oops')
-        assert fake_e2b.sandboxes[0].commands.killed_pids == [4242]
+        assert len(fake_e2b.sandboxes[0].commands.group_stops) == 1
 
-    async def test_cancel_during_start_kills_returned_handle(
+    async def test_cancel_during_start_stops_group_without_handle(
         self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         backend = await started()
@@ -310,16 +390,16 @@ class TestRun:
                 await entered.wait()
                 scope.cancel()
                 release.set()
-        assert commands.killed_pids == [4242]
+        assert len(commands.group_stops) == 1
 
     async def test_a_cancelled_run_kills_the_command(self, fake_e2b: FakeE2B) -> None:
         # The protocol's cancellation contract: a cancelled `run()` must not knowingly leave
-        # the command running. E2B has a per-command kill, so the backend uses it.
+        # the command running. The side-channel stop signals its isolated group.
         fake_e2b.command_hangs = True
         backend = await started()
         with anyio.move_on_after(0.05):
             await backend.run(['sleep', '99'])
-        assert fake_e2b.sandboxes[0].commands.killed_pids == [4242]
+        assert len(fake_e2b.sandboxes[0].commands.group_stops) == 1
 
     async def test_a_failed_kill_does_not_replace_the_timeout(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.command_hangs = True
@@ -364,7 +444,7 @@ class TestRun:
             await backend.run(['x'])
         assert 'the command may still be running' in str(exc.value)
         # The command may still be running, so it is killed on the way out.
-        assert fake_e2b.sandboxes[0].commands.killed_pids == [4242]
+        assert len(fake_e2b.sandboxes[0].commands.group_stops) == 1
 
 
 class TestKilledSandbox:
@@ -430,7 +510,7 @@ class TestWorkingDir:
         backend = await started()
         assert await backend.working_dir() == '/home/user'
         assert await backend.working_dir() == '/home/user'
-        assert [call.command for call in fake_e2b.sandboxes[0].commands.calls] == ['pwd -P']
+        assert [_user_line(call.command) for call in fake_e2b.sandboxes[0].commands.calls] == ['pwd -P']
 
     async def test_the_probe_carries_a_deadline(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
         # The probe is a command like any other, so it is bounded and killed rather than left

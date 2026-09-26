@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import posixpath
+import shlex
 import shutil
 import stat
 import subprocess
@@ -55,6 +56,15 @@ Responder = Callable[[str, 'float | None'], 'tuple[str, str, int]']
 
 def _echo_responder(command: str, timeout: float | None) -> tuple[str, str, int]:
     return f'{command}\n', '', 0
+
+
+def _user_command(command: str) -> str:
+    # The fake checks the outer launcher but responds to the user command, not its
+    # registration shell. Quoting must survive both the E2B login shell and setsid.
+    args = shlex.split(command)
+    if args[:3] == ['setsid', 'sh', '-c']:
+        return args[3].split('; exec ', 1)[1]
+    return command
 
 
 @dataclass(frozen=True)
@@ -117,6 +127,9 @@ class FakeCommandHandle:
         self._stderr = stderr
         self._exit_code = exit_code
 
+    def close(self) -> None:
+        """Release a host-backed handle; in-memory handles have nothing to release."""
+
     @property
     def pid(self) -> int:
         return self._pid
@@ -136,7 +149,9 @@ class FakeCommandHandle:
         self._sandbox.check_alive()
         if self._control.wait_error is not None:
             raise self._control.wait_error
-        if self._control.command_hangs:
+        if self._control.command_hangs and not self._sandbox.commands.calls[
+            self._pid - self._control.next_pid
+        ].command.startswith('sh -c '):
             await anyio.sleep_forever()
         if self._exit_code != 0:
             # The real SDK raises on a non-zero exit instead of returning a result.
@@ -158,6 +173,7 @@ class FakeCommands:
         self.calls: list[FakeCommandCall] = []
         self.handles: list[FakeCommandHandle] = []
         self.killed_pids: list[int] = []
+        self.group_stops: list[str] = []
 
     async def run(
         self,
@@ -176,7 +192,11 @@ class FakeCommands:
         self.calls.append(FakeCommandCall(cmd, background is True, cwd, envs, timeout))
         if self._control.run_error is not None:
             raise self._control.run_error
-        stdout, stderr, exit_code = self._control.responder(cmd, timeout)
+        if cmd.startswith('sh -c ') and 'kill -TERM -' in cmd:
+            self.group_stops.append(cmd)
+            if self._control.kill_command_error is not None:
+                raise self._control.kill_command_error
+        stdout, stderr, exit_code = self._control.responder(_user_command(cmd), timeout)
         handle = FakeCommandHandle(
             self._control,
             self._sandbox,
@@ -421,8 +441,15 @@ class _HostCommands(FakeCommands):
         assert self._control.host_root is not None
         # E2B runs `/bin/bash -l -c`; the host drops `-l` so the developer's login files stay out.
         out, err = tempfile.TemporaryFile(), tempfile.TemporaryFile()
+        # macOS lacks the `setsid` executable: emulate its group isolation via
+        # Popen's POSIX session flag while retaining the same registration shell.
+        args = shlex.split(cmd)
+        isolated = args[:3] == ['setsid', 'sh', '-c']
+        if isolated:
+            cmd = f'sh -c {shlex.quote(args[3])}'
         process = subprocess.Popen(
             ['/bin/bash', '-c', cmd],
+            start_new_session=isolated,
             cwd=cwd or self._control.host_root,
             env={**os.environ, **(envs or {})},
             stdout=out,

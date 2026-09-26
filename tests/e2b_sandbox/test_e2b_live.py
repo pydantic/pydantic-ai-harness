@@ -128,7 +128,6 @@ class TestRealExecution:
             result = await sandbox.run('sleep 7 & echo ready', shell=True, timeout=10)
         assert result.stdout.startswith('ready')
 
-    @pytest.mark.xfail(reason='e2b#0: SDK kill does not signal the process group', strict=True)
     async def test_timeout_stops_foreground_descendants(self, sandbox: E2BSandboxBackend) -> None:
         """Check whether a timed-out foreground shell leaves a child able to mutate the sandbox."""
         marker = f'/tmp/{_unique("descendant")}'
@@ -137,19 +136,14 @@ class TestRealExecution:
         await anyio.sleep(5)
         assert not await sandbox.exists(marker)
 
-    async def test_a_background_child_outlives_the_kill(self, sandbox: E2BSandboxBackend) -> None:
-        """Pins the documented limitation that E2B's kill signals the command's own process only.
-
-        A process the command started in the background is not reached by that signal and runs
-        until the sandbox is torn down. If E2B ever kills the whole group, this test fails and
-        the limitation can be removed from the docs.
-        """
+    async def test_a_foreground_group_child_is_stopped(self, sandbox: E2BSandboxBackend) -> None:
+        """The deadline stops children that remain in the foreground process group."""
         marker = f'/tmp/{_unique("orphan")}'
         with pytest.raises(WorkspaceTimeoutError):
             await sandbox.run(f'(sleep 5; touch {marker}) & sleep 30', shell=True, timeout=2)
 
         await anyio.sleep(10)
-        assert await sandbox.exists(marker) is True
+        assert await sandbox.exists(marker) is False
 
     async def test_a_cancelled_run_stops_the_command(self, sandbox: E2BSandboxBackend) -> None:
         """Validates the protocol's cancellation contract against real E2B.
