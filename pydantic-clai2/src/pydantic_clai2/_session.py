@@ -54,6 +54,17 @@ def _supplies_workspace(plugins: Sequence[AgentCapability[DepsT]]) -> bool:
     )
 
 
+def _agent_capabilities(agent: AbstractAgent[DepsT, OutputT]) -> list[AgentCapability[DepsT]]:
+    """The capabilities the agent was built with, so a sandbox configured on it counts too.
+
+    A run-level `LocalWorkspace` would be asked before the agent's own sandbox and win.
+    """
+    try:
+        return [agent.root_capability]
+    except NotImplementedError:  # A custom `AbstractAgent` need not expose its capabilities.
+        return []
+
+
 def _command_env() -> dict[str, str]:
     """The environment clai's commands get: this process's, minus LLM API keys.
 
@@ -235,7 +246,9 @@ class Session(Generic[DepsT, OutputT]):
                     model = await self.resolved_model()
                     capabilities = list(self.plugins)
                     workspace: Literal['new'] | None = None
-                    if _supports_local_workspace() and not _supplies_workspace(self.plugins):
+                    if _supports_local_workspace() and not _supplies_workspace(
+                        [*_agent_capabilities(self.agent), *self.plugins]
+                    ):
                         capabilities.append(LocalWorkspace[DepsT](self.workspace, env=_command_env()))
                         if _stale_local_workspace(previous, self.workspace):
                             # A conversation resumed from another directory: work in this session's.

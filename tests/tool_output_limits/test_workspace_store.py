@@ -242,19 +242,20 @@ class TestWorkspaceStore:
         with pytest.raises(PermissionError, match='outside the store directory'):
             await store.read(workspace, 'leak')
 
-    async def test_symlinked_store_directory_is_refused(self, tmp_path: Path):
+    @pytest.mark.parametrize('link', ['.pydantic-ai-harness', '.pydantic-ai-harness/tool-output'])
+    async def test_symlinked_store_directory_is_refused_before_anything_is_created(self, tmp_path: Path, link: str):
         outside = tmp_path / 'outside'
         (outside / 'run').mkdir(parents=True)
         (outside / 'run' / 'call.0').write_bytes(b'secret')
-        (tmp_path / 'work' / '.pydantic-ai-harness').mkdir(parents=True)
-        (tmp_path / 'work' / '.pydantic-ai-harness' / 'tool-output').symlink_to(outside)
+        (tmp_path / 'work' / link).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / 'work' / link).symlink_to(outside)
         workspace = Workspace(LocalWorkspaceBackend(tmp_path / 'work'))
         store = WorkspaceStore()
-        with pytest.raises(PermissionError, match='outside the store directory'):
+        with pytest.raises(WorkspaceError, match='is a symlink'):
             await store.read(workspace, 'run/call.0')
-        with pytest.raises(PermissionError, match='outside the store directory'):
+        with pytest.raises(WorkspaceError, match='is a symlink'):
             await store.write(workspace, 'run/new.0', b'payload')
-        assert not (outside / 'run' / 'new.0').exists()
+        assert sorted(path.name for path in outside.rglob('*')) == ['call.0', 'run']
 
     async def test_missing_handle_raises_file_not_found(self, tmp_path: Path):
         workspace = Workspace(LocalWorkspaceBackend(tmp_path))
