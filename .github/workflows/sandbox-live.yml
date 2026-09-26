@@ -29,6 +29,8 @@ on:
         required: false
       E2B_API_KEY:
         required: false
+      DAYTONA_API_KEY:
+        required: false
       SPRITE_TOKEN:
         required: false
 
@@ -104,4 +106,5 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }} # zizmor: ignore[secrets-outside-env]
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }} # zizmor: ignore[secrets-outside-env]
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }} # zizmor: ignore[secrets-outside-env]
+          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }} # zizmor: ignore[secrets-outside-env]
           SPRITE_TOKEN: ${{ secrets.SPRITE_TOKEN }} # zizmor: ignore[secrets-outside-env]

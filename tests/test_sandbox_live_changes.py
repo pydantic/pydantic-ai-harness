@@ -65,6 +65,7 @@ def test_changed_paths_select_providers(changed: list[str], expected: list[str])
         pytest.param({'modal': '1.6.0'}, ['modal'], id='provider sdk'),
         pytest.param({'httpx': '0.28.1'}, [], id='unrelated dependency'),
         pytest.param({'sprites-py': '0.1.0'}, ['sprites'], id='provider sdk added'),
+        pytest.param({'daytona': '0.198.0'}, ['daytona'], id='daytona sdk'),
     ],
 )
 def test_moved_lock_entries_select_providers(moved: dict[str, str], expected: list[str]) -> None:
