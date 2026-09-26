@@ -158,8 +158,8 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     `shell=True` string runs under `/bin/sh -c` inside that login shell. E2B's own
     command `timeout` abandons the output stream and leaves the command running, so the
     deadline is enforced client-side instead and the command is killed with SIGKILL when it
-    expires or when the caller is cancelled, if E2B has returned the process ID. Cancellation
-    during startup can leave the command running. That kill signals the command's own process; a
+    expires or when the caller is cancelled, including while the command is still starting.
+    That kill signals the command's own process; a
     process the command started in the background outlives it until the sandbox is torn down.
 
     The protocol is structural, but subclassing it here makes a signature drift fail the type
@@ -406,12 +406,11 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         result: e2b.CommandResult | None = None
         try:
             with anyio.move_on_after(timeout):
-                handle = await sandbox.commands.run(
+                handle = await _start(
+                    sandbox,
                     line,
-                    background=True,
                     envs={**(self._env or {}), **(env or {})} or None,
                     cwd=cwd if cwd is not None else self._working_dir,
-                    timeout=_SDK_STREAM_UNBOUNDED,
                 )
                 result = await handle.wait()
             if result is None:
@@ -443,6 +442,20 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
                 if translated is not error:
                     raise translated from error
             raise
+
+
+async def _start(
+    sandbox: e2b.AsyncSandbox, line: str, *, envs: dict[str, str] | None, cwd: str | None
+) -> e2b.AsyncCommandHandle:
+    """Start `line` in the background, shielded from cancellation and the command's deadline.
+
+    E2B starts the process before its pid arrives, so an interruption here would leave the
+    command running with nothing to kill it by. The SDK's request timeout bounds the wait.
+    """
+    with anyio.CancelScope(shield=True):
+        return await sandbox.commands.run(line, background=True, envs=envs, cwd=cwd, timeout=_SDK_STREAM_UNBOUNDED)
+    # A scope swallows only its own cancellation, and nothing cancels this one.
+    raise AssertionError('unreachable')  # pragma: no cover
 
 
 async def _is_running(sandbox: e2b.AsyncSandbox) -> bool:

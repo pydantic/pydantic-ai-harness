@@ -186,6 +186,9 @@ class FakeCommands:
             exit_code=exit_code,
         )
         self.handles.append(handle)
+        if self._control.start_response_held is not None:
+            # E2B has started the process before the start event with its pid arrives.
+            await self._control.start_response_held.wait()
         if background is True:
             return handle
         return await handle.wait()  # pragma: no cover - the backend always starts in background
@@ -646,6 +649,8 @@ class FakeE2B:
     run_error: Exception | None = None
     wait_error: Exception | None = None
     command_hangs: bool = False
+    # When set, `commands.run` starts the command and then holds its response until the event is set.
+    start_response_held: anyio.Event | None = None
     kill_command_error: Exception | None = None
     fs_error: Exception | None = None
     read_error: Exception | None = None

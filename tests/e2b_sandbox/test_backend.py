@@ -274,6 +274,19 @@ class TestRun:
             await backend.run(['sleep', '99'])
         assert fake_e2b.sandboxes[0].commands.killed_pids == [4242]
 
+    async def test_a_run_cancelled_while_the_command_starts_kills_it(self, fake_e2b: FakeE2B) -> None:
+        # E2B starts the process before it returns the pid, so the start is waited out and the
+        # command killed rather than left running with nothing to kill it by.
+        fake_e2b.start_response_held = held = anyio.Event()
+        backend = await started()
+        with anyio.CancelScope() as scope:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(backend.run, ['sleep', '99'])
+                await anyio.wait_all_tasks_blocked()
+                scope.cancel()
+                held.set()
+        assert fake_e2b.sandboxes[0].commands.killed_pids == [4242]
+
     async def test_a_failed_kill_does_not_replace_the_timeout(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.command_hangs = True
         fake_e2b.kill_command_error = fake_e2b.error_type('kill refused')
