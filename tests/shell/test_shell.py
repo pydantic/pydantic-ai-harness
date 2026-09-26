@@ -487,6 +487,16 @@ class TestForRunIsolation:
         assert toolset.id == 'build_shell'
         assert await toolset.for_run(_ctx(shell_dir)) is toolset
 
+    async def test_removed_tracked_cwd_resets_before_next_command(
+        self, persist_toolset: ShellToolset[None], shell_dir: Path
+    ) -> None:
+        await persist_toolset.run_command(_ctx(shell_dir), 'cd subdir')
+        (shell_dir / 'subdir').rename(shell_dir / 'moved-subdir')
+        with pytest.raises(ModelRetry, match='previous directory was removed'):
+            await persist_toolset.run_command(_ctx(shell_dir), 'pwd')
+        result = await persist_toolset.run_command(_ctx(shell_dir), 'pwd')
+        assert str(shell_dir) in result
+
     async def test_persist_cwd_isolated_across_runs(self, persist_toolset: ShellToolset[None], shell_dir: Path) -> None:
         run1 = await persist_toolset.for_run(_ctx(shell_dir))
         assert isinstance(run1, ShellToolset)
@@ -541,7 +551,7 @@ class TestSpawnFailures:
         target = shell_dir / 'subdir'
         ts = await self._toolset_in(shell_dir)
         shutil.rmtree(target)
-        with pytest.raises(ModelRetry, match='working directory no longer exists'):
+        with pytest.raises(ModelRetry, match='previous directory was removed'):
             await ts.run_command(_ctx(shell_dir), 'echo hello')
 
     async def test_cwd_replaced_by_file(self, shell_dir: Path) -> None:
@@ -549,14 +559,14 @@ class TestSpawnFailures:
         ts = await self._toolset_in(shell_dir)
         shutil.rmtree(target)
         target.write_text('not a directory\n')
-        with pytest.raises(ModelRetry, match='no longer a directory'):
+        with pytest.raises(ModelRetry, match='previous directory was removed'):
             await ts.run_command(_ctx(shell_dir), 'echo hello')
 
     async def test_cwd_deleted_start_command(self, shell_dir: Path) -> None:
         target = shell_dir / 'subdir'
         ts = await self._toolset_in(shell_dir)
         shutil.rmtree(target)
-        with pytest.raises(ModelRetry, match='working directory no longer exists'):
+        with pytest.raises(ModelRetry, match='previous directory was removed'):
             await ts.start_command(_ctx(shell_dir), 'sleep 30')
 
     async def test_message_omits_host_path(self, shell_dir: Path) -> None:

@@ -236,7 +236,7 @@ no lasting effect. Set
 `persist_cwd=True` to make `cd` sticky across calls: each command is wrapped so
 that after it runs, its final working directory is recorded to a private file
 inside the workspace, and that directory is carried into subsequent calls. The path is only
-updated when the command exits `0`, and the record is written out-of-band (not
+updated when the command exits `0`. If the recorded directory disappears, the next command reports a retry and resets to the workspace working directory. The record is written out-of-band (not
 to stdout) so command output can never spoof the tracked directory.
 
 The model sees a capped preview of command output. For large output, redirect it to a file in the workspace, then use `grep` or `tail` to inspect bounded portions rather than printing the whole file.

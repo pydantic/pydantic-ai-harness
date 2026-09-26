@@ -197,7 +197,17 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
 
     async def _cwd_for(self, ctx: RunContext[AgentDepsT]) -> str:
         """The absolute workspace directory the next `run_command` or `start_command` command starts in."""
-        return self._cwd if self._cwd is not None else await ctx.workspace.working_dir()
+        if self._cwd is not None:
+            try:
+                entry = await ctx.workspace.stat(self._cwd)
+            except (FileNotFoundError, NotADirectoryError):
+                entry = None
+            if entry is None or not entry.is_dir:
+                # Remote shells can report a missing cwd as a command exit rather than an OSError.
+                self._cwd = None
+                raise ModelRetry(f'The previous directory was removed; now in {await ctx.workspace.working_dir()}.')
+            return self._cwd
+        return await ctx.workspace.working_dir()
 
     async def _jobs_base(self, ctx: RunContext[AgentDepsT]) -> str:
         """The workspace directory holding job and capture files, looked up once per workspace."""
