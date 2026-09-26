@@ -288,6 +288,15 @@ class TestRun:
         calls = fake_modal.sandboxes[0].exec_calls
         assert sum('command -v setsid' in ' '.join(call.argv) for call in calls) == 1
         assert not fake_modal.sandboxes[0].start_scripts
+        fake_modal.wait_hangs = True
+        waiter = asyncio.create_task(backend.run(['sleep', '30'], timeout=None))
+        await anyio.wait_all_tasks_blocked()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        stop = next(call for call in calls if 'modal-stop' in call.argv)
+        assert 'kill -TERM "$pid"' in stop.argv[2]
+        assert 'kill -TERM -"$pid"' not in stop.argv[2]
 
     async def test_successful_command_removes_pid_marker(self, fake_modal: FakeModal, tmp_path: Path) -> None:
         backend = await started()
