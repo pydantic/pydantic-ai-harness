@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 import os
 import re
 import subprocess
@@ -72,6 +73,16 @@ async def started(**settings: Any) -> DaytonaSandboxBackend:
 
 
 class TestConformance:
+    async def test_owned_client_silences_engineio_default_error_log(self, fake_daytona: FakeDaytona) -> None:
+        logger = logging.getLogger('engineio.client')
+        previous = logger.level
+        try:
+            logger.setLevel(logging.NOTSET)
+            await DaytonaSandboxBackend().get_client()
+            assert logger.level == logging.CRITICAL
+        finally:
+            logger.setLevel(previous)
+
     async def test_get_client_is_lazy_and_reuses_the_sandbox(self, fake_daytona: FakeDaytona) -> None:
         backend = DaytonaSandboxBackend()
         assert not fake_daytona.sandboxes

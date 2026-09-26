@@ -291,6 +291,11 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             try:
                 if self._client is None:
                     try:
+                        # The SDK installs an ERROR-level engineio handler that logs routine empty queues.
+                        # Preserve an application-configured level while muting that SDK default.
+                        engineio_logger = logging.getLogger('engineio.client')
+                        if engineio_logger.level == logging.NOTSET:
+                            engineio_logger.setLevel(logging.CRITICAL)
                         # Reads the credentials, so a missing key surfaces here as an auth error.
                         self._client = daytona.AsyncDaytona()
                     except Exception as error:
