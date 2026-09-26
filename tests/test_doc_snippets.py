@@ -50,6 +50,13 @@ _ROOT = Path(__file__).parent.parent
 _HARNESS = 'pydantic_ai_harness'
 
 
+def test_remote_workspace_store_locations_are_documented() -> None:
+    for page in ('docs/repo-context.md', 'pydantic_ai_harness/repo_context/README.md'):
+        assert "home_dir='/home/daytona'" in (_ROOT / page).read_text()
+    for page in ('docs/planning.md', 'pydantic_ai_harness/planning/README.md'):
+        assert 'machine running the agent' in (_ROOT / page).read_text()
+
+
 def _harness_import_targets(tree: ast.AST) -> Iterable[tuple[str, str | None]]:
     """`(module, name)` for every `pydantic_ai_harness` symbol a snippet imports.
 
