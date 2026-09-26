@@ -145,14 +145,13 @@ class Shell(AbstractCapability[AgentDepsT]):
             self.denied_commands = [] if self.allowed_commands else list(_DEFAULT_DENIED_COMMANDS)
 
     async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
-        try:
-            return await handler()
-        finally:
-            if self.persist_cwd and ctx.run_id is not None:
-                # Keep state across tool calls and worker migration, but remove it at run end.
-                # Shield cleanup so cancellation does not strand a run's cwd file.
-                with anyio.move_on_after(CONTROL_TIMEOUT, shield=True):
-                    await self.get_toolset().clear_run_cwd(ctx)
+        result = await handler()
+        if self.persist_cwd and ctx.run_id is not None:
+            # A cancelled worker may be replaced while the workflow is still active;
+            # only a completed run can safely discard the cwd needed by its successor.
+            with anyio.move_on_after(CONTROL_TIMEOUT, shield=True):
+                await self.get_toolset().clear_run_cwd(ctx)
+        return result
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Fail the run at its start when it has no workspace to run commands in."""

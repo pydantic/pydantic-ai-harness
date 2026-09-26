@@ -532,6 +532,30 @@ class TestDurableCwd:
         assert str(shell_dir / 'subdir') not in await other.run_command(second, 'pwd')
 
 
+class TestCancelledRunCwd:
+    async def test_worker_interruption_retains_cwd_for_recovery(self, shell_dir: Path) -> None:
+        shell = Shell(persist_cwd=True)
+        ctx = _ctx(shell_dir)
+        ctx.run_id = 'interrupted-run'
+        toolset = shell.get_toolset()
+        await toolset.run_command(ctx, 'cd subdir')
+
+        async def interrupted() -> NoReturn:
+            await anyio.sleep_forever()
+            raise AssertionError('unreachable')
+
+        async def run() -> None:
+            await shell.wrap_run(ctx, handler=interrupted)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run)
+            await anyio.sleep(0)
+            tg.cancel_scope.cancel()
+        fresh = await toolset.for_run(ctx)
+        assert isinstance(fresh, ShellToolset)
+        assert str(shell_dir / 'subdir') in await fresh.run_command(ctx, 'pwd')
+
+
 class TestSameRunConcurrentCwd:
     async def test_last_completed_command_wins(self, persist_toolset: ShellToolset[None], shell_dir: Path) -> None:
         (shell_dir / 'other').mkdir()
