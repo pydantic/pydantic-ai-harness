@@ -12,7 +12,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FilteredToolset
 
-from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored, warn_argument_renamed
+from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACE, warn_argument_ignored, warn_argument_renamed
 from pydantic_ai_harness._workspace import require_workspace
 from pydantic_ai_harness.filesystem._toolset import (
     DEFAULT_TOOL_NAMES,
@@ -136,7 +136,7 @@ class FileSystem(AbstractCapability[AgentDepsT]):
 
     def __post_init__(self) -> None:
         if self.cwd is not None:
-            warn_argument_ignored('FileSystem', 'cwd', WORKING_DIR_IS_THE_WORKSPACES)
+            warn_argument_ignored('FileSystem', 'cwd', WORKING_DIR_IS_THE_WORKSPACE)
         if self.protected_patterns is not None:
             if self.read_only_patterns is not _DEFAULT_READ_ONLY:
                 raise TypeError('Pass `read_only_patterns` only: `protected_patterns` is its deprecated name.')
