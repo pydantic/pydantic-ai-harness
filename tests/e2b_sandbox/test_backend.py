@@ -668,6 +668,12 @@ async def test_acquisition_errors_map_to_protocol_failures(
         assert exc.value is error
 
 
+def test_preview_recipe_names_port_api_and_cleanup() -> None:
+    docs = (Path(__file__).parents[2] / 'docs/e2b-sandbox.md').read_text()
+    assert 'start_command' in docs and 'get_host(3000)' in docs
+    assert 'stop_command' in docs and 'kill_sandbox' in docs
+
+
 def test_default_user_directory_and_relative_paths_are_documented() -> None:
     docs = (Path(__file__).parents[2] / 'docs/e2b-sandbox.md').read_text()
     assert '`user`' in docs and '`/home/user`' in docs

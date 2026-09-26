@@ -113,6 +113,10 @@ The ref holds no credentials, so the process that reattaches needs `E2B_API_KEY`
 
 Already have an `e2b.AsyncSandbox`? Pass `workspace=E2BSandboxBackend(workspace=sandbox)` to a run, with `E2BSandboxBackend` from `pydantic_ai_harness.e2b_sandbox`. `E2BSandbox`'s settings don't apply to it; pass `working_dir=` and `env=` to the backend.
 
+## Preview a dev server
+
+With `Shell`, ask the agent to use `start_command` for `npm run dev -- --host 0.0.0.0 --port 3000`, then poll `check_command` and `curl http://localhost:3000/health` until ready. Save the returned command ID. Given the workspace ref, connect with `e2b.AsyncSandbox.connect(ref.id)` and use `sandbox.get_host(3000)` for the public hostname (prefix with `https://` for the preview URL). When done, call `stop_command` with the ID while the workspace is attached, then `kill_sandbox(ref)` as below. Do not leave a public preview running longer than necessary.
+
 ## Clean up
 
 The sandbox keeps running, and billing, after the run ends. Pydantic AI never kills it. Kill it with the ref you stored:
