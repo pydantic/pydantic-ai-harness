@@ -244,6 +244,8 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     ) -> None:
         if ref is not None and ref.provider != 'daytona':
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'daytona'")
+        if ref is not None and not ref.id.strip():
+            raise ValueError('Daytona workspace ref id cannot be empty')
         if workspace is not None and ref is not None:
             raise ValueError('pass either `workspace` or `ref`, not both')
         self._ref = ref if workspace is None else WorkspaceRef(provider='daytona', id=workspace.id)
@@ -454,9 +456,12 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                 if not _in_deleted_state(sandbox):
                     await sandbox.start(timeout=_LIFECYCLE_TIMEOUT)
             except Exception as error:
-                _raise_translated(
-                    error, f'Could not attach to Daytona sandbox {workspace_id!r}', sandbox_id=workspace_id
-                )
+                if isinstance(error, daytona.DaytonaNotFoundError):
+                    raise WorkspaceUnavailableError(
+                        f'The Daytona sandbox {workspace_id!r} was not found (it was deleted, or never existed '
+                        "in this Daytona organization). Pass `workspace='new'` to start a fresh sandbox."
+                    ) from error
+                _raise_translated(error, f'Could not attach to Daytona sandbox {workspace_id!r}')
             if _in_deleted_state(sandbox):
                 raise WorkspaceUnavailableError(_unavailable_message(sandbox.id))
             return sandbox

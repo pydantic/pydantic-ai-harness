@@ -448,6 +448,14 @@ class TestDeletedSandbox:
         with pytest.raises(WorkspaceUnavailableError):
             await backend.exists('/note')
 
+    async def test_unknown_ref_does_not_claim_confirmed_deletion(self, fake_daytona: FakeDaytona) -> None:
+        with pytest.raises(WorkspaceUnavailableError, match='never existed'):
+            await DaytonaSandboxBackend(ref=WorkspaceRef(provider='daytona', id='missing')).get_client()
+
+    def test_blank_ref_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match='empty'):
+            DaytonaSandboxBackend(ref=WorkspaceRef(provider='daytona', id='  '))
+
     @pytest.mark.parametrize('purged', [False, True])
     async def test_attaching_to_a_deleted_sandbox_is_unavailable(self, fake_daytona: FakeDaytona, purged: bool) -> None:
         sandbox = fake_daytona.sandbox('sb-deleted')
