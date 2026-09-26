@@ -37,14 +37,15 @@ async def run_posix_search(
     literal: bool = False,
     ignore_case: bool = False,
     context: int = 0,
+    include_hidden: bool = False,
     limit: int,
     accept: Callable[[Record], Awaitable[_T | None]],
 ) -> tuple[list[_T], bool]:
     """Enumerate sorted files and optionally grep them without transferring their contents to the host."""
     if pattern is not None and not literal:
         validate_posix_pattern(pattern)
-    # A temporary bare index applies root .ignore outside repositories too. If git is
-    # unavailable, find retains a bounded fallback but cannot interpret ignore files.
+    # Git applies nested .gitignore files, but --exclude-from=.ignore only reads the
+    # search-root .ignore; nested .ignore rules need rg. Without git, find ignores neither.
     enumeration = (
         'if [ -f .ignore ]; then extra=--exclude-from=.ignore; else extra=; fi; '
         'if command -v git >/dev/null 2>&1; then '
@@ -55,7 +56,10 @@ async def run_posix_search(
         'git init --bare -q "$tmp" || exit 2; '
         'GIT_DIR="$tmp" GIT_WORK_TREE="$PWD" git ls-files -o --exclude-standard '
         '-z $extra -- ' + shlex.quote(target) + '; status=$?; rm -rf -- "$tmp"; [ "$status" -eq 0 ]; fi; '
-        'else find ' + shlex.quote(target) + " ! -path . -name '.*' -prune -o -type f -print0; fi"
+        'else find '
+        + shlex.quote(target)
+        + (" ! -path . -name '.*' -prune -o " if not include_hidden else ' ')
+        + '-type f -print0; fi'
     )
     if pattern is None:
         processing = 'xargs -0 sh -c \'for file do printf "%s\\0" "$file"; done\' sh'

@@ -157,7 +157,7 @@ class _Bounds:
     A boundary at `/` contains everything, so only access patterns need the real path there.
     """
     lacks_ripgrep: bool = False
-    """Set once `rg` is found missing, so later searches go straight to the built-in walk."""
+    """Set once `rg` is found missing, so later searches skip the rg probe."""
 
 
 @dataclass
@@ -1203,7 +1203,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             raise ValueError(f'Invalid regex pattern: {e}') from e
 
         entry = await self._stat(scope, resolved)
-        if entry is not None and supports_commands(scope.workspace) and scope.lacks_ripgrep:
+        # Probe rg on the first call too: walking remote files is only for backends
+        # without commands, or when the command path itself fails.
+        if entry is not None and supports_commands(scope.workspace):
             return await self._command_search_files(scope, ctx, entry, resolved, pattern, include_glob)
         walk_cut = False
         if entry is None:
@@ -1295,6 +1297,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                     '--max-columns',
                     str(_MAX_MATCH_COLUMNS),
                     '--max-columns-preview',
+                    *(['--glob', include_glob] if include_glob else []),
                     '--regexp',
                     pattern,
                     '--',
@@ -1313,6 +1316,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 cwd=cwd,
                 target=target,
                 pattern=pattern,
+                include_hidden=bool(include_glob and _explicit_hidden(include_glob)),
                 limit=self._max_search_results,
                 accept=accept,
             )

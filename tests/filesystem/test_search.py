@@ -81,6 +81,16 @@ async def test_no_rg_search_files_is_one_command_and_confines_symlinks(tmp_path:
         outside.unlink()
 
 
+async def test_first_search_files_uses_command_not_walker(tmp_path: Path) -> None:
+    (tmp_path / 'visible.txt').write_text('needle\n')
+    backend = CountingBackend(tmp_path)
+    tools = FileSystem[None](root_dir=tmp_path).get_toolset()
+    assert isinstance(tools, FileSystemToolset)
+    assert await tools.search_files('needle', workspace=backend) == 'visible.txt:1:needle'
+    assert backend.commands == 2  # probe rg, then search in the workspace
+    assert backend.reads == 0
+
+
 async def test_no_rg_ignore_and_failure_are_not_silent(tmp_path: Path) -> None:
     (tmp_path / 'visible.txt').write_text('needle\n')
     (tmp_path / 'hidden.txt').write_text('needle\n')
@@ -106,6 +116,19 @@ async def test_explicit_hidden_file_glob_and_omission_count(tmp_path: Path) -> N
     assert '.hidden.py' in await tools.find_files('.hidden.py', workspace=backend)
     assert '.hidden.py' in await tools.search_files('needle', include_glob='.hidden.py', workspace=backend)
     assert '.hidden.py' in await tools.list_files(glob='.hidden.py', workspace=backend)
+
+
+async def test_nested_gitignore_on_posix_search(tmp_path: Path) -> None:
+    (tmp_path / 'src').mkdir()
+    (tmp_path / 'src' / '.gitignore').write_text('ignored.txt\n')
+    (tmp_path / 'src' / 'ignored.txt').write_text('needle\n')
+    (tmp_path / 'src' / 'visible.txt').write_text('needle\n')
+    subprocess.run(['git', '-C', str(tmp_path), 'init', '-q'], check=True)
+    backend = CountingBackend(tmp_path)
+    tools = FileSystem[None](root_dir=tmp_path).get_toolset()
+    assert isinstance(tools, FileSystemToolset)
+    assert await tools.search_files('needle', workspace=backend) == 'src/visible.txt:1:needle'
+    assert backend.reads == 0
 
 
 async def test_no_rg_rejects_unsupported_regex(tmp_path: Path) -> None:
