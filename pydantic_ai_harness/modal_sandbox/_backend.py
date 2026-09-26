@@ -462,7 +462,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                     )
         except TimeoutError as error:
             raise WorkspaceTimeoutError(
-                'Timed out before the command could start; the Modal process may still be running.', timeout=timeout
+                'Timed out before the command could start; the Modal process may still be running.'
             ) from error
 
         async def read(reader: modal.io_streams.StreamReader[bytes]) -> str:
@@ -492,9 +492,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                         return ''
                     return task.result()
 
-                raise WorkspaceTimeoutError(
-                    timed_out, stdout=captured(tasks[0]), stderr=captured(tasks[1]), timeout=deadline
-                ) from error
+                raise WorkspaceTimeoutError(timed_out, stdout=captured(tasks[0]), stderr=captured(tasks[1])) from error
             if isinstance(error, Exception) and (
                 mapped := await _failure(
                     sandbox,
@@ -509,7 +507,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         if deadline is not None and (
             exit_code == _CLIENT_DEADLINE_EXIT or (exit_code == _SIGKILL_EXIT and elapsed >= deadline)
         ):
-            raise WorkspaceTimeoutError(timed_out, stdout=stdout, stderr=stderr, timeout=deadline)
+            raise WorkspaceTimeoutError(timed_out, stdout=stdout, stderr=stderr)
         return CommandResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
 

@@ -111,16 +111,16 @@ class TestRun:
         with pytest.raises(WorkspaceTimeoutError) as exc:
             await backend.run(['sleep', '99'], timeout=5)
         assert isinstance(exc.value, TimeoutError)
-        assert (exc.value.stdout, exc.value.stderr, exc.value.timeout) == ('partial', 'oops', 5)
+        assert (exc.value.stdout, exc.value.stderr) == ('partial', 'oops')
 
     async def test_a_timeout_message_quotes_the_callers_timeout(self, fake_modal: FakeModal) -> None:
         # Modal enforces whole seconds, so 0.5 runs as a 1-second deadline; the message still
         # names the timeout the caller asked for.
         fake_modal.responder = lambda argv, timeout: ('', '', -1)
         backend = await started()
-        with pytest.raises(WorkspaceTimeoutError, match=r'^Command timed out after 0\.5 seconds\.$') as exc:
+        with pytest.raises(WorkspaceTimeoutError, match=r'^Command timed out after 0\.5 seconds\.$'):
             await backend.run(['sleep', '99'], timeout=0.5)
-        assert exc.value.timeout == 1
+        assert fake_modal.sandboxes[0].exec_calls[-1].timeout == 1
 
     async def test_sentinel_without_a_deadline_is_a_real_exit(self, fake_modal: FakeModal) -> None:
         # -1 is only the timeout sentinel when we set a deadline; from another cause it is

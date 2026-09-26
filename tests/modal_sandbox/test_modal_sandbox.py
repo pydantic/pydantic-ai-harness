@@ -106,10 +106,9 @@ async def test_filesystem_not_directory_error_uses_builtin_exception(fake_modal:
 async def test_command_start_timeout_is_bounded(fake_modal: FakeModal) -> None:
     fake_modal.exec_hangs = True
     backend = ModalSandboxBackend()
-    with pytest.raises(WorkspaceTimeoutError, match='before the command could start') as exc_info:
+    with pytest.raises(WorkspaceTimeoutError, match='before the command could start'):
         with anyio.fail_after(0.2):
             await backend.run(['echo', 'hello'], timeout=0.01)
-    assert exc_info.value.timeout == 0.01
 
 
 async def test_create_timeout_is_a_retryable_timeout(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:

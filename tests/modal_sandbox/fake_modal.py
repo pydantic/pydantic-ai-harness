@@ -430,6 +430,9 @@ class FakeSandbox:
         except subprocess.TimeoutExpired as expired:
             # Modal reports a command stopped at its deadline with exit code -1.
             return _FakeProcess(expired.stdout or b'', expired.stderr or b'', -1, None, False)
+        except FileNotFoundError:
+            # A program that doesn't exist is an ordinary exit code 127, as from `sh`.
+            return _FakeProcess(b'', b'', 127, None, False)
         return _FakeProcess(completed.stdout, completed.stderr, completed.returncode, None, False)
 
     def _exec(
