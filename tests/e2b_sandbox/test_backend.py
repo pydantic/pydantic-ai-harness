@@ -211,11 +211,19 @@ class TestRun:
         result = await backend.run(['false'])
         assert (result.stdout, result.stderr, result.exit_code) == ('out', 'err', 2)
 
+    async def test_command_uses_utf8_locale_unless_overridden(self, fake_e2b: FakeE2B) -> None:
+        backend = await started()
+        await backend.run(['printf', 'é'])
+        envs = fake_e2b.sandboxes[0].commands.calls[-1].envs
+        assert envs is not None and envs['LC_ALL'] == 'C.UTF-8'
+        await backend.run(['true'], env={'LC_ALL': 'en_US.UTF-8'})
+        assert fake_e2b.sandboxes[0].commands.calls[-1].envs == {'LC_ALL': 'en_US.UTF-8'}
+
     async def test_cwd_and_env_reach_the_command(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         await backend.run(['env'], cwd='/srv', env={'FOO': 'bar'})
         call = fake_e2b.sandboxes[0].commands.calls[-1]
-        assert (call.cwd, call.envs) == ('/srv', {'FOO': 'bar'})
+        assert (call.cwd, call.envs) == ('/srv', {'LC_ALL': 'C.UTF-8', 'FOO': 'bar'})
 
     async def test_configured_env_reaches_an_attached_sandbox_under_the_commands_own(self, fake_e2b: FakeE2B) -> None:
         # Creation `envs` never reach a sandbox made elsewhere, so the configured env rides on
@@ -224,7 +232,11 @@ class TestRun:
             ref=WorkspaceRef(provider='e2b', id='sbx-keep'), env={'BASE': 'configured', 'SHARED': 'configured'}
         )
         await backend.run(['env'], env={'SHARED': 'command'})
-        assert fake_e2b.sandboxes[0].commands.calls[-1].envs == {'BASE': 'configured', 'SHARED': 'command'}
+        assert fake_e2b.sandboxes[0].commands.calls[-1].envs == {
+            'LC_ALL': 'C.UTF-8',
+            'BASE': 'configured',
+            'SHARED': 'command',
+        }
 
     async def test_rejects_relative_cwd(self, fake_e2b: FakeE2B) -> None:
         backend = await started()

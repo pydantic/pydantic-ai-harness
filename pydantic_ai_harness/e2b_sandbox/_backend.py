@@ -409,7 +409,9 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
                 handle = await sandbox.commands.run(
                     line,
                     background=True,
-                    envs={**(self._env or {}), **(env or {})} or None,
+                    # C.UTF-8 needs no locale package on the default image; libc falls back to C
+                    # on images without it. Explicit caller settings take precedence.
+                    envs={'LC_ALL': 'C.UTF-8', **(self._env or {}), **(env or {})},
                     cwd=cwd if cwd is not None else self._working_dir,
                     timeout=_SDK_STREAM_UNBOUNDED,
                 )
