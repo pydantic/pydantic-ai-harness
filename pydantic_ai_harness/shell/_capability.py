@@ -9,7 +9,7 @@ from pathlib import Path
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 
-from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored
+from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACE, warn_argument_ignored
 from pydantic_ai_harness._workspace import require_workspace
 from pydantic_ai_harness.shell._toolset import RUN_SCOPED_TOOL_NAMES, ShellToolset
 
@@ -136,7 +136,7 @@ class Shell(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         """Resolve the built-in denylist according to the selected policy."""
         if self.cwd is not None:
-            warn_argument_ignored('Shell', 'cwd', WORKING_DIR_IS_THE_WORKSPACES)
+            warn_argument_ignored('Shell', 'cwd', WORKING_DIR_IS_THE_WORKSPACE)
         if self.denied_commands is _DEFAULT_DENIED_COMMANDS:
             self.denied_commands = [] if self.allowed_commands else list(_DEFAULT_DENIED_COMMANDS)
 
