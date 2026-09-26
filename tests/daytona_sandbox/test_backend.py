@@ -810,6 +810,20 @@ def test_client_lifetime_docstrings_describe_sdk_reopening() -> None:
     assert 'leaks an aiohttp session' in (DaytonaSandboxBackend.aclose.__doc__ or '')
 
 
+async def test_repeated_cancellation_finishes_owned_client_close(fake_daytona: FakeDaytona) -> None:
+    backend = await started()
+    gate = asyncio.Event()
+    fake_daytona.close_gate = gate
+    task = asyncio.create_task(backend.aclose())
+    await asyncio.sleep(0)
+    task.cancel()
+    task.cancel()
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert fake_daytona.closed_clients == 1
+
+
 def test_working_dir_docstring_describes_cached_probe() -> None:
     doc = DaytonaSandboxBackend.working_dir.__doc__ or ''
     assert 'first call' in doc and 'cached' in doc

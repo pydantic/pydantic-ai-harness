@@ -326,10 +326,25 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         """
         if self._client is None or not self._owns_client:
             return
-        # Shielded so a cancelled run still releases its HTTP connections.
-        with anyio.CancelScope(shield=True):
+
+        async def close() -> None:
             async with self._lock:
                 await self._close_owned_client()
+
+        # A separate task outlives native asyncio cancellation; the bounded SDK close still
+        # finishes before the caller observes cancellation, even if cancellation repeats.
+        task = asyncio.create_task(close())
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+                if task.done():
+                    break
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def _close_owned_client(self) -> None:
         """Close the API client this backend opened, bounded and shielded so a cancelled run still releases it.
