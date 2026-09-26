@@ -14,6 +14,7 @@ from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness._warn import warn_argument_renamed
 from pydantic_ai_harness._workspace import innermost_backend
 from pydantic_ai_harness._workspace_provider import (
+    SandboxProvider,
     absolute_path,
     check_integer,
     check_working_dir,
@@ -21,6 +22,28 @@ from pydantic_ai_harness._workspace_provider import (
     command_deadline,
     stop_shielded,
 )
+
+
+@pytest.mark.anyio
+async def test_sandbox_destroy_uses_ref_without_attaching() -> None:
+    from pydantic_ai.workspaces import WorkspaceRef  # noqa: PLC0415
+
+    class FakeProvider:
+        attached = False
+        deleted = False
+
+        def backend(self, ref: WorkspaceRef) -> WorkspaceBackend:
+            self.attached = True
+            raise AssertionError('destroy must not attach')
+
+        async def destroy(self, ref: WorkspaceRef) -> None:
+            assert (ref.provider, ref.id) == ('fake', 'owned')
+            self.deleted = True
+
+    fake = FakeProvider()
+    provider: SandboxProvider = fake
+    await provider.destroy(WorkspaceRef(provider='fake', id='owned'))
+    assert fake.deleted and not fake.attached
 
 
 @pytest.mark.anyio

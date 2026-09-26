@@ -5,10 +5,23 @@ from __future__ import annotations
 import posixpath
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Protocol
 
 import anyio
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.workspaces import WorkspaceCommand, WorkspaceTimeoutError
+from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceCommand, WorkspaceRef, WorkspaceTimeoutError
+
+
+class SandboxProvider(Protocol):
+    """Provider-specific ref lifecycle, without leasing or implicitly attaching a sandbox."""
+
+    def backend(self, ref: WorkspaceRef) -> WorkspaceBackend:
+        """Construct a backend for an existing ref without I/O."""
+        ...
+
+    async def destroy(self, ref: WorkspaceRef) -> None:
+        """Delete this ref via the provider's ID-only API, without resuming it."""
+        ...
 
 
 async def stop_shielded(stop: Callable[[], Awaitable[object]], *, grace: float = 2.0) -> None:
