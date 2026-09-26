@@ -118,6 +118,19 @@ async def test_explicit_hidden_file_glob_and_omission_count(tmp_path: Path) -> N
     assert '.hidden.py' in await tools.list_files(glob='.hidden.py', workspace=backend)
 
 
+async def test_recursive_find_reports_hidden_omissions(tmp_path: Path) -> None:
+    (tmp_path / 'src').mkdir()
+    (tmp_path / 'src' / '.secret.txt').write_text('needle\n')
+    (tmp_path / 'src' / 'visible.txt').write_text('needle\n')
+    (tmp_path / '.private').mkdir()
+    (tmp_path / '.private' / 'secret.txt').write_text('needle\n')
+    tools = FileSystem[None](root_dir=tmp_path).get_toolset()
+    assert isinstance(tools, FileSystemToolset)
+    result = await tools.find_files('**/*.txt', workspace=LocalWorkspaceBackend(tmp_path))
+    assert '2 hidden entries omitted' in result
+    assert 'src/visible.txt' in result
+
+
 async def test_nested_gitignore_on_posix_search(tmp_path: Path) -> None:
     (tmp_path / 'src').mkdir()
     (tmp_path / 'src' / '.gitignore').write_text('ignored.txt\n')

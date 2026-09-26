@@ -415,8 +415,10 @@ def _glob_match(pattern: Sequence[str], path: Sequence[str]) -> bool:
     return bool(path) and fnmatch.fnmatchcase(path[0], head) and _glob_match(rest, path[1:])
 
 
-def _with_walk_notice(lines: list[str], walk_cut: bool) -> str:
-    """A walker's result, ending with the cut-short notice when the walk hit its caps."""
+def _with_walk_notice(lines: list[str], walk_cut: bool, hidden_count: int = 0) -> str:
+    """A walker's result, ending with notices for entries omitted and caps hit."""
+    if hidden_count:
+        lines.append(f'[{hidden_count} hidden entries omitted; name a hidden path explicitly to include it]')
     if walk_cut:
         return '\n'.join([*(lines or ['No matches found.']), _WALK_CUT_NOTICE])
     return '\n'.join(lines) if lines else 'No matches found.'
@@ -1208,12 +1210,16 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if entry is not None and supports_commands(scope.workspace):
             return await self._command_search_files(scope, ctx, entry, resolved, pattern, include_glob)
         walk_cut = False
+        hidden_count = 0
         if entry is None:
             files: list[WorkspaceFileEntry] = []
         elif not entry.is_dir:
             files = [entry]
         else:
             walked, walk_cut = await self._walk(scope, resolved)
+            # Hidden directories are pruned; count their directory entry, not unseen descendants.
+            if not (include_glob and _explicit_hidden(include_glob)):
+                hidden_count = sum(_is_hidden(posixpath.relpath(child.path, resolved)) for child in walked)
             files = [child for child in walked if not child.is_dir]
 
         results: list[str] = []
@@ -1263,7 +1269,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 f'[{len(skipped)} files skipped (too large or unreadable): {", ".join(skipped[:10])}'
                 f'{", ..." if len(skipped) > 10 else ""}]'
             )
-        return _with_walk_notice(results, walk_cut)
+        return _with_walk_notice(results, walk_cut, hidden_count)
 
     async def _command_search_files(
         self,
@@ -1381,6 +1387,16 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         # Without `**`, nothing deeper than the pattern's own components can match.
         max_depth = None if '**' in parts else len(parts)
         walked, walk_cut = await self._walk(scope, resolved, max_depth=max_depth)
+        # Report only the entries observed: the walk prunes hidden subdirectories.
+        hidden_count = (
+            0
+            if _explicit_hidden(pattern)
+            else sum(
+                _is_hidden(relative := posixpath.relpath(child.path, resolved))
+                and (child.is_dir and '**' in parts or _glob_match(parts, relative.split('/')))
+                for child in walked
+            )
+        )
         found = [
             child
             for child in walked
@@ -1411,7 +1427,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             )
         if capped:
             matches.append(f'[... truncated at {self._max_find_results} matches]')
-        return _with_walk_notice(matches, walk_cut)
+        return _with_walk_notice(matches, walk_cut, hidden_count)
 
     async def list_files(self, path: str = '.', *, glob: str | None = None, workspace: WorkspaceBackend) -> str:
         """List files with ripgrep in `workspace` directly, outside an agent run."""
