@@ -641,6 +641,22 @@ class TestFilesystem:
             entries = await backend.list_dir(str(tmp_path))
         assert [entry.name for entry in entries] == ['a', 'b', 'target']
 
+    async def test_list_dir_translates_multiple_denied_symlink_targets(self, fake_e2b: FakeE2B) -> None:
+        backend = await started()
+        files = fake_e2b.sandboxes[0].files
+        await backend.make_dir('/srv')
+        files.symlinks['/srv/a'] = '/etc/private/a'
+        files.symlinks['/srv/b'] = '/etc/private/b'
+        files.files['/srv/a'] = b''
+        files.files['/srv/b'] = b''
+        files.denied.add('/etc')
+        for path in ('/srv/a', '/srv/b'):
+            with pytest.raises(PermissionError):
+                await backend.stat(path)
+        with pytest.raises(PermissionError) as exc:
+            await backend.list_dir('/srv')
+        assert '/srv/a' in str(exc.value)
+
     async def test_symlink_whose_target_is_gone_reads_as_dangling(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         fake_e2b.sandboxes[0].files.symlinks['/srv/link'] = '/srv/removed'
