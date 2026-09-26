@@ -617,6 +617,13 @@ class TestReadFile:
         assert 'line3' in result
         assert 'line1' not in result
 
+    @pytest.mark.parametrize(('offset', 'limit'), [(-1, None), (0, 0), (0, -1)])
+    async def test_read_rejects_invalid_window(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend, offset: int, limit: int | None
+    ) -> None:
+        with pytest.raises(ModelRetry, match='offset|limit'):
+            await toolset.read_file('multi.txt', offset=offset, limit=limit, workspace=ws)
+
     async def test_read_with_limit(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         result = await toolset.read_file('multi.txt', limit=2, workspace=ws)
         assert 'line1' in result

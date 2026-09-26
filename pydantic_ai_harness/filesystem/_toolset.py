@@ -752,6 +752,10 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
     async def _read_file(
         self, scope: _Scope, ctx: RunContext[AgentDepsT] | None, path: str, *, offset: int = 0, limit: int | None = None
     ) -> str:
+        if offset < 0:
+            raise ValueError('offset must be non-negative.')
+        if limit is not None and limit < 1:
+            raise ValueError('limit must be at least 1.')
         if limit is None:
             limit = self._max_read_lines
         resolved = await self._safe_resolve(scope, path)
