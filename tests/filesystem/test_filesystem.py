@@ -21,6 +21,7 @@ from pydantic_ai.workspaces import (
     FileEntry,
     LocalWorkspaceBackend,
     ReadOnlyWorkspace,
+    UnavailableWorkspace,
     Workspace,
     WorkspaceBackend,
     WorkspaceError,
@@ -453,6 +454,13 @@ class TestRootDir:
     async def test_no_workspace_fails_the_run(self) -> None:
         with pytest.raises(UserError, match='`FileSystem` needs a workspace'):
             await call_tool([FileSystem[None]()], 'list_directory', {})
+
+    async def test_unavailable_workspace_names_policy_reason(self) -> None:
+        with pytest.raises(UserError, match='`FileSystem`.*disabled by policy') as error:
+            await call_tool(
+                [FileSystem[None]()], 'list_directory', {}, workspace=UnavailableWorkspace('disabled by policy')
+            )
+        assert 'Add `LocalWorkspace' not in str(error.value)
 
 
 class TestAccessPatterns:
