@@ -179,6 +179,10 @@ def test_capability_takes_the_base_class_options_and_the_creation_settings() -> 
     assert capability.get_instructions() is None
 
 
+def test_modal_capability_repr_does_not_expose_env_secrets() -> None:
+    assert 'private-token' not in repr(ModalSandbox(env={'TOKEN': 'private-token'}))
+
+
 def test_defer_loading_is_refused() -> None:
     with pytest.raises(UserError, match="skipped when the run's workspace is chosen"):
         ModalSandbox(id='modal', defer_loading=True)

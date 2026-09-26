@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -138,7 +138,7 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
     working_dir: str | None = None
     """Absolute directory commands start in and relative paths resolve against; the image's when `None`."""
 
-    env: Mapping[str, str] | None = None
+    env: Mapping[str, str] | None = field(default=None, repr=False)
     """Environment variables every command in the sandbox gets; a command's own `env` is layered on top."""
 
     warn_if_no_tools: bool = True
