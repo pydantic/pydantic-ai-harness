@@ -262,6 +262,17 @@ class TestRun:
         assert not sandbox.shutting_down
         assert backend.ref == WorkspaceRef(provider='modal', id=sandbox.object_id)
 
+    async def test_stop_uses_stable_directory_after_command_cwd_is_removed(self, fake_modal: FakeModal) -> None:
+        fake_modal.wait_hangs = True
+        backend = ModalSandboxBackend(working_dir='/deleted')
+        waiter = asyncio.create_task(backend.run(['sleep', '30']))
+        await anyio.wait_all_tasks_blocked()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        stop = next(call for call in fake_modal.sandboxes[0].exec_calls if 'modal-stop' in call.argv)
+        assert stop.workdir == '/'
+
     async def test_cancelling_run_propagates_the_cancellation(self, fake_modal: FakeModal) -> None:
         # A cancelled run abandons the result collection (reaping its readers) and re-raises
         # the cancellation untranslated; the command itself runs on until its Modal deadline.

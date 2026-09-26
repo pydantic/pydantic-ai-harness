@@ -563,7 +563,8 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                     cancel_file,
                     pid_file,
                     timeout=2,
-                    workdir=workdir,
+                    # The user's cwd may have been deleted by the command itself.
+                    workdir='/',
                     text=False,
                 )
                 await _check_stop(stopper, sandbox.object_id)
