@@ -76,6 +76,10 @@ See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for more
 
 When a command times out, plain `&` children of that command end with it. A Sprite pauses processes between commands unless you run them as a [Sprites service](https://docs.sprites.dev/working-with-sprites/services/).
 
+## What a timeout stops
+
+A command timeout starts after the Sprite is ready. The backend closes that command's exec connection and asks Sprites to stop it after one second; it does not delete the Sprite. The command's process group, especially children of a shell, is not yet guaranteed to have stopped. If stopping is uncertain, inspect the Sprite or delete it explicitly. `timeout=None` removes the command deadline, not the Sprite's idle pause or transport limits.
+
 ## Reattach later
 
 To come back to the Sprite without the message history, pass its ref back as `workspace=`:

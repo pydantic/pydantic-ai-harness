@@ -27,6 +27,7 @@ import json
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import pytest
 from pydantic_ai import Agent
@@ -168,6 +169,25 @@ async def test_a_timed_out_command_is_killed(client: AsyncSpritesClient) -> None
         assert str(exc_info.value) == 'Command timed out after 5 seconds'
         check = await backend.run(['sh', '-c', 'sleep 3; kill -0 "$(cat "$1")"', 'sh', pid_file], timeout=60)
         assert check.exit_code != 0
+
+
+async def test_timeout_keeps_stderr_and_cleans_capture(client: AsyncSpritesClient) -> None:
+    """The fake cannot prove the live exec stream preserves stderr after an interrupted command."""
+    backend = SpritesSandboxBackend(client=client)
+    native = await backend.get_client()
+    with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
+        refs.write(f'sprites sprites {native.name}\n')
+    try:
+        previous = await backend.run(['sh', '-c', 'ls /tmp/pydantic-ai-stderr-* 2>/dev/null'], timeout=30)
+        with pytest.raises(WorkspaceTimeoutError) as caught:
+            await backend.run('echo ERROR >&2; sleep 30', shell=True, timeout=3)
+        assert 'ERROR' in caught.value.stderr
+        result = await backend.run(['sh', '-c', 'ls /tmp/pydantic-ai-stderr-* 2>/dev/null'], timeout=30)
+        assert result.stdout == previous.stdout
+    finally:
+        await native.delete()
+        with pytest.raises(NotFoundError):
+            await client.get_sprite(native.name)
 
 
 async def test_reattach_to_a_deleted_sprite_is_unavailable(client: AsyncSpritesClient) -> None:
