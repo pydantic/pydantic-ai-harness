@@ -758,16 +758,20 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             raise ValueError('limit must be at least 1.')
         if limit is None:
             limit = self._max_read_lines
-        resolved = await self._safe_resolve(scope, path)
-        entry = await self._stat(scope, resolved)
-        if entry is None:
-            raise FileNotFoundError(f'File not found: {path}')
-        if entry.is_dir:
-            raise FileNotFoundError(f"'{path}' is a directory, not a file.")
+        try:
+            resolved = await self._safe_resolve(scope, path)
+            entry = await self._stat(scope, resolved)
+        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+            return f'Path not found: {path}'
+        if entry is None or entry.is_dir:
+            return f'Path not found: {path}'
 
         # The whole file: the header reports its line count and the hash write_file and
         # edit_file verify against, and both need every byte.
-        raw = await scope.workspace.read_bytes(resolved)
+        try:
+            raw = await scope.workspace.read_bytes(resolved)
+        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+            return f'Path not found: {path}'
         content_hash = _bytes_hash(raw)
         if _is_binary(raw):
             if ctx is not None:
@@ -1594,10 +1598,13 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
     @_recoverable
     async def _file_info(self, scope: _Scope, path: str) -> str:
-        resolved = await self._safe_resolve(scope, path)
-        entry = await self._stat(scope, resolved)
+        try:
+            resolved = await self._safe_resolve(scope, path)
+            entry = await self._stat(scope, resolved)
+        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+            return f'Path not found: {path}'
         if entry is None:
-            raise FileNotFoundError(f'Path not found: {path}')
+            return f'Path not found: {path}'
 
         kind = 'directory' if entry.is_dir else 'file'
         parts = [f'path: {path}', f'type: {kind}']
@@ -1605,7 +1612,10 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             parts.append(f'size: {entry.size} bytes')
 
         if not entry.is_dir:
-            raw = await scope.workspace.read_bytes(resolved)
+            try:
+                raw = await scope.workspace.read_bytes(resolved)
+            except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+                return f'Path not found: {path}'
             is_bin = _is_binary(raw)
             parts.append(f'binary: {is_bin}')
             if not is_bin:

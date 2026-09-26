@@ -70,6 +70,8 @@ so they are left out when it can't run commands; `search_files` and
 | `find_files` | Glob search over file names (e.g. `*.py`, `**/*.json`). The pattern is relative to `path`; absolute patterns are rejected. |
 | `create_directory` | Create a directory and any missing parents. |
 | `file_info` | Metadata for a file or directory: size, type, line count, hash, and symlink target, where the workspace provides them. |
+
+Missing paths (including directories passed to `read_file`) return `Path not found: <path>` as a tool result, so repeated lookups do not exhaust the model's tool retry budget. Invalid arguments still request a retry.
 | `list_files` | Opt-in, ripgrep-backed: files under a directory, recursively, sorted by path, with an optional `glob`. |
 | `grep` | Opt-in, ripgrep-backed: content search with `glob`, `file_type`, `ignore_case`, `literal`, and `context` (0 to 20) options; a `path` may name a file or a directory. |
 

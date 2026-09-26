@@ -630,13 +630,15 @@ class TestReadFile:
         assert 'line2' in result
         assert '... (3 more lines' in result
 
-    async def test_read_directory_raises(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
-        with pytest.raises(ModelRetry, match='is a directory'):
-            await toolset.read_file('subdir', workspace=ws)
+    async def test_read_directory_returns_plain_result(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        assert await toolset.read_file('subdir', workspace=ws) == 'Path not found: subdir'
 
-    async def test_read_missing_raises(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
-        with pytest.raises(ModelRetry, match='File not found'):
-            await toolset.read_file('nonexistent.txt', workspace=ws)
+    async def test_read_missing_returns_plain_result(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        assert await toolset.read_file('nonexistent.txt', workspace=ws) == 'Path not found: nonexistent.txt'
 
     async def test_read_binary_file(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         result = await toolset.read_file('binary.bin', workspace=ws)
@@ -1518,8 +1520,7 @@ class TestFileInfo:
         assert 'lines:' not in result
 
     async def test_info_not_found(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
-        with pytest.raises(ModelRetry, match='Path not found'):
-            await toolset.file_info('nonexistent', workspace=ws)
+        assert await toolset.file_info('nonexistent', workspace=ws) == 'Path not found: nonexistent'
 
     async def test_info_symlink(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
