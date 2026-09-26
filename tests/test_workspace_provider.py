@@ -1,3 +1,4 @@
+import anyio
 import pytest
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.workspaces import (
@@ -5,13 +6,56 @@ from pydantic_ai.workspaces import (
     ReadOnlyWorkspace,
     Workspace,
     WorkspaceBackend,
+    WorkspaceTimeoutError,
     WrapperWorkspace,
 )
 
 from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness._warn import warn_argument_renamed
 from pydantic_ai_harness._workspace import innermost_backend
-from pydantic_ai_harness._workspace_provider import absolute_path, check_integer, check_working_dir, command_argv
+from pydantic_ai_harness._workspace_provider import (
+    absolute_path,
+    check_integer,
+    check_working_dir,
+    command_argv,
+    command_deadline,
+    stop_shielded,
+)
+
+
+@pytest.mark.anyio
+async def test_own_timeout_and_external_cancel_stop_once() -> None:
+    stopped: list[str] = []
+
+    async def stop() -> None:
+        stopped.append('stop')
+
+    with pytest.raises(WorkspaceTimeoutError) as error:
+        async with command_deadline(0.01, stop=stop, output=lambda: ('partial out', 'partial err')):
+            await anyio.sleep_forever()
+    assert (error.value.stdout, error.value.stderr) == ('partial out', 'partial err')
+    assert stopped == ['stop']
+
+    stopped.clear()
+    with anyio.move_on_after(0.01) as scope:
+        async with command_deadline(None, stop=stop):
+            await anyio.sleep_forever()
+    assert scope.cancelled_caught
+    assert stopped == ['stop']
+
+
+@pytest.mark.anyio
+async def test_stop_shielded_finishes_under_outer_cancellation() -> None:
+    stopped: list[str] = []
+
+    async def stop() -> None:
+        await anyio.sleep(0)
+        stopped.append('stop')
+
+    with anyio.move_on_after(0) as scope:
+        await stop_shielded(stop)
+    assert scope.cancelled_caught or scope.cancel_called
+    assert stopped == ['stop']
 
 
 def test_absolute_path_passes_none_and_absolute_paths_through() -> None:

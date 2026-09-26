@@ -3,9 +3,43 @@
 from __future__ import annotations
 
 import posixpath
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import asynccontextmanager
 
+import anyio
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.workspaces import WorkspaceCommand
+from pydantic_ai.workspaces import WorkspaceCommand, WorkspaceTimeoutError
+
+
+async def stop_shielded(stop: Callable[[], Awaitable[object]], *, grace: float = 2.0) -> None:
+    """Attempt to stop a command under cancellation without cancelling its shared sandbox."""
+    # A child task owns the stop so repeated cancellation of the caller cannot interrupt cleanup.
+    with anyio.move_on_after(grace, shield=True):
+        async with anyio.create_task_group() as group:
+            group.start_soon(stop)
+
+
+@asynccontextmanager
+async def command_deadline(
+    timeout: float | None,
+    *,
+    stop: Callable[[], Awaitable[object]],
+    output: Callable[[], tuple[str, str]] = lambda: ('', ''),
+) -> AsyncGenerator[None, None]:
+    """Bound only the command phase, after sandbox acquisition; stop on timeout or cancellation."""
+    stopped = False
+    with anyio.move_on_after(timeout) as scope:
+        try:
+            yield
+        except BaseException:
+            await stop_shielded(stop)
+            stopped = True
+            raise
+    if scope.cancelled_caught:
+        if not stopped:
+            await stop_shielded(stop)
+        stdout, stderr = output()
+        raise WorkspaceTimeoutError(f'Command timed out after {timeout}s', stdout=stdout, stderr=stderr)
 
 
 def absolute_path(name: str, value: str | None) -> str | None:
