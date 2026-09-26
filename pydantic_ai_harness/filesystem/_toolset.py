@@ -1669,6 +1669,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 scope.workspace,
                 cwd=cwd,
                 target=target,
+                explicit_file=not entry.is_dir,
                 pattern=pattern,
                 literal=literal,
                 ignore_case=ignore_case,
