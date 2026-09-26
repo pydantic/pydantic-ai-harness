@@ -131,7 +131,7 @@ def _command_line(
     if env:
         # `--` ends `env`'s options, so a name starting with `-` is not read as one.
         argv = ['env', '--', *(f'{name}={value}' for name, value in env.items()), *argv]
-    script = f'"$@"; status=$?; printf %s {marker}; printf %s {marker} >&2; exit "$status"'
+    script = f'"$@" </dev/null; status=$?; printf %s {marker}; printf %s {marker} >&2; exit "$status"'
     line = shlex.join(['sh', '-c', script, 'sh', *argv])
     if cwd is not None:
         line = f'cd -- {shlex.quote(cwd)} && {line}'

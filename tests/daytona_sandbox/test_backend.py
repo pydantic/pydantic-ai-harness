@@ -52,7 +52,7 @@ def no_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # Every command runs under a `sh` that prints a per-command end marker last on both streams.
-_WRAPPER = 'sh -c \'"$@"; status=$?; printf %s MARK; printf %s MARK >&2; exit "$status"\' sh'
+_WRAPPER = 'sh -c \'"$@" </dev/null; status=$?; printf %s MARK; printf %s MARK >&2; exit "$status"\' sh'
 
 
 def _unmarked(command: str | None) -> str:
@@ -123,6 +123,16 @@ class TestCommands:
         backend = await started(env={'A.B': 'sandbox'})
         result = await backend.run(['env'], env={'C-D': 'command'})
         assert {'A.B=sandbox', 'C-D=command'} <= set(result.stdout.splitlines())
+
+    async def test_command_stdin_is_at_eof(self, fake_daytona: FakeDaytona, tmp_path: Path) -> None:
+        fake_daytona.host_root = tmp_path.resolve()
+        backend = DaytonaSandboxBackend()
+        with anyio.fail_after(5):
+            result = await backend.run(['sh', '-c', 'if read line; then echo unexpected; else echo eof; fi'])
+        assert result.stdout == 'eof\n'
+        fake_daytona.host_root = None
+        await DaytonaSandboxBackend().run(['true'])
+        assert '"$@" </dev/null' in fake_daytona.sandboxes[-1].process_command
 
     async def test_output_comes_from_the_stored_logs_not_the_stream(self, fake_daytona: FakeDaytona) -> None:
         # SDK 0.198.0's stream demultiplexer injects prefix bytes and misroutes output above ~4 KB.
