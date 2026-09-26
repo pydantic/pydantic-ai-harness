@@ -495,7 +495,8 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             return CommandResult(exit_code=error.exit_code, stdout=error.stdout, stderr=error.stderr)
         except BaseException as error:
             # A child task shields the side-channel stop from repeated task cancellation.
-            await stop_shielded(stop)
+            # Allow the winning launcher to publish its PID before bounding a lost start ACK.
+            await stop_shielded(stop, grace=12)
             if isinstance(error, Exception):
                 context = (
                     'Command could not run in the E2B sandbox'
