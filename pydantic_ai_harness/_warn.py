@@ -91,7 +91,7 @@ def warn_argument_renamed(owner: str, old: str, new: str, *, stacklevel: int = 3
     )
 
 
-WORKING_DIR_IS_THE_WORKSPACE = (
+SET_WORKING_DIR_ON_THE_WORKSPACE = (
     "commands/paths start in the workspace's working directory; set it on the workspace, e.g. "
     "`LocalWorkspace('./repo')`."
 )
