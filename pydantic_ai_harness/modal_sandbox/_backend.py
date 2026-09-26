@@ -187,7 +187,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     """A Modal sandbox implementing Pydantic AI's `WorkspaceBackend` protocol.
 
     Construction performs no I/O. The first operation creates or attaches to a sandbox, and the
-    typed `modal.Sandbox` is available through `get_client()`. The backend does not terminate the
+    typed `modal.Sandbox` is available through `get_sandbox()`. The backend does not terminate the
     sandbox; terminating it is the application's job.
 
     Modal applies whole-second command deadlines. Cancelling `run()` stops the local wait while
@@ -197,7 +197,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     check on this class instead of at a distant `WorkspaceBackend` call.
 
     Args:
-        workspace: A live `modal.Sandbox` you already have. Whoever created it owns terminating it.
+        sandbox: A live `modal.Sandbox` you already have. Whoever created it owns terminating it.
         ref: Identity of an existing sandbox to attach to on first use.
         image: Registry tag, or a `modal.Image`, a newly created sandbox runs. `None` (the default)
             is Debian slim with Python 3.12, `git`, and `ripgrep`.
@@ -214,8 +214,8 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
 
     def __init__(
         self,
-        workspace: modal.Sandbox | None = None,
         *,
+        sandbox: modal.Sandbox | None = None,
         ref: WorkspaceRef | None = None,
         image: str | modal.Image | None = None,
         app_name: str = DEFAULT_APP_NAME,
@@ -227,10 +227,10 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     ) -> None:
         if ref is not None and ref.provider != 'modal':
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'modal'")
-        if workspace is not None and ref is not None:
-            raise ValueError('pass either `workspace` or `ref`, not both')
-        self._ref = ref if workspace is None else WorkspaceRef(provider='modal', id=workspace.object_id)
-        self._sandbox: modal.Sandbox | None = workspace
+        if sandbox is not None and ref is not None:
+            raise ValueError('pass either `sandbox` or `ref`, not both')
+        self._ref = ref if sandbox is None else WorkspaceRef(provider='modal', id=sandbox.object_id)
+        self._sandbox: modal.Sandbox | None = sandbox
         self._image = image
         self._app_name = app_name
         self._create_app_if_missing = create_app_if_missing
@@ -243,7 +243,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         self._resolved_working_dir: str | None = None
         self._lock = anyio.Lock()
 
-    async def get_client(self) -> modal.Sandbox:
+    async def get_sandbox(self) -> modal.Sandbox:
         """Return the typed `modal.Sandbox`, creating or attaching to it on first use.
 
         The lock serializes concurrent first uses -- two callers each creating a sandbox would
@@ -286,7 +286,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             raise mapped from error
 
     async def read_bytes(self, path: str) -> bytes:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._mapped_errors(sandbox, f'Could not read {path!r}', path):
             return await sandbox.filesystem.read_bytes.aio(path)
 
@@ -294,7 +294,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         # Modal takes the data first, creates missing parents, and replaces existing contents.
         import modal
 
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._mapped_errors(sandbox, f'Could not write {path!r}', path):
             try:
                 entry = await sandbox.filesystem.stat.aio(path)
@@ -308,23 +308,23 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             await sandbox.filesystem.write_bytes.aio(data, target)
 
     async def stat(self, path: str) -> FileEntry:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._mapped_errors(sandbox, f'Could not stat {path!r}', path):
             return await _file_entry(sandbox, await sandbox.filesystem.stat.aio(path), path)
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._mapped_errors(sandbox, f'Could not list {path!r}', path):
             entries = await sandbox.filesystem.list_files.aio(path)
             return [await _file_entry(sandbox, entry, posixpath.join(path, entry.name)) for entry in entries]
 
     async def make_dir(self, path: str) -> None:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._mapped_errors(sandbox, f'Could not create directory {path!r}', path):
             await sandbox.filesystem.make_directory.aio(path)
 
     async def remove(self, path: str) -> None:
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with self._mapped_errors(sandbox, f'Could not remove {path!r}', path):
             await sandbox.filesystem.remove.aio(path, recursive=True)
 
@@ -344,7 +344,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         sandbox: modal.Sandbox | None = None
         try:
             # Shielded so that a caller cancelled mid-create still gets the sandbox Modal made:
-            # `get_client` records it before the cancellation is delivered, so `ref` names it and
+            # `get_sandbox` records it before the cancellation is delivered, so `ref` names it and
             # a retry reuses it. Only the local deadline interrupts the call; a sandbox created
             # after it fires is reaped at its `sandbox_timeout`.
             with anyio.CancelScope(shield=True), anyio.move_on_after(_CREATE_TIMEOUT):
@@ -419,7 +419,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         # idempotent read: overlapping first calls may each run their own `pwd`, get the same
         # answer, and the cache converges. No lock needed.
         if self._resolved_working_dir is None:
-            sandbox = await self.get_client()
+            sandbox = await self.get_sandbox()
             result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.removesuffix('\n')
             # Only an absolute path is an answer. Caching whatever else the sandbox printed
@@ -460,7 +460,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         variables: dict[str, str | None] | None = {**self._env, **(env or {})} or None
         # Acquiring the sandbox has its own bound; the timeout is the command's alone.
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         # Modal takes whole seconds and reads 0 as no deadline, so round up. Messages quote the
         # caller's `timeout`; the exception's `timeout` attribute is the deadline Modal enforced.
         deadline = None if timeout is None else max(1, math.ceil(timeout))

@@ -37,7 +37,7 @@ _LEGACY_ARGUMENTS: Mapping[str, str] = {
     ),
     'session': (
         '`ModalSandboxSession` no longer exists. To share a sandbox you own across runs, pass '
-        '`ModalSandboxBackend(workspace=<modal.Sandbox>)` (or its `WorkspaceRef`) as `workspace=` to '
+        '`ModalSandboxBackend(sandbox=<modal.Sandbox>)` (or its `WorkspaceRef`) as `workspace=` to '
         '`agent.run()`. The backend never terminates a sandbox; that stays your job.'
     ),
     'default_command_timeout': (

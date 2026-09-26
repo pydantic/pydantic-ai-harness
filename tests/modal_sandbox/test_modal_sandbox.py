@@ -40,7 +40,7 @@ pytestmark = pytest.mark.anyio(backends=['asyncio'])
 async def test_backend_acquires_fresh_workspace_and_records_ref(fake_modal: FakeModal) -> None:
     backend = ModalSandboxBackend()
     assert not fake_modal.sandboxes
-    native = await backend.get_client()
+    native = await backend.get_sandbox()
     assert native is fake_modal.sandboxes[0]
     assert backend.ref == WorkspaceRef(provider='modal', id=native.object_id)
 
@@ -48,12 +48,12 @@ async def test_backend_acquires_fresh_workspace_and_records_ref(fake_modal: Fake
 async def test_missing_modal_extra_has_install_hint(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, 'modal', None)
     with pytest.raises(UserError, match=r'pydantic-ai-harness\[modal\]'):
-        await ModalSandboxBackend().get_client()
+        await ModalSandboxBackend().get_sandbox()
 
 
 async def test_backend_attaches_explicit_ref_without_create(fake_modal: FakeModal) -> None:
     backend = ModalSandboxBackend(ref=WorkspaceRef(provider='modal', id='existing'))
-    await backend.get_client()
+    await backend.get_sandbox()
     assert fake_modal.attach_ids == ['existing']
     assert not fake_modal.create_kwargs
 
@@ -68,28 +68,28 @@ async def test_attach_failures_keep_reference_and_do_not_create(
     fake_modal.attach_error = fake_modal.exception(name)('failed')
     backend = ModalSandboxBackend(ref=WorkspaceRef(provider='modal', id='existing'))
     with pytest.raises(expected or fake_modal.exception(name)) as exc_info:
-        await backend.get_client()
+        await backend.get_sandbox()
     assert backend.ref == WorkspaceRef(provider='modal', id='existing')
     assert not fake_modal.create_kwargs
     assert fake_modal.attach_error in (exc_info.value, exc_info.value.__cause__)
 
 
 async def test_native_workspace_identity_is_immediate(fake_modal: FakeModal) -> None:
-    native = await ModalSandboxBackend().get_client()
-    backend = ModalSandboxBackend(workspace=native)
+    native = await ModalSandboxBackend().get_sandbox()
+    backend = ModalSandboxBackend(sandbox=native)
     assert backend.ref == WorkspaceRef(provider='modal', id=native.object_id)
-    assert await backend.get_client() is native
+    assert await backend.get_sandbox() is native
 
 
 async def test_native_workspace_and_ref_conflict(fake_modal: FakeModal) -> None:
-    native = await ModalSandboxBackend().get_client()
-    with pytest.raises(ValueError, match='either `workspace` or `ref`'):
-        ModalSandboxBackend(workspace=native, ref=WorkspaceRef(provider='modal', id='other'))
+    native = await ModalSandboxBackend().get_sandbox()
+    with pytest.raises(ValueError, match='either `sandbox` or `ref`'):
+        ModalSandboxBackend(sandbox=native, ref=WorkspaceRef(provider='modal', id='other'))
 
 
 async def test_filesystem_not_directory_error_uses_builtin_exception(fake_modal: FakeModal) -> None:
     backend = ModalSandboxBackend()
-    await backend.get_client()
+    await backend.get_sandbox()
     fake_modal.sandboxes[0].fs_error = fake_modal.exception('SandboxFilesystemNotADirectoryError')('file')
     with pytest.raises(NotADirectoryError, match='Not a directory'):
         await backend.read_bytes('/file/child')
@@ -109,7 +109,7 @@ async def test_create_timeout_is_a_retryable_timeout(fake_modal: FakeModal, monk
     monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._CREATE_TIMEOUT', 0.01)
     backend = ModalSandboxBackend()
     with pytest.raises(TimeoutError, match='control plane') as exc_info:
-        await backend.get_client()
+        await backend.get_sandbox()
     assert not isinstance(exc_info.value, WorkspaceError)
 
 
@@ -117,7 +117,7 @@ async def test_an_sdk_timeout_during_create_propagates_unchanged(fake_modal: Fak
     error = TimeoutError('grpc deadline')
     fake_modal.create_error = error
     with pytest.raises(TimeoutError) as exc_info:
-        await ModalSandboxBackend().get_client()
+        await ModalSandboxBackend().get_sandbox()
     assert exc_info.value is error
 
 
@@ -179,7 +179,7 @@ def test_defer_loading_is_refused() -> None:
     ('legacy', 'guidance'),
     [
         ({'sandbox_id': 'sb-1'}, "workspace=WorkspaceRef(provider='modal', id=sandbox_id)"),
-        ({'session': object()}, 'ModalSandboxBackend(workspace=<modal.Sandbox>)'),
+        ({'session': object()}, 'ModalSandboxBackend(sandbox=<modal.Sandbox>)'),
         ({'default_command_timeout': 5.0}, 'Shell(default_timeout=...)'),
         ({'max_command_timeout': 60}, 'sandbox lifetime (`sandbox_timeout`) bounds every command'),
         ({'max_output_bytes': 1}, 'Shell(max_output_chars=...)'),
@@ -309,9 +309,9 @@ async def test_failed_acquisition_can_retry(fake_modal: FakeModal) -> None:
     backend = ModalSandboxBackend()
     fake_modal.create_error = fake_modal.exception('ConnectionError')('temporary')
     with pytest.raises(fake_modal.exception('ConnectionError')):
-        await backend.get_client()
+        await backend.get_sandbox()
     fake_modal.create_error = None
-    await backend.get_client()
+    await backend.get_sandbox()
     assert fake_modal.owned_creates == 1
 
 
@@ -322,7 +322,7 @@ async def test_cancellation_after_modal_created_the_sandbox_keeps_its_ref(fake_m
     fake_modal.create_gate = anyio.Event()
     with anyio.CancelScope() as scope:
         async with anyio.create_task_group() as tg:
-            tg.start_soon(backend.get_client)
+            tg.start_soon(backend.get_sandbox)
             while not fake_modal.create_started:
                 await anyio.sleep(0)
             scope.cancel()
@@ -349,7 +349,7 @@ async def test_agent_uses_modal_sandbox(fake_modal: FakeModal) -> None:
 @pytest.mark.parametrize(
     ('name', 'replacement'),
     [
-        ('ModalSandboxSession', 'ModalSandboxBackend(workspace=<modal.Sandbox>)'),
+        ('ModalSandboxSession', 'ModalSandboxBackend(sandbox=<modal.Sandbox>)'),
         ('ModalSandboxExecResult', 'pydantic_ai.workspaces.CommandResult'),
         ('ModalSandboxError', 'pydantic_ai.workspaces.WorkspaceError'),
         ('ModalSandboxTerminalError', 'pydantic_ai.workspaces.WorkspaceUnavailableError'),
@@ -399,7 +399,7 @@ async def test_creation_settings_reach_the_sandbox(fake_modal: FakeModal) -> Non
     capability = ModalSandbox(sandbox_timeout=1, idle_timeout=2, working_dir='/work', env={'A': '1'})
     backend = capability.get_workspace(RunContext(deps=None, model=TestModel(), usage=RunUsage()), ref=None)
     assert isinstance(backend, ModalSandboxBackend)
-    await backend.get_client()
+    await backend.get_sandbox()
     created = fake_modal.create_kwargs[-1]
     assert (created['timeout'], created['idle_timeout'], created['workdir'], created['env']) == (
         1,

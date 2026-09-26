@@ -42,7 +42,7 @@ async def owned_backend(**settings: Any) -> AsyncGenerator[ModalSandboxBackend, 
         'idle_timeout': LIVE_IDLE_TIMEOUT,
     }
     backend = ModalSandboxBackend(**(defaults | settings))
-    native = await backend.get_client()
+    native = await backend.get_sandbox()
     try:
         yield backend
     finally:
@@ -74,7 +74,7 @@ async def test_reattach_sees_state_and_applies_working_dir_and_env() -> None:
 
 async def test_a_terminated_sandbox_is_unavailable() -> None:
     async with owned_backend() as owner:
-        await (await owner.get_client()).terminate.aio()
+        await (await owner.get_sandbox()).terminate.aio()
         with pytest.raises(WorkspaceUnavailableError):
             await ModalSandboxBackend(ref=owner.ref).run(['true'], timeout=30)
         with pytest.raises(WorkspaceUnavailableError):
@@ -127,7 +127,7 @@ async def test_coder_tools_run_in_the_sandbox_modal_sandbox_supplies() -> None:
     finally:
         for backend in supplied:
             if backend.ref is not None:
-                await (await backend.get_client()).terminate.aio()
+                await (await backend.get_sandbox()).terminate.aio()
 
 
 async def test_commands_get_a_usable_environment() -> None:

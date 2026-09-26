@@ -26,7 +26,7 @@ def _attach(ref: WorkspaceRef) -> WorkspaceBackend:
 
 async def _terminate(backend: WorkspaceBackend) -> None:
     assert isinstance(backend, ModalSandboxBackend)
-    sandbox = await backend.get_client()
+    sandbox = await backend.get_sandbox()
     await sandbox.terminate.aio()
 
 

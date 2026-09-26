@@ -26,7 +26,7 @@ pytestmark = pytest.mark.anyio(backends=['asyncio'])
 
 async def started(**settings: Any) -> ModalSandboxBackend:
     backend = ModalSandboxBackend(**settings)
-    await backend.get_client()
+    await backend.get_sandbox()
     return backend
 
 
