@@ -13,7 +13,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import Tracer
 from pydantic_ai import Agent, AgentSpec, DeferredToolRequests, ModelRetry, RunContext
 from pydantic_ai.capabilities import ToolSearch
-from pydantic_ai.exceptions import UserError
+from pydantic_ai.exceptions import ToolFailed, UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
@@ -31,7 +31,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.instrumented import InstrumentationSettings
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
-from pydantic_ai.workspaces import LocalWorkspaceBackend
+from pydantic_ai.workspaces import LocalWorkspaceBackend, ReadOnlyWorkspace, Workspace
 
 from pydantic_ai_harness.memory import (
     FileStore,
@@ -80,6 +80,17 @@ def _ctx(
         run_id=run_id,
         tracer=tracer,
     )
+
+
+async def test_file_store_hides_mutations_on_read_only_run(tmp_path: Path) -> None:
+    ctx = _ctx()
+    ctx.workspace = ReadOnlyWorkspace(Workspace(LocalWorkspaceBackend(tmp_path)))
+    toolset = MemoryToolset(Memory[None](store=FileStore('.memory')))
+    assert set(await toolset.get_tools(ctx)) == {'read_memory', 'search_memory'}
+    with pytest.raises(ToolFailed):
+        await toolset.write_memory(ctx, 'hello')
+    with pytest.raises(ToolFailed):
+        await toolset.delete_memory(ctx, 'topic')
 
 
 def _latest_instructions(messages: list[ModelMessage]) -> str:
