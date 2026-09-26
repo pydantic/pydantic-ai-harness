@@ -82,6 +82,8 @@ async def run_python(ctx: RunContext, code: str) -> str:
     return result.stdout + result.stderr
 ```
 
+Concurrent writes to the same path are not atomic on E2B: uploads may interleave, and a reader can see a partial file. Coordinate writers or write to separate paths when using `FileSystem` or `Coder`.
+
 See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for more.
 
 ## Reattach later

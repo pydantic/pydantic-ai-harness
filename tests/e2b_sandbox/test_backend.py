@@ -456,6 +456,10 @@ class TestFilesystem:
         await backend.write_bytes('/tmp/large', b'data')
         assert seen == [0]
 
+    async def test_concurrent_uploads_are_documented_as_non_atomic(self) -> None:
+        docs = (Path(__file__).parents[2] / 'docs/e2b-sandbox.md').read_text()
+        assert 'Concurrent writes to the same path are not atomic' in docs
+
     async def test_write_then_read_round_trips(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         await backend.write_bytes('/tmp/a.txt', b'body')
