@@ -37,6 +37,7 @@ from pydantic_ai.workspaces import (
 
 from pydantic_ai_harness.daytona_sandbox import (
     DaytonaSandboxBackend,
+    _backend,
 )
 
 from .conftest import require_live_credentials
@@ -687,6 +688,11 @@ async def test_attach_timeout_is_transient(fake_daytona: FakeDaytona, monkeypatc
     fake_daytona.get_gate = asyncio.Event()
     with pytest.raises(TimeoutError, match='did not complete'):
         await DaytonaSandboxBackend(ref=WorkspaceRef(provider='daytona', id=existing.id)).get_client()
+
+
+def test_client_lifetime_docstrings_describe_sdk_reopening() -> None:
+    assert 'lazily reopens' in (_backend.__doc__ or '')
+    assert 'leaks an aiohttp session' in (DaytonaSandboxBackend.aclose.__doc__ or '')
 
 
 def test_working_dir_docstring_describes_cached_probe() -> None:

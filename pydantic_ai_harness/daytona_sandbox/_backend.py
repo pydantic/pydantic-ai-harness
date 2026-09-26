@@ -3,8 +3,9 @@
 External assumptions last verified 2026-09-08 against Daytona Python SDK 0.198.0:
 
 * `AsyncDaytona.create`, `get`, and `close` and `AsyncSandbox.start` cover the lifecycle used
-  here; `get` accepts a sandbox ID or name, and a sandbox handle stops working once the
-  `AsyncDaytona` it came from is closed:
+  here; `get` accepts a sandbox ID or name. The SDK lazily reopens its HTTP session after
+  `AsyncDaytona.close()`. Reusing a borrowed client or sandbox after its owner closes it can
+  leak an aiohttp session:
   https://www.daytona.io/docs/en/python-sdk/async/async-daytona/
 * process sessions provide asynchronous execution, separate stdout and stderr callbacks,
   exit status, and deletion as the per-command kill mechanism:
@@ -312,9 +313,10 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         """Close the `AsyncDaytona` API client this backend opened for itself.
 
         A client passed as `client=` is left alone, and the sandbox keeps running. A sandbox
-        handle stops working with the client it came from, so the backend lets go of both, and a
-        later operation opens a new client and attaches again by `ref`. `DaytonaSandbox` calls this
-        when the run that used the backend ends.
+        SDK handles lazily reopen their HTTP sessions after close; this backend drops its owned
+        client and handle so a later operation opens a new client and attaches by `ref`. Using a
+        `client=` or `workspace=` backend after its caller closes that client leaks an aiohttp session.
+        `DaytonaSandbox` calls this when the run that used the backend ends.
         """
         if self._client is None or not self._owns_client:
             return
