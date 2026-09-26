@@ -479,6 +479,14 @@ class TestForRunIsolation:
         assert run1 is not persist_toolset
         assert run2 is not run1
 
+    async def test_without_persist_cwd_every_run_shares_the_toolset(self, shell_dir: Path) -> None:
+        # No per-run state, so durable execution keeps the toolset it registered.
+        shell = Shell[None](id='build_shell')
+        toolset = shell.get_toolset()
+        assert toolset is shell.get_toolset()
+        assert toolset.id == 'build_shell'
+        assert await toolset.for_run(_ctx(shell_dir)) is toolset
+
     async def test_persist_cwd_isolated_across_runs(self, persist_toolset: ShellToolset[None], shell_dir: Path) -> None:
         run1 = await persist_toolset.for_run(_ctx(shell_dir))
         assert isinstance(run1, ShellToolset)
@@ -1855,7 +1863,7 @@ class _RaisingWorkspace(LocalWorkspaceBackend):
 
 class _SlowReads(LocalWorkspaceBackend):
     async def read_bytes(self, path: str) -> bytes:
-        raise WorkspaceTimeoutError('slow')
+        raise WorkspaceTimeoutError('read timed out after 5 seconds')
 
 
 class TestWorkspaceFailures:
@@ -1864,8 +1872,8 @@ class TestWorkspaceFailures:
     @pytest.mark.parametrize(
         ('error', 'message'),
         [
-            (WorkspaceTimeoutError('slow', timeout=30), 'The workspace operation timed out after 30s.'),
-            (WorkspaceTimeoutError('slow'), 'The workspace operation timed out.'),
+            (WorkspaceTimeoutError('command timed out after 30 seconds'), 'command timed out after 30 seconds'),
+            (WorkspaceTimeoutError(''), 'The workspace operation timed out.'),
             (WorkspaceError('backend refused'), 'backend refused'),
             (WorkspaceError(), 'The workspace operation failed (WorkspaceError).'),
         ],

@@ -361,7 +361,10 @@ or a workspace capability in Python).
 
 ## Durable execution
 
-`Coder`, `Shell` and `FileSystem` work under DBOS durable execution, but not yet under Temporal or Prefect.
+`FileSystem` works under DBOS, Temporal and Prefect durable execution. Under Temporal its tools
+run in activities, which cannot reach the run's event stream yet
+([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)), so they emit no events there and a
+`FileChangeRequestEvent` listener cannot refuse a change.
 
 ## Further reading
 
