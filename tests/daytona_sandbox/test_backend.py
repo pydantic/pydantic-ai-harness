@@ -103,6 +103,18 @@ class TestConformance:
 
 
 class TestCommands:
+    @pytest.mark.parametrize(
+        ('command', 'shell', 'cwd'),
+        [('echo hi', False, None), (['true'], True, None), ([], False, None), (['true'], False, 'relative')],
+    )
+    async def test_invalid_command_args_do_not_create_a_sandbox(
+        self, fake_daytona: FakeDaytona, command: str | list[str], shell: bool, cwd: str | None
+    ) -> None:
+        backend = DaytonaSandboxBackend()
+        with pytest.raises((TypeError, ValueError)):
+            await backend.run(command, shell=shell, cwd=cwd)
+        assert not fake_daytona.sandboxes
+
     async def test_argv_output_and_context(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         sandbox = fake_daytona.sandboxes[0]

@@ -131,7 +131,8 @@ def _command_line(
     if env:
         # `--` ends `env`'s options, so a name starting with `-` is not read as one.
         argv = ['env', '--', *(f'{name}={value}' for name, value in env.items()), *argv]
-    prefix = f'cd -- {shlex.quote(cwd)} && ' if cwd is not None else ''
+    # Distinct marker lets run() distinguish a missing cwd from a command exiting with the same status.
+    prefix = f'cd -- {shlex.quote(cwd)} || {{ printf %s {marker}-cwd >&2; exit 125; }}; ' if cwd is not None else ''
     script = f'{prefix}"$@" </dev/null; status=$?; printf %s {marker}; printf %s {marker} >&2; exit "$status"'
     return shlex.join(['sh', '-c', script, 'sh', *argv])
 
@@ -175,6 +176,8 @@ class _DaytonaProcess:
             )
         except Exception as error:
             await _raise_failure(self._sandbox, error, 'Could not read the command output')
+        if f'{self.marker}-cwd' in (logs.stderr or ''):
+            return CommandResult(exit_code=command.exit_code, stdout='', stderr=f'{self.marker}-cwd')
         return CommandResult(
             exit_code=command.exit_code,
             stdout=_until_marker([logs.stdout or ''], self.marker),
@@ -534,13 +537,18 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     ) -> CommandResult:
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
+        argv = command_argv(command, shell)
+        checked_cwd = absolute_path('cwd', cwd)
         # Acquiring the sandbox has its own bound; the timeout is the command's alone.
         sandbox = await self.get_client()
         process: _DaytonaProcess | None = None
         with anyio.move_on_after(timeout) as scope:
             try:
-                process = await self._start(sandbox, command, shell=shell, cwd=cwd, env=env)
-                return await process.wait()
+                process = await self._start(sandbox, argv, shell=False, cwd=checked_cwd, env=env)
+                result = await process.wait()
+                if checked_cwd is not None and f'{process.marker}-cwd' in result.stderr:
+                    raise FileNotFoundError(checked_cwd)
+                return result
             finally:
                 if process is not None:
                     await process.kill()
