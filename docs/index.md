@@ -45,7 +45,7 @@ from pydantic_ai_harness.modal_sandbox import ModalSandbox
 agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(), Coder()])
 ```
 
-Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus repository context and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
+Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus `delegate_task` to hand a sub-task to a fresh run of the same agent, repository context, and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
 
 ```bash
 uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-opus-5-5
@@ -80,7 +80,7 @@ agent = Agent(
 
 ## No magic: it's capabilities all the way down
 
-`Coder` is a regular combined capability: [`FileSystem`](filesystem.md) with five of its tools and content hashes off, [`Shell`](shell.md) with its persistent `shell` tool and no allowlist, [`RepoContext`](repo-context.md), [`ClearToolResults` and `WarnNearLimits`](compaction.md), and a bounded [`ToolOutputLimits`](tool-output-limits.md), plus its default instructions and JSON argument repair. Use it whole, or build the same agent from those capabilities to change any setting; the [Coder page](coder.md) lists the exact configuration, tool signatures, and the persistent shell lifecycle.
+`Coder` is a regular combined capability: [`FileSystem`](filesystem.md) with five of its tools and content hashes off, [`Shell`](shell.md) with its persistent `shell` tool and no allowlist, [`RepoContext`](repo-context.md), [`SubAgents`](subagents.md) delegating to the agent itself, [`ClearToolResults` and `WarnNearLimits`](compaction.md), and a bounded [`ToolOutputLimits`](tool-output-limits.md), plus its default instructions and JSON argument repair. Use it whole, or build the same agent from those capabilities to change any setting; the [Coder page](coder.md) lists the exact configuration, tool signatures, delegation, and the persistent shell lifecycle.
 
 ## Workspaces
 
@@ -116,7 +116,7 @@ Complete agent stacks as regular combined capabilities: one import gives you a w
 
 | Harness | Package | What it provides |
 |---|---|---|
-| [Coder](coder.md) | Harness | Six coding tools, persistent shell commands, autonomous guidance, and context controls |
+| [Coder](coder.md) | Harness | Six coding tools, persistent shell commands, delegation to itself, autonomous guidance, and context controls |
 | [Researcher](researcher.md) | Harness | A complete web-research stack: search, page fetching, a delegated sub-researcher, and bounded tool output |
 
 ### Execution environments
