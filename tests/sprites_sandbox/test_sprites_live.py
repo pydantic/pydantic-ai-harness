@@ -43,7 +43,7 @@ from pydantic_ai_harness.sprites_sandbox import SpritesSandbox, SpritesSandboxBa
 
 from .._docs_examples import documented_cleanup, python_blocks, run_block
 
-pytestmark = [pytest.mark.sprites_live, pytest.mark.usefixtures('log_live_sprite_ids')]
+pytestmark = [pytest.mark.sprites_live]
 
 
 def _unique(prefix: str) -> str:

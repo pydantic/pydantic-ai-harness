@@ -47,7 +47,7 @@ class TestFakeSpritesSandboxBackend(WorkspaceBackendSuite):
 
 
 @pytest.mark.sprites_live
-@pytest.mark.usefixtures('sprites_token', 'log_live_sprite_ids')
+@pytest.mark.usefixtures('sprites_token')
 class TestLiveSpritesSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover - live tier runs without coverage
     # One event loop for the class: the backend's `AsyncSpritesClient` holds an `httpx.AsyncClient`
     # whose pooled connections are bound to the loop they were opened on. A class-scoped async
