@@ -50,6 +50,16 @@ _ROOT = Path(__file__).parent.parent
 _HARNESS = 'pydantic_ai_harness'
 
 
+def test_remote_search_and_shell_output_guidance() -> None:
+    for name in ('coder', 'filesystem'):
+        for page in (f'docs/{name}.md', f'pydantic_ai_harness/{name}/README.md'):
+            text = (_ROOT / page).read_text()
+            assert 'cat' in text and 'rg' in text and 'filesystem-only' in text
+    for page in ('docs/shell.md', 'pydantic_ai_harness/shell/README.md'):
+        text = (_ROOT / page).read_text()
+        assert 'capped preview' in text and 'redirect' in text and 'tail' in text
+
+
 def test_remote_workspace_store_locations_are_documented() -> None:
     for page in ('docs/repo-context.md', 'pydantic_ai_harness/repo_context/README.md'):
         assert "home_dir='/home/daytona'" in (_ROOT / page).read_text()

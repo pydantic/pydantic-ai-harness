@@ -24,6 +24,8 @@ pip/uv-add "pydantic-ai-harness[coder]"
 
 The extra installs `ripgrep==14.1.0` except on Android, where `rg` must be supplied separately on `PATH`.
 In a workspace without `rg`, such as a sandbox image that lacks it, `list_files` and `grep` walk the files instead.
+
+For remote workspaces, use file tools (`grep`, `find_files`, `read_file`) instead of sending whole files through shell `cat`. Install `rg` and `git` in the sandbox image for fast search (the Coder extra installs `rg` on the agent host, not in a remote image). For large or generated trees, run `rg -n 'pattern' path` or `rg --files` through Shell and cap its output. Without `rg`, file walks make many remote calls; filesystem-only backends use this slower, bounded path. Check ignored and hidden files explicitly when using the fallback.
 Add a provider extra such as `[coder,anthropic]` when needed.
 `Coder` works in the run's [workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/). Here that is the current directory on your machine:
 

@@ -239,6 +239,8 @@ inside the workspace, and that directory is carried into subsequent calls. The p
 updated when the command exits `0`, and the record is written out-of-band (not
 to stdout) so command output can never spoof the tracked directory.
 
+The model sees a capped preview of command output. For large output, redirect it to a file in the workspace, then use `grep` or `tail` to inspect bounded portions rather than printing the whole file.
+
 ## Configuration
 
 ```python {names="defined"}

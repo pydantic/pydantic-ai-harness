@@ -73,6 +73,8 @@ so they are left out when it can't run commands; `search_files` and
 | `list_files` | Opt-in, ripgrep-backed: files under a directory, recursively, sorted by path, with an optional `glob`. |
 | `grep` | Opt-in, ripgrep-backed: content search with `glob`, `file_type`, `ignore_case`, `literal`, and `context` (0 to 20) options; a `path` may name a file or a directory. |
 
+For remote workspaces, use the file tools (`grep`, `find_files`, `read_file`) rather than `cat` through a shell. Install `rg` and `git` in the sandbox image for fast searches; installing `rg` on the agent host does not install it in a remote workspace. For large or generated trees, use Shell with `rg -n 'pattern' path` and cap its output. Without `rg`, searches walk files using many remote calls; filesystem-only backends use this slower, bounded path. Check ignore and hidden-file handling on the fallback.
+
 ### Tool selection and the ripgrep tools
 
 `tools` names the tools to register, from `FILE_SYSTEM_TOOL_NAMES`. The default,
