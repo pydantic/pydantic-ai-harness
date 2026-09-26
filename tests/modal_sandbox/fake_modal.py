@@ -16,9 +16,12 @@ from __future__ import annotations
 import asyncio
 import os
 import posixpath
+import select
 import shutil
+import signal
 import stat
 import subprocess
+import time
 import types
 from collections.abc import AsyncGenerator, Callable, Generator
 from contextlib import contextmanager
@@ -469,22 +472,46 @@ class FakeSandbox:
         variables = {**os.environ, **{key: value for key, value in (env or {}).items() if value is not None}}
         cwd = workdir or self.workdir or str(self._control.host_root)
         try:
-            completed = subprocess.run(
-                argv,
-                cwd=cwd,
-                env=variables,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
-                start_new_session=isolated,
+            process = subprocess.Popen(
+                argv, cwd=cwd, env=variables, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True
             )
-        except subprocess.TimeoutExpired as expired:
-            # Modal reports a command stopped at its deadline with exit code -1.
-            return _FakeProcess(expired.stdout or b'', expired.stderr or b'', -1, None, False)
+            assert process.stdout is not None and process.stderr is not None
+            streams = {process.stdout: bytearray(), process.stderr: bytearray()}
+            active = list(streams)
+            for stream in streams:
+                os.set_blocking(stream.fileno(), False)
+            deadline = time.monotonic() + timeout if timeout is not None else None
+            exited_at: float | None = None
+            # Modal reports exit separately from pipe EOF; drain while running to avoid
+            # pipe backpressure, then allow a short grace for output already in flight.
+            while active:
+                now = time.monotonic()
+                if process.poll() is not None and exited_at is None:
+                    exited_at = now
+                if exited_at is not None and now - exited_at >= 0.1:
+                    break
+                if deadline is not None and now >= deadline and exited_at is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+                    stdout, stderr = bytes(streams[process.stdout]), bytes(streams[process.stderr])
+                    process.stdout.close()
+                    process.stderr.close()
+                    return _FakeProcess(stdout, stderr, -1, None, False)
+                ready = select.select(active, [], [], 0.01)[0]
+                for stream in ready:
+                    chunk = os.read(stream.fileno(), 65536)
+                    if chunk:
+                        streams[stream].extend(chunk)
+                    else:
+                        active.remove(stream)
+            code = process.wait()
+            stdout, stderr = bytes(streams[process.stdout]), bytes(streams[process.stderr])
+            process.stdout.close()
+            process.stderr.close()
         except FileNotFoundError:
             # A program that doesn't exist is an ordinary exit code 127, as from `sh`.
             return _FakeProcess(b'', b'', 127, None, False)
-        return _FakeProcess(completed.stdout, completed.stderr, completed.returncode, None, False)
+        return _FakeProcess(stdout, stderr, code, None, False)
 
     def _exec(
         self,
