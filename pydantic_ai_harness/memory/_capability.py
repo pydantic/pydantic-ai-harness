@@ -122,7 +122,8 @@ class Memory(AbstractCapability[AgentDepsT]):
         """Return a clone with scope resolution isolated to this run."""
         clone = copy(self)
         clone._resolved_scope = None
-        clone._resolved_scope = clone._resolve_scope(ctx)
+        store, scope = clone._resolve_scope(ctx)
+        clone._resolved_scope = (store.bind(ctx.workspace) if isinstance(store, FileStore) else store, scope)
         return clone
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:

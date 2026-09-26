@@ -5,18 +5,52 @@ from __future__ import annotations
 import posixpath
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Protocol
 
 import anyio
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.workspaces import WorkspaceCommand, WorkspaceTimeoutError
+from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceCommand, WorkspaceRef, WorkspaceTimeoutError
+
+
+def safe_credential_reason(error: Exception) -> str:
+    """Classify a provider credential rejection without copying its possibly secret-bearing text."""
+    message = str(error).lower()
+    # Provider errors can embed the rejected token; emit only fixed labels.
+    if 'malformed' in message or 'invalid format' in message:
+        return 'API key is malformed'
+    if 'expired' in message:
+        return 'Credential expired'
+    if 'missing' in message or 'not configured' in message:
+        return 'Credential missing'
+    return 'Credentials rejected'
+
+
+class SandboxProvider(Protocol):
+    """Provider-specific ref lifecycle, without leasing or implicitly attaching a sandbox."""
+
+    def backend(self, ref: WorkspaceRef) -> WorkspaceBackend:
+        """Construct a backend for an existing ref without I/O."""
+        ...
+
+    async def destroy(self, ref: WorkspaceRef) -> None:
+        """Delete this ref via the provider's ID-only API, without resuming it."""
+        ...
 
 
 async def stop_shielded(stop: Callable[[], Awaitable[object]], *, grace: float = 2.0) -> None:
     """Attempt to stop a command under cancellation without cancelling its shared sandbox."""
+
+    async def best_effort_stop() -> None:
+        try:
+            await stop()
+        except Exception:
+            # Preserve the command timeout/cancellation if a provider's stop request fails.
+            pass
+
     # A child task owns the stop so repeated cancellation of the caller cannot interrupt cleanup.
     with anyio.move_on_after(grace, shield=True):
         async with anyio.create_task_group() as group:
-            group.start_soon(stop)
+            group.start_soon(best_effort_stop)
 
 
 @asynccontextmanager
@@ -62,10 +96,17 @@ def command_argv(command: WorkspaceCommand, shell: bool) -> list[str]:
         if not shell:
             raise TypeError('a string command requires shell=True; pass an argv sequence otherwise')
         return ['/bin/sh', '-c', command]
+    if isinstance(command, bytes):
+        raise TypeError('a bytes command is not supported; pass a string or argv sequence')
     if shell:
         raise TypeError('an argv sequence cannot be combined with shell=True; pass a single command string')
     if not command:
         raise TypeError('an argv sequence needs at least the program to run')
+    for argument in command:
+        if type(argument) is not str:
+            raise TypeError('argv elements must be strings')
+        if '\x00' in argument:
+            raise ValueError('argv elements must not contain NUL bytes')
     return list(command)
 
 

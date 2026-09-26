@@ -14,13 +14,45 @@ from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness._warn import warn_argument_renamed
 from pydantic_ai_harness._workspace import innermost_backend
 from pydantic_ai_harness._workspace_provider import (
+    SandboxProvider,
     absolute_path,
     check_integer,
     check_working_dir,
     command_argv,
     command_deadline,
+    safe_credential_reason,
     stop_shielded,
 )
+
+
+def test_credential_reason_keeps_safe_context_without_echoing_key() -> None:
+    assert (
+        safe_credential_reason(ValueError('API key is malformed: expected the e2b_ prefix')) == 'API key is malformed'
+    )
+    assert safe_credential_reason(ValueError('token abc-secret-123 expired')) == 'Credential expired'
+    assert 'abc-secret-123' not in safe_credential_reason(ValueError('token abc-secret-123 rejected'))
+
+
+@pytest.mark.anyio
+async def test_sandbox_destroy_uses_ref_without_attaching() -> None:
+    from pydantic_ai.workspaces import WorkspaceRef  # noqa: PLC0415
+
+    class FakeProvider:
+        attached = False
+        deleted = False
+
+        def backend(self, ref: WorkspaceRef) -> WorkspaceBackend:
+            self.attached = True
+            raise AssertionError('destroy must not attach')
+
+        async def destroy(self, ref: WorkspaceRef) -> None:
+            assert (ref.provider, ref.id) == ('fake', 'owned')
+            self.deleted = True
+
+    fake = FakeProvider()
+    provider: SandboxProvider = fake
+    await provider.destroy(WorkspaceRef(provider='fake', id='owned'))
+    assert fake.deleted and not fake.attached
 
 
 @pytest.mark.anyio
@@ -42,6 +74,16 @@ async def test_own_timeout_and_external_cancel_stop_once() -> None:
             await anyio.sleep_forever()
     assert scope.cancelled_caught
     assert stopped == ['stop']
+
+
+@pytest.mark.anyio
+async def test_failed_stop_does_not_replace_original_cancellation() -> None:
+    async def stop() -> None:
+        raise RuntimeError('stop failed')
+
+    with pytest.raises(WorkspaceTimeoutError):
+        async with command_deadline(0.01, stop=stop):
+            await anyio.sleep_forever()
 
 
 @pytest.mark.anyio
@@ -74,6 +116,17 @@ def test_absolute_path_rejects_relative_paths() -> None:
 )
 def test_command_argv(command: str | tuple[str, ...], shell: bool, argv: list[str]) -> None:
     assert command_argv(command, shell) == argv
+
+
+@pytest.mark.parametrize('command', [b'echo hello', ['echo', 7]])
+def test_command_argv_rejects_non_string_elements(command: object) -> None:
+    with pytest.raises(TypeError):
+        command_argv(command, False)  # type: ignore[arg-type]
+
+
+def test_command_argv_rejects_nul_element() -> None:
+    with pytest.raises(ValueError, match='NUL'):
+        command_argv(['echo', 'bad\x00arg'], False)
 
 
 @pytest.mark.parametrize(

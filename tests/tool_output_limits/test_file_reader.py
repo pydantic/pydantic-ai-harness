@@ -109,7 +109,7 @@ class TestFileReader:
         'file_system',
         [
             pytest.param(None, id='no-file-tool'),
-            pytest.param(FileSystem[None](), id='uncapped-reads'),
+            pytest.param(FileSystem[None](max_read_chars=None), id='uncapped-reads'),
             pytest.param(
                 FileSystem[None](max_read_chars=10_000, denied_patterns=['.pydantic-ai-harness/**']), id='denied'
             ),
