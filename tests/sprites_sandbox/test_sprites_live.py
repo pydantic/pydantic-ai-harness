@@ -24,18 +24,19 @@ Run locally:
 from __future__ import annotations
 
 import json
-import time
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from typing import Any
 
+import anyio
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.workspaces import Workspace, WorkspaceTimeoutError, WorkspaceUnavailableError
 from pytest_examples import CodeExample
-from sprites import AsyncSpritesClient
+from sprites import AsyncSprite, AsyncSpritesClient
 from sprites.exceptions import NotFoundError, SpriteError
 
 from pydantic_ai_harness.coder import Coder
@@ -53,6 +54,25 @@ def _unique(prefix: str) -> str:
 @pytest.fixture(scope='module')
 def anyio_backend() -> str:
     return 'asyncio'
+
+
+@pytest.fixture(scope='module', autouse=True)
+def wait_out_the_creation_rate_limit(sprites_token: str) -> Iterator[None]:
+    """The account creates at most 10 Sprites a minute, and this module creates more than that."""
+    create = AsyncSpritesClient.create_sprite
+
+    async def create_sprite(self: AsyncSpritesClient, *args: Any, **kwargs: Any) -> AsyncSprite:
+        try:
+            return await create(self, *args, **kwargs)
+        except SpriteError as error:
+            if 'sprite_creation_rate_limited' not in str(error):
+                raise
+        await anyio.sleep(61)
+        return await create(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(AsyncSpritesClient, 'create_sprite', create_sprite)
+        yield
 
 
 @pytest.fixture(scope='module')
@@ -180,14 +200,6 @@ def test_docs_example(example: CodeExample, sprites_token: str) -> None:
     cleanup work against the real service. A follow-up run, from the message history or a stored ref,
     works in the first run's sandbox.
     """
-    cleanup = documented_cleanup(_DOCS_BLOCKS, 'delete_sprite')
-    try:
-        _, runs = run_block(example, cleanup=cleanup)
-    except SpriteError as error:
-        # The account creates at most 10 Sprites a minute, and this tier creates more than that.
-        if 'sprite_creation_rate_limited' not in str(error):
-            raise
-        time.sleep(61)
-        _, runs = run_block(example, cleanup=cleanup)
+    _, runs = run_block(example, cleanup=documented_cleanup(_DOCS_BLOCKS, 'delete_sprite'))
     assert all(run.used_sandbox for run in runs), runs
     assert len({run.ref for run in runs}) <= 1, runs
