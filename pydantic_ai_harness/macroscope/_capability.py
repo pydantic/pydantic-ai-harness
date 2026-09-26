@@ -8,7 +8,7 @@ from pathlib import Path
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 
-from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACE, warn_argument_ignored
+from pydantic_ai_harness._warn import SET_WORKING_DIR_ON_THE_WORKSPACE, warn_argument_ignored
 from pydantic_ai_harness._workspace import require_workspace
 from pydantic_ai_harness.macroscope._toolset import MacroscopeToolset
 
@@ -75,7 +75,7 @@ class Macroscope(AbstractCapability[AgentDepsT]):
 
     def __post_init__(self) -> None:
         if self.cwd is not None:
-            warn_argument_ignored('Macroscope', 'cwd', WORKING_DIR_IS_THE_WORKSPACE)
+            warn_argument_ignored('Macroscope', 'cwd', SET_WORKING_DIR_ON_THE_WORKSPACE)
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Fail the run at its start when it has no workspace to review."""
