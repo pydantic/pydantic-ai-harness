@@ -163,13 +163,19 @@ async def _file_entry(sandbox: modal.Sandbox, entry: modal.types.FileInfo, path:
 
     target: modal.types.FileInfo | None = entry
     link, hops = path, 0
+    visited = {posixpath.normpath(path)}
     while target is not None and target.is_symlink():
         hops += 1
         if hops > _MAX_SYMLINK_HOPS or target.symlink_target is None:
             target = None
             continue
         # A relative target is relative to the directory holding the link.
-        link = posixpath.join(posixpath.dirname(link), target.symlink_target)
+        link = posixpath.normpath(posixpath.join(posixpath.dirname(link), target.symlink_target))
+        if link in visited:
+            # Modal does not detect all cycles in its symlink metadata; skip repeated RPCs.
+            target = None
+            continue
+        visited.add(link)
         try:
             target = await sandbox.filesystem.stat.aio(link)
         except (
@@ -315,7 +321,14 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         sandbox = await self.get_client()
         async with self._mapped_errors(sandbox, f'Could not list {path!r}', path):
             entries = await sandbox.filesystem.list_files.aio(path)
-            return [await _file_entry(sandbox, entry, posixpath.join(path, entry.name)) for entry in entries]
+            # Limit simultaneous SDK requests without making large link-heavy listings serial.
+            limit = asyncio.Semaphore(8)
+
+            async def resolve(entry: modal.types.FileInfo) -> FileEntry:
+                async with limit:
+                    return await _file_entry(sandbox, entry, posixpath.join(path, entry.name))
+
+            return await asyncio.gather(*(resolve(entry) for entry in entries))
 
     async def make_dir(self, path: str) -> None:
         absolute_path('path', path)

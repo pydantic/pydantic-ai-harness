@@ -499,6 +499,43 @@ class TestFilesystem:
             await backend.stat(str(tmp_path / 'dangling'))
         assert await backend.exists(str(tmp_path / 'dangling')) is False
 
+    async def test_list_dir_resolves_links_concurrently(self, fake_modal: FakeModal, tmp_path: Path) -> None:
+        fake_modal.host_root = tmp_path
+        (tmp_path / 'target').write_bytes(b'x')
+        for index in range(20):
+            (tmp_path / f'link-{index}').symlink_to('target')
+        backend = await started()
+        sandbox = fake_modal.sandboxes[0]
+        original = sandbox.filesystem.stat.aio
+
+        async def slow_stat(path: str) -> FileInfo:
+            await anyio.sleep(0.02)
+            return await original(path)
+
+        sandbox.filesystem.stat.aio = slow_stat
+        start = time.monotonic()
+        entries = await backend.list_dir(str(tmp_path))
+        assert time.monotonic() - start < 0.25
+        assert len(entries) == 21
+
+    async def test_symlink_loop_stops_at_first_revisit(self, fake_modal: FakeModal, tmp_path: Path) -> None:
+        fake_modal.host_root = tmp_path
+        (tmp_path / 'loop').symlink_to('loop')
+        backend = await started()
+        sandbox = fake_modal.sandboxes[0]
+        original = sandbox.filesystem.stat.aio
+        calls = 0
+
+        async def counting_stat(path: str) -> FileInfo:
+            nonlocal calls
+            calls += 1
+            return await original(path)
+
+        sandbox.filesystem.stat.aio = counting_stat
+        with pytest.raises(FileNotFoundError):
+            await backend.stat(str(tmp_path / 'loop'))
+        assert calls <= 2
+
     async def test_remove_is_recursive(self, fake_modal: FakeModal) -> None:
         # One call covers both halves of the protocol's `remove`: on a file `recursive`
         # changes nothing, and on a directory it is what removes a non-empty one.
