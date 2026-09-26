@@ -159,8 +159,8 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     `shell=True` string runs under `/bin/sh -c` inside that login shell. E2B's own
     command `timeout` abandons the output stream and leaves the command running, so the
     deadline is enforced client-side instead. On timeout or cancellation, a separate command
-    signals the foreground process group. A lost start acknowledgement can still leave work
-    running if the remote command starts after the bounded stop rendezvous has expired.
+    signals the foreground process group when `setsid` is available. Custom templates without
+    `setsid` fall back to stopping the command leader only.
 
     The protocol is structural, but subclassing it here makes a signature drift fail the type
     check on this class instead of at a distant workspace call.
@@ -169,7 +169,8 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         workspace: A live `e2b.AsyncSandbox` you already have. Whoever created it owns killing it.
         ref: Identity of an existing sandbox to attach to on first use.
         template: E2B template name or ID a newly created sandbox runs; E2B's default when `None`.
-            An unknown template raises `WorkspaceUnavailableError` on first use.
+            An unknown template raises `WorkspaceUnavailableError` on first use. Custom templates
+            need `/bin/bash` and `/bin/sh`; without `setsid`, stop targets only the leader.
         sandbox_timeout: Total lifetime of the sandbox in seconds, applied when it is created and
             again when attaching to it. When it runs out, E2B pauses the sandbox rather than
             killing it, and attaching resumes it. The default, 3600, is the most E2B's Hobby plan
@@ -209,6 +210,9 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         self._sandbox_timeout = sandbox_timeout
         self._env = dict(env) if env is not None else None
         self._allow_internet_access = allow_internet_access
+        self._probe_setsid = template is not None or workspace is not None or ref is not None
+        self._setsid: bool | None = None
+        self._setsid_lock = anyio.Lock()
 
     async def get_client(self) -> e2b.AsyncSandbox:
         """Return the typed `e2b.AsyncSandbox`, creating or attaching to it on first use.
@@ -419,6 +423,18 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
             self._resolved_working_dir = printed
         return self._resolved_working_dir
 
+    async def _has_setsid(self, sandbox: e2b.AsyncSandbox) -> bool:
+        async with self._setsid_lock:
+            if self._setsid is None:
+                async with self._sdk_errors(sandbox.sandbox_id, 'Could not probe E2B command launcher'):
+                    probe = await sandbox.commands.run('command -v setsid >/dev/null 2>&1', background=True, timeout=10)
+                    try:
+                        result = await probe.wait()
+                        self._setsid = result.exit_code == 0
+                    except e2b.CommandExitException:
+                        self._setsid = False
+            return self._setsid
+
     async def run(
         self,
         command: WorkspaceCommand,
@@ -445,7 +461,9 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         # exits before user code; if launch wins, the canceller waits for its registration.
         # Keep a cancellation claim when the start ACK is lost so a late RPC stays fenced.
         launch = f'mkdir {claim} 2>/dev/null || exit 143; echo "$$:$(ps -o lstart= -p $$)" > {pgid_file}; exec {line}'
-        launch = f'setsid sh -c {shlex.quote(launch)}'
+        # Probe only custom/attached images: default E2B images include util-linux.
+        isolated = await self._has_setsid(sandbox) if self._probe_setsid else True
+        launch = f'{"setsid " if isolated else ""}sh -c {shlex.quote(launch)}'
 
         async def stop() -> None:
             # A new SDK command can run even when the original output stream is blocked.
@@ -454,11 +472,11 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
                 f'i=0; while [ ! -s {pgid_file} ] && [ "$i" -lt 100 ]; do '
                 'sleep 0.1; i=$((i+1)); done; '
                 f'if [ -s {pgid_file} ]; then record=$(cat {pgid_file}); p=${{record%%:*}}; '
-                # Match the leader's creation time too, so PID reuse cannot signal another run.
-                'if [ "$(ps -o pgid= -p "$p" 2>/dev/null | tr -d " ")" = "$p" ] && '
-                '[ "$(ps -o lstart= -p "$p")" = "${record#*:}" ]; then '
-                'kill -TERM -"$p" 2>/dev/null || true; sleep 0.1; '
-                'kill -KILL -"$p" 2>/dev/null || true; fi; fi'
+                # Match creation time before signalling: a reused PID belongs to another run.
+                '[ "$(ps -o lstart= -p "$p")" = "${record#*:}" ] || exit 0; '
+                + ('[ "$(ps -o pgid= -p "$p" 2>/dev/null | tr -d " ")" = "$p" ] || exit 0; ' if isolated else '')
+                + f'kill -TERM {"-" if isolated else ""}"$p" 2>/dev/null || true; sleep 0.1; '
+                + f'kill -KILL {"-" if isolated else ""}"$p" 2>/dev/null || true; fi'
             )
             try:
                 stopper = await sandbox.commands.run(

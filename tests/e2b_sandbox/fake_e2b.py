@@ -64,6 +64,8 @@ def _user_command(command: str) -> str:
     args = shlex.split(command)
     if args[:3] == ['setsid', 'sh', '-c']:
         return args[3].split('; exec ', 1)[1]
+    if args[:2] == ['sh', '-c'] and '; exec ' in args[2]:
+        return args[2].split('; exec ', 1)[1]
     return command
 
 
@@ -149,9 +151,10 @@ class FakeCommandHandle:
         self._sandbox.check_alive()
         if self._control.wait_error is not None:
             raise self._control.wait_error
-        if self._control.command_hangs and not self._sandbox.commands.calls[
-            self._pid - self._control.next_pid
-        ].command.startswith('sh -c '):
+        if (
+            self._control.command_hangs
+            and 'kill -TERM ' not in self._sandbox.commands.calls[self._pid - self._control.next_pid].command
+        ):
             await anyio.sleep_forever()
         if self._exit_code != 0:
             # The real SDK raises on a non-zero exit instead of returning a result.
@@ -192,7 +195,7 @@ class FakeCommands:
         self.calls.append(FakeCommandCall(cmd, background is True, cwd, envs, timeout))
         if self._control.run_error is not None:
             raise self._control.run_error
-        if cmd.startswith('sh -c ') and 'kill -TERM -' in cmd:
+        if cmd.startswith('sh -c ') and 'kill -TERM ' in cmd:
             self.group_stops.append(cmd)
             if self._control.kill_command_error is not None:
                 raise self._control.kill_command_error

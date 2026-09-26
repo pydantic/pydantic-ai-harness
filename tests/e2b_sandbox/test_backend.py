@@ -315,6 +315,20 @@ class TestRun:
             for handle in commands.handles:
                 handle.close()
 
+    async def test_missing_setsid_uses_leader_stop_and_caches_probe(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.responder = lambda command, timeout: ('', '', 127) if 'command -v setsid' in command else ('ok', '', 0)
+        backend = await started(template='minimal')
+        for _ in range(2):
+            assert (await backend.run(['true'])).exit_code == 0
+        calls = fake_e2b.sandboxes[0].commands.calls
+        assert sum('command -v setsid' in call.command for call in calls) == 1
+        assert all(not call.command.startswith('setsid ') for call in calls if 'command -v setsid' not in call.command)
+        fake_e2b.command_hangs = True
+        with pytest.raises(WorkspaceTimeoutError):
+            await backend.run(['sleep', '99'], timeout=0.05)
+        assert 'kill -TERM "$p"' in calls[-1].command
+        assert 'kill -TERM -"$p"' not in calls[-1].command
+
     async def test_argv_is_quoted_into_one_shell_word_string(self, fake_e2b: FakeE2B) -> None:
         # E2B has no argv form: every command goes through `/bin/bash -l -c`, so the quoting
         # is what keeps an argument with a space or a `$` one literal word.
