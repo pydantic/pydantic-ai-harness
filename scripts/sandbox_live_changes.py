@@ -57,13 +57,6 @@ SHARED_LOCK_PACKAGES = ('pydantic-ai-slim',)
 PROVIDERS: dict[str, tuple[str, ...]] = {
     'modal': ('modal', 'grpclib', 'synchronicity'),
     'e2b': ('e2b', 'connectrpc'),
-    'daytona': (
-        'daytona',
-        'daytona-api-client',
-        'daytona-api-client-async',
-        'daytona-toolbox-api-client',
-        'daytona-toolbox-api-client-async',
-    ),
     'sprites': ('sprites-py', 'websockets'),
 }
 
