@@ -190,6 +190,24 @@ class TestRun:
         backend = await started()
         assert (await backend.run(['kill-self'], timeout=15)).exit_code == 137
 
+    async def test_deleted_mid_command_is_unavailable(self, fake_modal: FakeModal) -> None:
+        fake_modal.responder = lambda argv, timeout: ('partial', '', 137)
+        backend = await started()
+        fake_modal.sandboxes[0].poll_result = 0
+        with pytest.raises(WorkspaceUnavailableError, match="'sb-owned' is no longer running"):
+            await backend.run(['sleep', '60'])
+
+    async def test_sigkill_while_sandbox_alive_is_an_exit(self, fake_modal: FakeModal) -> None:
+        fake_modal.responder = lambda argv, timeout: ('', '', 137)
+        backend = await started()
+        assert (await backend.run(['kill-self'])).exit_code == 137
+
+    async def test_sigkill_with_failing_liveness_check_is_an_exit(self, fake_modal: FakeModal) -> None:
+        fake_modal.responder = lambda argv, timeout: ('', '', 137)
+        backend = await started()
+        fake_modal.sandboxes[0].poll_error = ValueError('control plane unavailable')
+        assert (await backend.run(['kill-self'])).exit_code == 137
+
     async def test_invalid_utf8_output_uses_replacement_characters(self, fake_modal: FakeModal) -> None:
         # Modal's text mode decodes strictly; reading bytes and decoding with replacement
         # keeps a command printing binary from aborting the run.

@@ -665,6 +665,17 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             exit_code == _CLIENT_DEADLINE_EXIT or (exit_code == _SIGKILL_EXIT and elapsed >= deadline)
         ):
             raise WorkspaceTimeoutError(timed_out, stdout=stdout, stderr=stderr)
+        if exit_code == _SIGKILL_EXIT:
+            # 137 can also be a user's SIGKILL; only a finished sandbox proves the workspace died.
+            # Keep a stalled control-plane probe from delaying an otherwise valid command result.
+            try:
+                with anyio.fail_after(2):
+                    finished = await sandbox.poll.aio()
+            except Exception:
+                pass
+            else:
+                if finished is not None:
+                    raise WorkspaceUnavailableError(_unavailable_message(sandbox.object_id))
         return CommandResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
 

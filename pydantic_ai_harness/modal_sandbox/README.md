@@ -176,7 +176,7 @@ The previous `ModalSandbox` registered its own `run_command`, `read_file`, `writ
 - A run no longer terminates the sandbox. It runs until you terminate it or its `sandbox_timeout` ends it (see [Clean up](#clean-up)).
 - `sandbox_timeout` defaults to 24 hours instead of 5 minutes, so a later run can continue in the same sandbox.
 - A run that continues a `message_history` reattaches to the previous run's sandbox. Pass `workspace='new'` for a fresh one.
-- Reattaching to an expired or terminated sandbox raises `WorkspaceUnavailableError`. No empty replacement is created.
+- Reattaching to an expired or terminated sandbox raises `WorkspaceUnavailableError`. No empty replacement is created. If a command exits 137 because the sandbox was terminated mid-command, it raises the same error; a SIGKILLed command in a running sandbox returns exit 137.
 
 ### Migration table
 
