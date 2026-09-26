@@ -282,9 +282,7 @@ Skills(
 - `workspace` reads the libraries from this backend instead of the run's workspace.
 
 Pass at least one library directory, not the path of an individual skill
-package. Malformed frontmatter, invalid or mismatched names, duplicate selected
-names, unknown selections, missing libraries, and non-directory library paths
-fail at run start.
+package. Malformed frontmatter, invalid UTF-8, and invalid or mismatched names warn and skip that skill. Duplicate selected names, unknown selections, missing libraries, and non-directory library paths fail at run start.
 
 Two `Skills` on one agent combine into one catalog.
 

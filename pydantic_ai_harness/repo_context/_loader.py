@@ -51,7 +51,11 @@ async def _is_file(workspace: Workspace, path: Path) -> bool:
         entry = await workspace.stat(text)
     except (FileNotFoundError, NotADirectoryError):
         return False
-    return not entry.is_dir
+    if entry.is_dir:
+        return False
+    # Autoloaded instructions belong to the directory being scanned, not a
+    # symlink target in another directory (even another ancestor in the walk).
+    return Path(await workspace.realpath(text)).parent == Path(await workspace.realpath(str(path.parent)))
 
 
 async def discover_instruction_files(
@@ -67,8 +71,7 @@ async def discover_instruction_files(
     last. Within a directory, `filenames` are tried in order.
 
     Files are deduped by the path the walker visits and by content hash, so
-    ancestors that share identical bytes (e.g. via a symlinked `AGENTS.md ->
-    CLAUDE.md`) load once.
+    two names for the same content within one directory load once.
     """
     seen_paths: set[Path] = set()
     seen_hashes: set[str] = set()

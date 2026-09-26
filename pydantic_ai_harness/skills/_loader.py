@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import posixpath
 import unicodedata
+import warnings
 from collections.abc import Collection, Hashable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -247,7 +248,18 @@ async def load_skill_libraries(
         paths_by_name[name] = skill_file
         selected_files.append(skill_file)
 
-    return tuple([parse_skill(await workspace.read_text(skill_file), skill_file) for skill_file in selected_files])
+    parsed: list[SkillDefinition] = []
+    for skill_file in selected_files:
+        try:
+            try:
+                text = await workspace.read_text(skill_file)
+            except UnicodeDecodeError as error:
+                raise ValueError(f'{skill_file} is not valid UTF-8: {error}') from error
+            parsed.append(parse_skill(text, skill_file))
+        except ValueError as error:
+            # A model-editable skill should not make unrelated valid skills unusable.
+            warnings.warn(f'Skipping {skill_file}: {error}', UserWarning, stacklevel=2)
+    return tuple(parsed)
 
 
 def _validate_selection(

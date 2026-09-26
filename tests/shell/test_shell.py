@@ -487,6 +487,16 @@ class TestForRunIsolation:
         assert toolset.id == 'build_shell'
         assert await toolset.for_run(_ctx(shell_dir)) is toolset
 
+    async def test_removed_tracked_cwd_resets_before_next_command(
+        self, persist_toolset: ShellToolset[None], shell_dir: Path
+    ) -> None:
+        await persist_toolset.run_command(_ctx(shell_dir), 'cd subdir')
+        (shell_dir / 'subdir').rename(shell_dir / 'moved-subdir')
+        with pytest.raises(ModelRetry, match='previous directory was removed'):
+            await persist_toolset.run_command(_ctx(shell_dir), 'pwd')
+        result = await persist_toolset.run_command(_ctx(shell_dir), 'pwd')
+        assert str(shell_dir) in result
+
     async def test_persist_cwd_isolated_across_runs(self, persist_toolset: ShellToolset[None], shell_dir: Path) -> None:
         run1 = await persist_toolset.for_run(_ctx(shell_dir))
         assert isinstance(run1, ShellToolset)
@@ -496,6 +506,97 @@ class TestForRunIsolation:
         run2 = await persist_toolset.for_run(_ctx(shell_dir))
         assert isinstance(run2, ShellToolset)
         assert run2._cwd is None
+
+
+class TestDurableJob:
+    async def test_retry_of_same_tool_call_reuses_background_job(self, shell_dir: Path) -> None:
+        toolset = _shell_toolset(shell_dir)
+        ctx = _ctx(shell_dir)
+        ctx.run_id = 'durable-run'
+        ctx.tool_call_id = 'launch-1'
+        command = 'echo one >> side-effects.txt'
+        first = await toolset.start_command(ctx, command)
+        second = await toolset.start_command(ctx, command)
+        assert first == second
+        command_id = first.split('ID: ')[-1]
+        with anyio.fail_after(5):
+            while 'finished' not in await toolset.check_command(ctx, command_id):
+                await anyio.sleep(0.05)
+        assert (shell_dir / 'side-effects.txt').read_text().splitlines() == ['one']
+
+
+class TestDurableCwd:
+    async def test_run_cwd_rehydrates_from_workspace_without_leaking(
+        self, persist_toolset: ShellToolset[None], shell_dir: Path
+    ) -> None:
+        first = _ctx(shell_dir)
+        first.run_id = 'first'
+        await persist_toolset.run_command(first, 'cd subdir')
+
+        # A different toolset instance stands in for an activity on a new worker.
+        other = await persist_toolset.for_run(_ctx(shell_dir))
+        assert isinstance(other, ShellToolset)
+        assert str(shell_dir / 'subdir') in await other.run_command(first, 'pwd')
+        second = _ctx(shell_dir)
+        second.run_id = 'second'
+        assert str(shell_dir / 'subdir') not in await other.run_command(second, 'pwd')
+
+    async def test_removed_run_cwd_retries_and_clears_workspace_state(
+        self, persist_toolset: ShellToolset[None], shell_dir: Path
+    ) -> None:
+        ctx = _ctx(shell_dir)
+        ctx.run_id = 'removed-directory-run'
+        await persist_toolset.run_command(ctx, 'cd subdir')
+        (shell_dir / 'subdir').rename(shell_dir / 'moved-subdir')
+
+        # A new worker reads the saved cwd rather than the original toolset's memory.
+        fresh = await persist_toolset.for_run(ctx)
+        assert isinstance(fresh, ShellToolset)
+        with pytest.raises(ModelRetry, match=f'The previous directory was removed; now in {shell_dir}'):
+            await fresh.run_command(ctx, 'pwd')
+        assert str(shell_dir) in await fresh.run_command(ctx, 'pwd')
+
+
+class TestCancelledRunCwd:
+    async def test_worker_interruption_retains_cwd_for_recovery(self, shell_dir: Path) -> None:
+        shell = Shell(persist_cwd=True)
+        ctx = _ctx(shell_dir)
+        ctx.run_id = 'interrupted-run'
+        toolset = shell.get_toolset()
+        await toolset.run_command(ctx, 'cd subdir')
+
+        async def interrupted() -> NoReturn:
+            await anyio.sleep_forever()
+            raise AssertionError('unreachable')
+
+        async def run() -> None:
+            await shell.wrap_run(ctx, handler=interrupted)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run)
+            await anyio.sleep(0)
+            tg.cancel_scope.cancel()
+        fresh = await toolset.for_run(ctx)
+        assert isinstance(fresh, ShellToolset)
+        assert str(shell_dir / 'subdir') in await fresh.run_command(ctx, 'pwd')
+
+
+class TestSameRunConcurrentCwd:
+    async def test_last_completed_command_wins(self, persist_toolset: ShellToolset[None], shell_dir: Path) -> None:
+        (shell_dir / 'other').mkdir()
+        ctx = _ctx(shell_dir)
+        ctx.run_id = 'parallel-run'
+        # Both commands start at the root; the slower completion publishes its cwd last.
+        results: list[str] = []
+
+        async def run(command: str) -> None:
+            results.append(await persist_toolset.run_command(ctx, command))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run, 'touch started-a; while [ ! -f started-b ]; do sleep 0.01; done; cd subdir; sleep 0.2')
+            tg.start_soon(run, 'touch started-b; while [ ! -f started-a ]; do sleep 0.01; done; cd other')
+        assert len(results) == 2 and all('[exit code:' not in result for result in results)
+        assert str(shell_dir / 'subdir') in await persist_toolset.run_command(ctx, 'pwd')
 
 
 class TestPersistCwdHardening:
@@ -541,7 +642,7 @@ class TestSpawnFailures:
         target = shell_dir / 'subdir'
         ts = await self._toolset_in(shell_dir)
         shutil.rmtree(target)
-        with pytest.raises(ModelRetry, match='working directory no longer exists'):
+        with pytest.raises(ModelRetry, match='previous directory was removed'):
             await ts.run_command(_ctx(shell_dir), 'echo hello')
 
     async def test_cwd_replaced_by_file(self, shell_dir: Path) -> None:
@@ -549,14 +650,14 @@ class TestSpawnFailures:
         ts = await self._toolset_in(shell_dir)
         shutil.rmtree(target)
         target.write_text('not a directory\n')
-        with pytest.raises(ModelRetry, match='no longer a directory'):
+        with pytest.raises(ModelRetry, match='previous directory was removed'):
             await ts.run_command(_ctx(shell_dir), 'echo hello')
 
     async def test_cwd_deleted_start_command(self, shell_dir: Path) -> None:
         target = shell_dir / 'subdir'
         ts = await self._toolset_in(shell_dir)
         shutil.rmtree(target)
-        with pytest.raises(ModelRetry, match='working directory no longer exists'):
+        with pytest.raises(ModelRetry, match='previous directory was removed'):
             await ts.start_command(_ctx(shell_dir), 'sleep 30')
 
     async def test_message_omits_host_path(self, shell_dir: Path) -> None:
@@ -1396,6 +1497,31 @@ class TestCodeModeInterop:
 
 
 class TestStopEscalation:
+    async def test_finished_job_status_is_read_once(self, shell_dir: Path) -> None:
+        ts = _shell_toolset(shell_dir)
+        command_id = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'true'))
+        job = await _job(ts, _ctx(shell_dir), command_id)
+        with anyio.fail_after(10):
+            while (await job.status())[0]:
+                await anyio.sleep(0.01)
+        await job.cleanup()
+        assert (await job.status())[0] is False
+
+    async def test_stop_signals_group_after_wrapper_exits(self, shell_dir: Path) -> None:
+        ts = _shell_toolset(shell_dir)
+        command_id = _parse_command_id(await ts.start_command(_ctx(shell_dir), 'exec sleep 30'))
+        job = await _job(ts, _ctx(shell_dir), command_id)
+        # A published finished status may precede the exit of another group member.
+        with patch.object(Job, 'status', return_value=(False, 0)):
+            assert '[stopped]' in await ts.stop_command(_ctx(shell_dir), command_id)
+        try:
+            await _wait_for_exit(job.pid)
+        finally:
+            try:
+                os.kill(job.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
     async def test_stop_escalates_to_sigkill(self, shell_dir: Path) -> None:
         """A group that ignores SIGTERM is killed after the grace period, with no exit code to report."""
         ts = _shell_toolset(shell_dir)
@@ -1463,7 +1589,8 @@ class TestSignalling:
         assert stopped.splitlines()[-2:] == ['[stopped]', '[exit code: 143]']
         signals = [argv for argv in backend.argv if argv[:3] == ['sh', '-c', _KILL_SCRIPT]]
         target = f'-{job.pgid}' if job.pgid is not None else str(job.pid)
-        assert signals == [['sh', '-c', _KILL_SCRIPT, 'kill', 'TERM', target]]
+        assert signals[0] == ['sh', '-c', _KILL_SCRIPT, 'kill', 'TERM', target]
+        assert all(argv[-2:] == ['0', target] for argv in signals[1:])
         assert all(argv[0] != 'kill' for argv in backend.argv)
         await _wait_for_exit(job.pid)
 

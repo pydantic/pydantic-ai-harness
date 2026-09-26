@@ -84,6 +84,16 @@ def _repo_notes(messages: list[ModelMessage]) -> list[str]:
 
 
 class TestDiscoverInstructionFiles:
+    async def test_does_not_load_instruction_link_outside_scanned_directory(
+        self, tmp_path: Path, workspace: Workspace
+    ) -> None:
+        directory = tmp_path / 'project'
+        directory.mkdir()
+        outside = _write(tmp_path / 'AGENTS.md', 'untrusted')
+        (directory / 'AGENTS.md').symlink_to(outside)
+        assert await discover_instruction_files(workspace, directory, None, ('AGENTS.md',)) == []
+        assert await find_dir_context_file(workspace, directory, ('AGENTS.md',)) is None
+
     async def test_walk_up_ancestor_first(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'root')
         workspace_dir = tmp_path / 'a' / 'b'

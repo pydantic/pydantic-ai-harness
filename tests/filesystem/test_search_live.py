@@ -1,0 +1,42 @@
+"""Opt-in search check against the E2B default template (without rg)."""
+
+# pyright: basic, reportMissingImports=false
+
+import os
+from pathlib import Path
+
+import pytest
+
+from pydantic_ai_harness.filesystem import FileSystemToolset
+
+pytestmark = [pytest.mark.anyio, pytest.mark.e2b_live]
+
+
+async def test_default_e2b_search_without_ripgrep() -> None:
+    pytest.importorskip('e2b')
+    if not os.getenv('E2B_API_KEY'):
+        pytest.skip('E2B_API_KEY is required')
+    from pydantic_ai_harness.e2b_sandbox import E2BSandboxBackend  # noqa: PLC0415 -- optional provider
+
+    backend = E2BSandboxBackend(sandbox_timeout=300)
+    try:
+        sandbox = await backend.get_client()
+        with (Path(__file__).parents[4] / 'workspaces-qa' / 'refs.log').open('a') as refs:
+            refs.write(f'harness-fs3 e2b {sandbox.sandbox_id}\n')
+        await backend.write_bytes('/home/user/search-proof.txt', b'proof-marker\n')
+        tools = FileSystemToolset(
+            root_dir=None,
+            allowed_patterns=[],
+            denied_patterns=[],
+            max_read_lines=200,
+            max_list_results=100,
+            max_search_results=10,
+            max_find_results=10,
+        )
+        assert 'search-proof.txt:1:proof-marker' in await tools.search_files('proof-marker', workspace=backend)
+    finally:
+        if backend.ref is not None:
+            # Kill only the sandbox created by this test, even if the assertion fails.
+            import e2b  # noqa: PLC0415 -- optional live dependency
+
+            await e2b.AsyncSandbox.kill(backend.ref.id)

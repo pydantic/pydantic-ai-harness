@@ -11,7 +11,7 @@ have been collected; only kept records count towards the cap.
 from __future__ import annotations
 
 import shlex
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TypeVar
 
@@ -50,6 +50,8 @@ class Record:
     """The path as `rg` printed it, relative to the directory it was run in."""
     text: str
     """Empty for a file listing; otherwise `<line>:<text>` for a match or `<line>-<text>` for context."""
+    real_path: str | None = None
+    """POSIX search may supply the canonical path alongside each candidate."""
 
 
 async def run_ripgrep(
@@ -60,6 +62,7 @@ async def run_ripgrep(
     limit: int,
     listing: bool = False,
     accept: Callable[[Record], _T | None],
+    prepare: Callable[[list[Record]], Awaitable[None]] | None = None,
 ) -> tuple[list[_T], bool]:
     """Run `rg --null` in `cwd` inside the workspace; return up to `limit` accepted records and whether more were cut.
 
@@ -87,6 +90,7 @@ async def run_ripgrep(
     output = result.stdout
     output_cut = len(output.encode('utf-8', errors='surrogateescape')) >= _MAX_OUTPUT_BYTES
     results: list[_T] = []
+    records: list[Record] = []
     truncated = False
     terminator = '\0' if listing else '\n'
     start = 0
@@ -97,17 +101,20 @@ async def run_ripgrep(
             break
         if line == _SEPARATOR:
             continue
-        kept = accept(_record(line, listing=listing))
-        if kept is None:
-            continue
-        if len(results) >= limit:
-            truncated = True
-            break
-        results.append(kept)
+        records.append(_record(line, listing=listing))
     else:
         # Anything left is a record without its terminator: cut off by the output cap, or one
         # too long to keep, which a well-formed `rg` listing never prints.
         truncated = output_cut or len(output) - start > _MAX_RECORD_BYTES
+    if prepare is not None:
+        await prepare(records)
+    for record in records:
+        kept = accept(record)
+        if kept is not None:
+            if len(results) >= limit:
+                truncated = True
+                break
+            results.append(kept)
     # `rg` exits 1 for "no match"; a cut output makes `rg` see a closed pipe, which is not its error.
     if not truncated and not output_cut and status not in ('0', '1'):
         raise ModelRetry(f'ripgrep failed: {detail or f"exit code {status}"}')

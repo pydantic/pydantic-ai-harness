@@ -236,8 +236,10 @@ no lasting effect. Set
 `persist_cwd=True` to make `cd` sticky across calls: each command is wrapped so
 that after it runs, its final working directory is recorded to a private file
 inside the workspace, and that directory is carried into subsequent calls. The path is only
-updated when the command exits `0`, and the record is written out-of-band (not
+updated when the command exits `0`. If the recorded directory disappears, the next command reports a retry and resets to the workspace working directory. The record is written out-of-band (not
 to stdout) so command output can never spoof the tracked directory.
+
+`stop_command` signals the entire process group, including children left after the wrapper exits, then removes the job's output files.
 
 The model sees a capped preview of command output. For large output, redirect it to a file in the workspace, then use `grep` or `tail` to inspect bounded portions rather than printing the whole file.
 
@@ -292,10 +294,17 @@ workspace capability in Python).
 
 `Shell` works under DBOS, Temporal and Prefect durable execution, with these limits:
 
-- Under Temporal, the `shell` tool emits no command events: tools run in activities, which cannot
-  reach the run's event stream yet ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
-- `persist_cwd=True` fails under Prefect, and under Temporal the directory a `cd` moved to carries
-  over to later runs on the same worker.
+- Under Temporal, `CommandStartedEvent`, `CommandOutputEvent`, and `CommandFinishedEvent` from
+  the `shell` tool are not delivered live to workflow listeners because the tool runs in an activity ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
+- With `persist_cwd=True`, the cwd is kept per run in the workspace under
+  `.pydantic-ai-harness/shell/run-state/`, so it can be restored by another worker.
+  The file is removed when the agent run completes; interrupted runs retain it for recovery.
+  Commands in the same run should execute in order; simultaneous commands that change cwd
+  can overwrite each other's state.
+- `start_command` uses the run and tool-call IDs to reattach to a job after an activity retry.
+  If the launcher claims the job directory but fails before publishing its handle, a retry
+  reports a pending launch rather than starting a second process. Remove stale job files manually
+  after confirming the process has stopped.
 
 ## Further reading
 
