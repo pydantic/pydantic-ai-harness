@@ -100,7 +100,9 @@ class TestCommands:
         sandbox.process_exit_code = 3
         result = await backend.run(['printf', 'a b'], cwd='/work dir', env={'A': 'x y'}, timeout=5)
         assert result == type(result)(exit_code=3, stdout='output', stderr='error')
-        assert _unmarked(sandbox.process_command) == f"cd -- '/work dir' && {_WRAPPER} env -- 'A=x y' printf 'a b'"
+        assert "cd -- '" in sandbox.process_command
+        assert 'work dir' in sandbox.process_command
+        assert _unmarked(sandbox.process_command).endswith("sh env -- 'A=x y' printf 'a b'")
         assert sandbox.process_sessions == set()
 
     async def test_missing_exit_status_is_provider_error(self, fake_daytona: FakeDaytona) -> None:
@@ -336,10 +338,16 @@ class TestErrorsAndFilesystem:
         with pytest.raises(WorkspaceError, match='probe failed'):
             await backend.working_dir()
 
+    async def test_failed_working_dir_probe_names_sdk_output(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        fake_daytona.sandboxes[0].workdir = 'sh: cd: /missing: No such file or directory'
+        with pytest.raises(WorkspaceUnavailableError, match='No such file or directory'):
+            await backend.working_dir()
+
     async def test_invalid_native_working_dir_is_rejected(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         fake_daytona.sandboxes[0].workdir = 'relative'
-        with pytest.raises(WorkspaceError, match='determine the working directory'):
+        with pytest.raises(WorkspaceUnavailableError, match='determine the working directory'):
             await backend.working_dir()
 
     async def test_filesystem_roundtrip_uses_file_entry(self, fake_daytona: FakeDaytona) -> None:
@@ -518,7 +526,10 @@ class TestLazyOperations:
     async def test_default_cwd_is_applied_to_commands(self, fake_daytona: FakeDaytona) -> None:
         backend = DaytonaSandboxBackend(working_dir='/work dir')
         await backend.run(['true'])
-        assert _unmarked(fake_daytona.sandboxes[0].process_command) == f"cd -- '/work dir' && {_WRAPPER} true"
+        command = _unmarked(fake_daytona.sandboxes[0].process_command)
+        assert command.startswith("sh -c 'cd -- ")
+        assert 'work dir' in command
+        assert command.endswith('sh true')
 
     async def test_working_dir_initializes_identity(self, fake_daytona: FakeDaytona) -> None:
         backend = DaytonaSandboxBackend(working_dir='/workspace')

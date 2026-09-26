@@ -131,11 +131,9 @@ def _command_line(
     if env:
         # `--` ends `env`'s options, so a name starting with `-` is not read as one.
         argv = ['env', '--', *(f'{name}={value}' for name, value in env.items()), *argv]
-    script = f'"$@" </dev/null; status=$?; printf %s {marker}; printf %s {marker} >&2; exit "$status"'
-    line = shlex.join(['sh', '-c', script, 'sh', *argv])
-    if cwd is not None:
-        line = f'cd -- {shlex.quote(cwd)} && {line}'
-    return line
+    prefix = f'cd -- {shlex.quote(cwd)} && ' if cwd is not None else ''
+    script = f'{prefix}"$@" </dev/null; status=$?; printf %s {marker}; printf %s {marker} >&2; exit "$status"'
+    return shlex.join(['sh', '-c', script, 'sh', *argv])
 
 
 def _until_marker(chunks: list[str], marker: str) -> str:
@@ -486,7 +484,9 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                 await _raise_failure(sandbox, error, 'Could not determine the working directory')
             printed = result.result.removesuffix('\n')
             if result.exit_code != 0 or not posixpath.isabs(printed):
-                raise WorkspaceError(f'Could not determine the working directory of Daytona sandbox {sandbox.id}.')
+                raise WorkspaceUnavailableError(
+                    f'Could not determine the working directory of Daytona sandbox {sandbox.id}: {result.result}'
+                )
             self._resolved_working_dir = printed
         return self._resolved_working_dir
 
