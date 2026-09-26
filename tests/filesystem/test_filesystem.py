@@ -998,6 +998,17 @@ class TestListDirectory:
 
 
 class TestSearchFiles:
+    async def test_denied_directory_protects_descendants(self, fs_root: Path) -> None:
+        (fs_root / 'private').mkdir()
+        (fs_root / 'private' / 'secret.txt').write_text('needle\n')
+        toolset = FileSystem[None](root_dir=fs_root, denied_patterns=['private']).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        workspace = LocalWorkspaceBackend(fs_root)
+        with pytest.raises(ModelRetry, match='denied'):
+            await toolset.read_file('private/secret.txt', workspace=workspace)
+        assert 'private' not in await toolset.find_files('**/*.txt', workspace=workspace)
+        assert 'private' not in await toolset.search_files('needle', workspace=workspace)
+
     async def test_explicit_hidden_directory_can_be_searched(self, fs_root: Path) -> None:
         (fs_root / '.github' / 'workflows').mkdir(parents=True)
         (fs_root / '.github' / 'workflows' / 'ci.txt').write_text('needle\n')

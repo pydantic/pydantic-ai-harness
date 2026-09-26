@@ -574,9 +574,12 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             return fnmatch.fnmatch(path, pattern[3:])
         return False
 
-    def _first_matching_pattern(self, path: str, patterns: list[str]) -> str | None:
-        """Return the first pattern that matches path, or None."""
-        return next((p for p in patterns if self._matches(path, p)), None)
+    def _first_matching_pattern(self, path: str, patterns: list[str], *, ancestors: bool = False) -> str | None:
+        """Return the first pattern matching this path (or, for a directory policy, its ancestors)."""
+        # A directory denial protects its descendants even when the pattern has no `/**` suffix.
+        parts = path.split('/')
+        paths = [path] if not ancestors else ['/'.join(parts[:end]) for end in range(1, len(parts) + 1)]
+        return next((p for p in patterns if any(self._matches(candidate, p) for candidate in paths)), None)
 
     async def _resolve_path(self, scope: _Scope, path: str) -> tuple[str, str]:
         """Resolve path from the working directory, rejecting any that leads outside the root.
@@ -610,12 +613,12 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         `_is_accessible`. Denied patterns continue to gate the root.
         """
         if write and self._read_only_patterns:
-            matched = self._first_matching_pattern(path, self._read_only_patterns)
+            matched = self._first_matching_pattern(path, self._read_only_patterns, ancestors=True)
             if matched:
                 raise PermissionError(f'Path {path!r} is protected (matches {matched!r}).')
 
         if self._denied_patterns:
-            matched = self._first_matching_pattern(path, self._denied_patterns)
+            matched = self._first_matching_pattern(path, self._denied_patterns, ancestors=True)
             if matched:
                 raise PermissionError(f'Path {path!r} is denied by pattern {matched!r}.')
 
@@ -630,7 +633,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         only read.
         """
         if self._denied_patterns:
-            if self._first_matching_pattern(path, self._denied_patterns) is not None:
+            if self._first_matching_pattern(path, self._denied_patterns, ancestors=True) is not None:
                 return False
         if self._allowed_patterns and not any(self._matches(path, p) for p in self._allowed_patterns):
             return False
@@ -728,7 +731,13 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 directories = [child for child in children if child.is_dir and not child.name.startswith('.')]
                 resolved_dirs = [(child, await scope.workspace.realpath(child.path)) for child in directories]
                 for child, real in sorted(resolved_dirs, key=lambda pair: pair[0].path != pair[1]):
-                    if real not in seen_dirs and _contains(scope.root, real):
+                    if (
+                        real not in seen_dirs
+                        and _contains(scope.root, real)
+                        and not self._first_matching_pattern(
+                            posixpath.relpath(child.path, scope.root), self._denied_patterns, ancestors=True
+                        )
+                    ):
                         seen_dirs.add(real)
                         pending.append((child.path, depth + 1))
         return entries, False
