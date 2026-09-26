@@ -239,14 +239,23 @@ class FakeFileSystem:
 
 
 @contextmanager
-def _host_errors(path: str) -> Generator[None]:
-    """Raise the SDK errors the toolbox's status codes turn into for these host errors."""
+def _host_errors(path: str, operation: str) -> Generator[None]:
+    """Raise the SDK errors the toolbox's status codes turn into for these host errors.
+
+    Apart from a missing path, the toolbox answers a Go `PathError` with a 400 whose text is the
+    only thing telling the failures apart (observed live 2026-09-25). A `mkdir` over a file is
+    `not a directory` there, since Go's `MkdirAll` reports that rather than `file exists`.
+    """
     try:
         yield
     except FileNotFoundError as error:
         raise DaytonaNotFoundError(f'path not found: {path}', status_code=404) from error
     except IsADirectoryError as error:
-        raise DaytonaValidationError(f'path is a directory: {path}', status_code=400) from error
+        raise DaytonaError(f'Failed to {operation}: 400: open {path}: is a directory', status_code=400) from error
+    except (NotADirectoryError, FileExistsError) as error:
+        raise DaytonaValidationError(
+            f'Failed to {operation}: bad request: {path}: not a directory', status_code=400
+        ) from error
 
 
 class _HostProcess(FakeProcess):
@@ -371,24 +380,26 @@ class _HostFileSystem(FakeFileSystem):
 
     async def get_file_info(self, path: str, request_timeout: float | None = None) -> SimpleNamespace:
         self._raise_if_needed()
-        with _host_errors(path):
+        with _host_errors(path, 'get file info'):
             info = Path(path).stat()
         return SimpleNamespace(size=info.st_size, is_dir=Path(path).is_dir())
 
     async def download_file(self, path: str, timeout: int | None = None) -> bytes:
         self._raise_if_needed()
-        with _host_errors(path):
+        with _host_errors(path, 'download file'):
             return Path(path).read_bytes()
 
     async def upload_file(self, data: bytes, path: str, timeout: int = 1800) -> None:
         self._raise_if_needed()
-        Path(path).write_bytes(data)
+        # The toolbox opens the path for writing, which follows a symlink (observed live 2026-09-25).
+        with _host_errors(path, 'upload files'):
+            Path(path).write_bytes(data)
 
     async def list_files(
         self, path: str, depth: int | None = None, request_timeout: float | None = None
     ) -> list[SimpleNamespace]:
         self._raise_if_needed()
-        with _host_errors(path):
+        with _host_errors(path, 'list files'):
             children = sorted(Path(path).iterdir())
         # An unresolvable symlink is still a directory entry; stat cannot follow its loop.
         return [
@@ -402,11 +413,12 @@ class _HostFileSystem(FakeFileSystem):
 
     async def create_folder(self, path: str, mode: str, request_timeout: float | None = None) -> None:
         self._raise_if_needed()
-        Path(path).mkdir(mode=int(mode, 8), parents=True, exist_ok=True)
+        with _host_errors(path, 'create folder'):
+            Path(path).mkdir(mode=int(mode, 8), parents=True, exist_ok=True)
 
     async def delete_file(self, path: str, recursive: bool = False, request_timeout: float | None = None) -> None:
         self._raise_if_needed()
-        with _host_errors(path):
+        with _host_errors(path, 'delete file'):
             if Path(path).is_dir():
                 shutil.rmtree(path)
             else:

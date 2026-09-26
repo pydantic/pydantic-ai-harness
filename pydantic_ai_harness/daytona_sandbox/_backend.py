@@ -286,7 +286,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     Commands and file operations run inside a Daytona sandbox, so the host is never exposed.
 
     Building one does no I/O. The first operation creates or attaches to a sandbox, and the typed
-    `daytona.AsyncSandbox` is available through `get_client()`. The backend does not stop or
+    `daytona.AsyncSandbox` is available through `get_sandbox()`. The backend does not stop or
     delete the sandbox; that is the application's job, through the native handle.
 
     Commands run in Daytona process sessions, with complete output returned after they finish. A
@@ -323,7 +323,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     def __init__(
         self,
         *,
-        workspace: AsyncSandbox | None = None,
+        sandbox: AsyncSandbox | None = None,
         client: AsyncDaytona | None = None,
         ref: WorkspaceRef | None = None,
         snapshot: str | None = None,
@@ -336,10 +336,10 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'daytona'")
         if ref is not None and not ref.id.strip():
             raise ValueError('Daytona workspace ref id cannot be empty')
-        if workspace is not None and ref is not None:
-            raise ValueError('pass either `workspace` or `ref`, not both')
-        self._ref = ref if workspace is None else WorkspaceRef(provider='daytona', id=workspace.id)
-        self._sandbox = workspace
+        if sandbox is not None and ref is not None:
+            raise ValueError('pass either `sandbox` or `ref`, not both')
+        self._ref = ref if sandbox is None else WorkspaceRef(provider='daytona', id=sandbox.id)
+        self._sandbox = sandbox
         self._client = client
         self._owns_client = client is None
         self._snapshot = snapshot
@@ -365,7 +365,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         """
         return self._ref
 
-    async def get_client(self) -> AsyncSandbox:
+    async def get_sandbox(self) -> AsyncSandbox:
         """Return the typed `daytona.AsyncSandbox`, creating or attaching to it on first use.
 
         This is the sandbox handle, not the `AsyncDaytona` API client passed as `client=`.
@@ -438,7 +438,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         A client passed as `client=` is left alone, and the sandbox keeps running. A sandbox
         SDK handles lazily reopen their HTTP sessions after close; this backend drops its owned
         client and handle so a later operation opens a new client and attaches by `ref`. Using a
-        `client=` or `workspace=` backend after its caller closes that client leaks an aiohttp session.
+        `client=` or `sandbox=` backend after its caller closes that client leaks an aiohttp session.
         `DaytonaSandbox` calls this when the run that used the backend ends.
         """
         if self._client is None or not self._owns_client:
@@ -492,7 +492,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
     async def realpath(self, path: str) -> str:
         _check_path(path)
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         try:
             result = await sandbox.process.exec(
                 f'realpath -m -- {shlex.quote(path)}', cwd=self._working_dir, timeout=_REQUEST_TIMEOUT
@@ -505,14 +505,19 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
     async def read_bytes(self, path: str) -> bytes:
         _check_path(path)
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with _translated_filesystem_error(sandbox, path):
             # The toolbox download opens FIFOs for reading and can wait forever for a writer.
             probe = await sandbox.process.exec(f'[ -p {shlex.quote(path)} ]', timeout=_REQUEST_TIMEOUT)
             if probe.exit_code == 0:
                 raise OSError(f'Cannot read FIFO in the Daytona sandbox: {path!r}')
             try:
-                return await sandbox.fs.download_file(path, _REQUEST_TIMEOUT)
+                try:
+                    return await sandbox.fs.download_file(path, _REQUEST_TIMEOUT)
+                except daytona.DaytonaError as error:
+                    if await _entry_is_dir(sandbox, path, error):
+                        raise IsADirectoryError(f'Is a directory in the Daytona sandbox: {path!r}') from error
+                    raise
             except daytona.DaytonaError as error:
                 if isinstance(error, daytona.DaytonaNotFoundError):
                     raise
@@ -524,7 +529,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         _check_path(path)
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         parent = posixpath.dirname(path)
         if parent not in ('', '.', '/'):
             try:
@@ -563,7 +568,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
     async def stat(self, path: str) -> FileEntry:
         _check_path(path)
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with _translated_filesystem_error(sandbox, path):
             entry = await sandbox.fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
         return FileEntry(
@@ -575,9 +580,14 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
         _check_path(path)
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with _translated_filesystem_error(sandbox, path):
-            entries = await sandbox.fs.list_files(path, request_timeout=_REQUEST_TIMEOUT)
+            try:
+                entries = await sandbox.fs.list_files(path, request_timeout=_REQUEST_TIMEOUT)
+            except daytona.DaytonaError as error:
+                if await _entry_is_dir(sandbox, path, error) is False:
+                    raise NotADirectoryError(f'Not a directory in the Daytona sandbox: {path!r}') from error
+                raise
         result = [
             FileEntry(
                 name=entry.name,
@@ -604,7 +614,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
     async def make_dir(self, path: str) -> None:
         _check_path(path)
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with _translated_filesystem_error(sandbox, path):
             try:
                 await sandbox.fs.create_folder(path, '755', request_timeout=_REQUEST_TIMEOUT)
@@ -623,7 +633,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
 
     async def remove(self, path: str) -> None:
         _check_path(path)
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         async with _translated_filesystem_error(sandbox, path):
             # Whether the toolbox rejects removing a missing path is not documented; looking it up
             # first reports that as the protocol's `FileNotFoundError` either way.
@@ -689,7 +699,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         # A stalled control plane is transient, not a command deadline.
         raise TimeoutError(f'Daytona sandbox creation did not complete within {_CREATE_TIMEOUT}s.')
 
-    async def _attach(self, client: AsyncDaytona, workspace_id: str) -> AsyncSandbox:
+    async def _attach(self, client: AsyncDaytona, sandbox_id: str) -> AsyncSandbox:
         """Attach to a sandbox that already exists, starting it if it is stopped.
 
         `delete()` returns once Daytona accepts the request, and the sandbox stays visible in the
@@ -698,22 +708,21 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         """
         with anyio.move_on_after(_CREATE_TIMEOUT):
             try:
-                sandbox = await client.get(workspace_id, request_timeout=_REQUEST_TIMEOUT)
+                sandbox = await client.get(sandbox_id, request_timeout=_REQUEST_TIMEOUT)
                 if not _in_deleted_state(sandbox):
                     await sandbox.start(timeout=_LIFECYCLE_TIMEOUT)
             except Exception as error:
                 if isinstance(error, daytona.DaytonaNotFoundError):
+                    # A missing ID may never have existed; do not claim confirmed deletion.
                     raise WorkspaceUnavailableError(
-                        f'The Daytona sandbox {workspace_id!r} was not found (it was deleted, or never existed '
+                        f'The Daytona sandbox {sandbox_id!r} was not found (it was deleted, or never existed '
                         "in this Daytona organization). Pass `workspace='new'` to start a fresh sandbox."
                     ) from error
-                _raise_translated(error, f'Could not attach to Daytona sandbox {workspace_id!r}')
+                _raise_translated(error, f'Could not attach to Daytona sandbox {sandbox_id!r}', sandbox_id=sandbox_id)
             if _in_deleted_state(sandbox):
                 raise WorkspaceUnavailableError(_unavailable_message(sandbox.id))
             return sandbox
-        raise TimeoutError(
-            f'Connecting to Daytona sandbox {workspace_id!r} did not complete within {_CREATE_TIMEOUT}s.'
-        )
+        raise TimeoutError(f'Connecting to Daytona sandbox {sandbox_id!r} did not complete within {_CREATE_TIMEOUT}s.')
 
     async def working_dir(self) -> str:
         """Return the filesystem-canonical default directory inside the workspace.
@@ -722,7 +731,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         call raises `WorkspaceUnavailableError`; later calls return the cached path without probing.
         """
         if self._resolved_working_dir is None:
-            sandbox = await self.get_client()
+            sandbox = await self.get_sandbox()
             try:
                 result = await sandbox.process.exec('pwd -P', cwd=self._working_dir, timeout=_REQUEST_TIMEOUT)
             except Exception as error:
@@ -749,7 +758,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         argv = command_argv(command, shell)
         checked_cwd = absolute_path('cwd', cwd)
         # Acquiring the sandbox has its own bound; the timeout is the command's alone.
-        sandbox = await self.get_client()
+        sandbox = await self.get_sandbox()
         process: _DaytonaProcess | None = None
 
         async def stop() -> None:
@@ -994,6 +1003,16 @@ def _check_path(path: str) -> None:
     # Daytona's toolbox uses newline-delimited paths; embedded line breaks change the request's meaning.
     if '\n' in path or '\r' in path:
         raise ValueError('Daytona file paths cannot contain a newline or carriage return')
+
+
+async def _entry_is_dir(sandbox: AsyncSandbox, path: str, error: daytona.DaytonaError) -> bool | None:
+    """Ask for the entry type when Daytona's toolbox reports an ambiguous wrong-type error."""
+    if isinstance(error, daytona.DaytonaNotFoundError):
+        return None
+    try:
+        return (await sandbox.fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)).is_dir
+    except Exception:
+        return None
 
 
 def _mkdir_error(output: str, parent: str) -> Exception:

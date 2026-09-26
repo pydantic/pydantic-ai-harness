@@ -29,7 +29,7 @@ def _attach(ref: WorkspaceRef) -> WorkspaceBackend:
 
 async def _delete(backend: WorkspaceBackend) -> None:
     assert isinstance(backend, DaytonaSandboxBackend)
-    sandbox = await backend.get_client()
+    sandbox = await backend.get_sandbox()
     await sandbox.delete()
 
 
@@ -91,7 +91,7 @@ class TestLiveDaytonaSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover 
     async def backend(cls) -> AsyncIterator[DaytonaSandboxBackend]:
         backend = DaytonaSandboxBackend(auto_stop_interval=LIVE_AUTO_STOP_INTERVAL)
         try:
-            await backend.get_client()
+            await backend.get_sandbox()
             yield backend
         finally:
             try:

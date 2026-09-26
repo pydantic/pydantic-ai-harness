@@ -57,7 +57,7 @@ async def test_capability_is_lazy_and_forwards_options(fake_daytona: FakeDaytona
 
 
 async def test_lifetimes_default_to_daytonas_own(fake_daytona: FakeDaytona) -> None:
-    await DaytonaSandboxBackend().get_client()
+    await DaytonaSandboxBackend().get_sandbox()
     params = fake_daytona.create_params[0]
     assert (params.auto_stop_interval, params.auto_archive_interval, params.auto_delete_interval) == (None, None, None)
 
@@ -79,7 +79,7 @@ def test_invalid_settings_fail_at_construction(settings: dict[str, Any], message
 async def test_explicit_ref_attaches_without_creation(fake_daytona: FakeDaytona) -> None:
     existing = fake_daytona.sandbox('existing')
     backend = DaytonaSandboxBackend(ref=WorkspaceRef(provider='daytona', id=existing.id))
-    await backend.get_client()
+    await backend.get_sandbox()
     assert backend.ref == WorkspaceRef(provider='daytona', id=existing.id)
     assert not fake_daytona.create_params
 
@@ -92,12 +92,12 @@ async def test_foreign_ref_is_declined_and_backend_rejects_it() -> None:
 
 async def test_native_ref_conflict_and_native_identity(fake_daytona: FakeDaytona) -> None:
     seed = DaytonaSandboxBackend()
-    native = await seed.get_client()
-    backend = DaytonaSandboxBackend(workspace=native)
-    assert await backend.get_client() is native
+    native = await seed.get_sandbox()
+    backend = DaytonaSandboxBackend(sandbox=native)
+    assert await backend.get_sandbox() is native
     assert backend.ref == WorkspaceRef(provider='daytona', id=native.id)
-    with pytest.raises(ValueError, match='either `workspace` or `ref`'):
-        DaytonaSandboxBackend(workspace=native, ref=backend.ref)
+    with pytest.raises(ValueError, match='either `sandbox` or `ref`'):
+        DaytonaSandboxBackend(sandbox=native, ref=backend.ref)
 
 
 async def test_agent_without_workspace_use_does_not_create(fake_daytona: FakeDaytona) -> None:
@@ -164,7 +164,7 @@ async def test_concurrent_acquisition_and_operation_overlap(fake_daytona: FakeDa
     results: list[object] = []
 
     async def acquire() -> None:
-        results.append(await backend.get_client())
+        results.append(await backend.get_sandbox())
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(acquire)
