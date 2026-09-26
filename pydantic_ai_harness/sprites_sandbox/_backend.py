@@ -443,12 +443,13 @@ def _ending_with(marker: str, args: list[str]) -> list[str]:
     The live Sprite's stderr stream is not dependable: the same command's stderr arrived on the stderr
     stream in one run and on the stdout stream in the next, whole lines included (2026-09-25), while
     stdout arrived intact every time. So the command's stderr goes to a temporary file in the Sprite,
-    printed on stdout after the marker line, and `_split_output` separates the two again. The exit
-    status is the command's.
+    printed on stdout after the marker line, and `_split_output` separates the two again. The file is
+    unlinked as soon as it is open, so a command stopped by a timeout or a cancellation leaves no
+    stderr behind for a later command to read. The exit status is the command's.
     """
     script = (
-        'cat >/dev/null; err=$(mktemp) || exit 125; '
-        f'"$@" 2>"$err"; status=$?; printf "\\n%s\\n" {marker}; cat "$err"; rm -f "$err"; exit "$status"'
+        'cat >/dev/null; err=$(mktemp) || exit 125; exec 3>"$err" 4<"$err"; rm -f "$err"; '
+        f'"$@" 2>&3 3>&- 4<&-; status=$?; exec 3>&-; printf "\\n%s\\n" {marker}; cat <&4; exit "$status"'
     )
     return ['sh', '-c', script, 'sh', *args]
 
@@ -457,7 +458,7 @@ def _split_output(stdout: bytes, stderr: bytes, marker: str) -> tuple[str, str]:
     """The command's stdout and stderr from what `_ending_with` printed.
 
     Without the marker line (the command was stopped before it finished), stdout is all the output
-    there is, and the command's stderr stayed in the Sprite. Anything on the stderr stream itself came
+    there is, and the command's stderr is lost with its unlinked file. Anything on the stderr stream itself came
     from the wrapper and is kept.
     """
     head, found, tail = _decode(stdout).partition(f'\n{marker}\n')

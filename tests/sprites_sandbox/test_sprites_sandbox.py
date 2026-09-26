@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import signal
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import anyio
 import httpx
@@ -582,6 +584,30 @@ class TestSpritesSandbox:
             group.cancel_scope.cancel()
         [socket] = transport.execs
         assert socket.process.wait(timeout=1) == -signal.SIGKILL
+
+    async def test_a_stopped_command_leaves_no_stderr_file(
+        self, transport: SpriteTransport, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The stderr file would otherwise outlive the command in the persistent Sprite. A `mktemp`
+        # on `PATH` puts the file where the test can see it.
+        stderr_file = tmp_path / 'stderr'
+        running = tmp_path / 'running'
+        bin_dir = tmp_path / 'bin'
+        bin_dir.mkdir()
+        (bin_dir / 'mktemp').write_text(f'#!/bin/sh\n: > {stderr_file}\necho {stderr_file}\n')
+        (bin_dir / 'mktemp').chmod(0o755)
+        monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
+        backend = SpritesSandboxBackend()
+        await backend.get_client()
+        async with anyio.create_task_group() as group:
+            group.start_soon(backend.run, ['sh', '-c', f'echo secret >&2; : > {running}; exec sleep 30'])
+            while not running.exists():
+                await anyio.sleep(0.01)
+            group.cancel_scope.cancel()
+        [socket] = transport.execs
+        assert socket.process.wait(timeout=5) == -signal.SIGKILL
+        assert not stderr_file.exists()
+        assert (await backend.run('echo oops >&2', shell=True)).stderr == 'oops\n'
 
     @pytest.mark.parametrize('timeout', [0, -1, float('inf')])
     async def test_invalid_timeout(self, transport: SpriteTransport, timeout: float) -> None:
