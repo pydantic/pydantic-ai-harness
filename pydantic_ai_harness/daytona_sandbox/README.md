@@ -104,18 +104,16 @@ Already have a `daytona.AsyncSandbox`? Pass `workspace=DaytonaSandboxBackend(wor
 The sandbox keeps running, and billing, after the run ends. Pydantic AI never stops or deletes it. Delete it with the ref you kept:
 
 ```python {names="defined"}
+from daytona import AsyncDaytona
 from pydantic_ai.workspaces import WorkspaceRef
-from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxBackend
 
 
 async def delete_sandbox(ref: WorkspaceRef) -> None:
-    backend = DaytonaSandboxBackend(ref=ref)
-    sandbox = await backend.get_client()
-    await sandbox.delete()
-    await backend.aclose()
+    async with AsyncDaytona() as client:
+        await (await client.get(ref.id)).delete()
 ```
 
-`get_client()` returns the `daytona.AsyncSandbox`, and `aclose()` closes the Daytona client the backend opened.
+Use the SDK directly to delete the stored ref without first starting a stopped sandbox.
 
 By default, Daytona stops a sandbox after 15 idle minutes (a later run starts it again); set `auto_stop_interval=` to a smaller number of minutes to stop it sooner. A stopped sandbox keeps its disk, is archived after 7 days, and is never deleted. See [Daytona's SDK docs](https://www.daytona.io/docs/en/python-sdk/async/async-daytona/).
 

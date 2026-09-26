@@ -690,6 +690,14 @@ async def test_attach_timeout_is_transient(fake_daytona: FakeDaytona, monkeypatc
         await DaytonaSandboxBackend(ref=WorkspaceRef(provider='daytona', id=existing.id)).get_client()
 
 
+@pytest.mark.parametrize('page', ['docs/daytona-sandbox.md', 'pydantic_ai_harness/daytona_sandbox/README.md'])
+def test_cleanup_recipe_deletes_without_starting(page: str) -> None:
+    text = (Path(__file__).parents[2] / page).read_text()
+    recipe = text.split('## Clean up', 1)[1].split('## Configuration', 1)[0]
+    assert 'await (await client.get(ref.id)).delete()' in recipe
+    assert 'backend.get_client()' not in recipe
+
+
 def test_client_lifetime_docstrings_describe_sdk_reopening() -> None:
     assert 'lazily reopens' in (_backend.__doc__ or '')
     assert 'leaks an aiohttp session' in (DaytonaSandboxBackend.aclose.__doc__ or '')
