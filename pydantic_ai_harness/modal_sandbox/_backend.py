@@ -454,13 +454,17 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         deadline = None if timeout is None else max(1, math.ceil(timeout))
         timed_out = f'Command timed out after {timeout} seconds.'
         server_started_at = time.monotonic()
+        start: anyio.CancelScope | None = None
         try:
-            with anyio.fail_after(timeout):
+            with anyio.fail_after(timeout) as start:
                 async with self._mapped_errors(sandbox, 'Command could not run in the workspace'):
                     process = await sandbox.exec.aio(
                         *argv, timeout=deadline, workdir=workdir, env=variables, text=False
                     )
         except TimeoutError as error:
+            if start is None or not start.cancelled_caught:
+                # The SDK's own `TimeoutError`, a transient failure rather than this deadline.
+                raise
             raise WorkspaceTimeoutError(
                 'Timed out before the command could start; the Modal process may still be running.'
             ) from error
@@ -468,24 +472,33 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         async def read(reader: modal.io_streams.StreamReader[bytes]) -> str:
             return (await reader.read.aio()).decode('utf-8', errors='replace')
 
+        exited_at = math.inf
+
+        async def wait() -> int:
+            nonlocal exited_at
+            exit_code = await process.wait.aio()
+            # Timed here, so output that drains slowly afterwards cannot make an early exit look late.
+            exited_at = time.monotonic()
+            return exit_code
+
         tasks = (
             asyncio.create_task(read(process.stdout)),
             asyncio.create_task(read(process.stderr)),
-            asyncio.create_task(process.wait.aio()),
+            asyncio.create_task(wait()),
         )
-        gather = asyncio.gather(*tasks)
+        result_timeout = (
+            None if deadline is None else max(0.0, server_started_at + deadline - time.monotonic()) + _RESULT_GRACE
+        )
+        collect: anyio.CancelScope | None = None
         try:
-            if deadline is None:
-                stdout, stderr, exit_code = await gather
-            else:
-                result_timeout = max(0.0, server_started_at + deadline - time.monotonic()) + _RESULT_GRACE
-                stdout, stderr, exit_code = await asyncio.wait_for(gather, result_timeout)
+            with anyio.fail_after(result_timeout) as collect:
+                stdout, stderr, exit_code = await asyncio.gather(*tasks)
         except BaseException as error:
             for task in tasks:
                 task.cancel()
             with anyio.CancelScope(shield=True):
                 await asyncio.gather(*tasks, return_exceptions=True)
-            if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+            if isinstance(error, TimeoutError) and collect is not None and collect.cancelled_caught:
 
                 def captured(task: asyncio.Task[str]) -> str:
                     if task.cancelled() or task.exception() is not None:
@@ -503,7 +516,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                 raise mapped from error
             raise
 
-        elapsed = time.monotonic() - server_started_at
+        elapsed = exited_at - server_started_at
         if deadline is not None and (
             exit_code == _CLIENT_DEADLINE_EXIT or (exit_code == _SIGKILL_EXIT and elapsed >= deadline)
         ):

@@ -149,6 +149,24 @@ class TestRun:
         backend = await started()
         assert (await backend.run(['kill-self'], timeout=15)).exit_code == 137
 
+    async def test_early_sigkill_with_slow_output_is_a_real_exit(self, fake_modal: FakeModal) -> None:
+        # The exit is timed when the process ends, so output that drains past the deadline
+        # does not turn an early SIGKILL into a timeout.
+        fake_modal.responder = lambda argv, timeout: ('', '', 137)
+        fake_modal.stdout_delay = 1.1
+        backend = await started()
+        assert (await backend.run(['kill-self'], timeout=1)).exit_code == 137
+
+    @pytest.mark.parametrize('stage', ['exec_error', 'wait_error'])
+    async def test_an_sdk_timeout_error_is_not_a_command_timeout(self, fake_modal: FakeModal, stage: str) -> None:
+        # A `TimeoutError` from Modal's transport is transient; only the command's own deadline
+        # is a `WorkspaceTimeoutError`.
+        setattr(fake_modal, stage, TimeoutError('transport'))
+        backend = await started()
+        with pytest.raises(TimeoutError, match='transport') as exc:
+            await backend.run(['x'])
+        assert not isinstance(exc.value, WorkspaceTimeoutError)
+
     async def test_invalid_utf8_output_uses_replacement_characters(self, fake_modal: FakeModal) -> None:
         # Modal's text mode decodes strictly; reading bytes and decoding with replacement
         # keeps a command printing binary from aborting the run.

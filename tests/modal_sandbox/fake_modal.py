@@ -100,12 +100,26 @@ class _HangingAioCall:
         await anyio.sleep_forever()
 
 
+class _DelayedAioCall(_AioCallable):
+    """An `.aio` that returns after `delay` seconds, like output still draining after the process exited."""
+
+    def __init__(self, fn: Callable[..., Any], delay: float) -> None:
+        super().__init__(fn)
+        self._delay = delay
+
+    async def aio(self, *args: Any, **kwargs: Any) -> Any:
+        await anyio.sleep(self._delay)
+        return self._fn(*args, **kwargs)
+
+
 class _FakeStream:
     """Mimics the whole-output `.read.aio()` surface used by the backend."""
 
-    def __init__(self, data: bytes, hangs: bool = False) -> None:
+    def __init__(self, data: bytes, hangs: bool = False, delay: float = 0.0) -> None:
         self._data = data
-        self.read = _HangingAioCall() if hangs else _AioCallable(self._read)
+        self.read = (
+            _HangingAioCall() if hangs else _DelayedAioCall(self._read, delay) if delay else _AioCallable(self._read)
+        )
 
     def _read(self) -> bytes:
         return self._data
@@ -120,8 +134,9 @@ class _FakeProcess:
         wait_error: Exception | None,
         wait_hangs: bool,
         stdout_hangs: bool = False,
+        stdout_delay: float = 0.0,
     ) -> None:
-        self.stdout = _FakeStream(stdout, stdout_hangs)
+        self.stdout = _FakeStream(stdout, stdout_hangs, stdout_delay)
         self.stderr = _FakeStream(stderr)
         self._returncode = returncode
         self._wait_error = wait_error
@@ -459,6 +474,7 @@ class FakeSandbox:
             self._control.wait_error,
             self._control.wait_hangs,
             self._control.stdout_hangs,
+            self._control.stdout_delay,
         )
 
     def _poll(self) -> int | None:
@@ -494,6 +510,8 @@ class FakeModal:
         self.wait_error: Exception | None = None
         self.wait_hangs = False
         self.stdout_hangs = False
+        # Seconds stdout takes to drain after the process has exited.
+        self.stdout_delay = 0.0
         # When set, sandboxes run commands and file operations on the host under this directory.
         self.host_root: Path | None = None
         self.module = self._build_module()
