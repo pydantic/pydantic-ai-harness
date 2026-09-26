@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         OutputGuardrailFunc,
         ToolGuardrail,
     )
+    from .keenable import KeenableSearch
     from .localstack import LocalStack
     from .logfire import ManagedPrompt
     from .macroscope import Macroscope
@@ -92,6 +93,7 @@ __all__ = [
     'InputGuardrail',
     'InputGuardrailFunc',
     'LLM_API_KEY_ENV_PATTERNS',
+    'KeenableSearch',
     'LocalStack',
     'Macroscope',
     'ManagedPrompt',
@@ -149,6 +151,7 @@ _CAPABILITY_EXPORTS = {
     'FallbackCompaction': 'compaction',
     'FileSystem': 'filesystem',
     'Grain': 'grain',
+    'KeenableSearch': 'keenable',
     'LocalStack': 'localstack',
     'Macroscope': 'macroscope',
     'ManagedPrompt': 'logfire',
