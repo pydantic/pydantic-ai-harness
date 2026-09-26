@@ -34,7 +34,7 @@ agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(working_di
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
 ```
 
-`Coder`'s shell and file tools now run in the sandbox, not on your machine. With `Coder`, `RepoContext` creates the sandbox when the run starts, even without a tool call. Use `Coder(repo_context=False)` for lazy creation. It keeps running, and billing, after the run ends; see [Clean up](#clean-up).
+`Coder`'s shell and file tools now run in the sandbox, not on your machine. With `Coder`, `RepoContext` creates the sandbox when the run starts, even without a tool call. Use `Coder()` for lazy creation. It keeps running, and billing, after the run ends; see [Clean up](#clean-up).
 
 A new sandbox lives for up to 24 hours, Modal's maximum; pass `ModalSandbox(sandbox_timeout=3600)` to end it sooner. A first use may take several minutes while Modal builds or pulls an image. If Modal cannot start the sandbox, for example because the image does not exist, the first tool call raises an error that says why.
 
@@ -196,6 +196,57 @@ The previous `ModalSandbox` registered its own `run_command`, `read_file`, `writ
 | `ModalSandboxExecResult` | Removed. Use `pydantic_ai.workspaces.CommandResult`. |
 | `ModalSandboxError` | Removed. Catch `pydantic_ai.workspaces.WorkspaceError`. |
 | `ModalSandboxTerminalError`, `ModalSandboxUnavailableError`, `ModalSandboxAuthError` | Removed. Catch `pydantic_ai.workspaces.WorkspaceUnavailableError`. |
+
+## Durable execution
+
+Run a Temporal dev server on `localhost:7233` first. The agent and workflow must be defined at module level for activity registration.
+
+```python
+import asyncio
+import uuid
+
+from pydantic_ai import Agent
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, PydanticAIWorkflow, TemporalDurability
+from pydantic_ai_harness.coder import Coder
+from pydantic_ai_harness.modal_sandbox import ModalSandbox
+from temporalio import workflow
+from temporalio.client import Client
+from temporalio.worker import Worker
+
+agent = Agent(
+    'anthropic:claude-opus-5-5',
+    name='modal_coder',
+    capabilities=[ModalSandbox(), Coder(), TemporalDurability()],
+)
+
+
+@workflow.defn
+class SandboxWorkflow(PydanticAIWorkflow):
+    __pydantic_ai_agents__ = [agent]
+
+    @workflow.run
+    async def run(self, prompt: str) -> str:
+        return (await agent.run(prompt)).output
+
+
+async def main() -> None:
+    client = await Client.connect('localhost:7233', plugins=[PydanticAIPlugin()])
+    async with Worker(client, task_queue='sandbox', workflows=[SandboxWorkflow]):
+        print(
+            await client.execute_workflow(
+                SandboxWorkflow.run, 'Use the shell tool to run pwd.',
+                id=f'sandbox-{uuid.uuid4()}', task_queue='sandbox',
+            )
+        )
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
+```
+
+For a lazily created sandbox outside this example, use `Coder(repo_context=False)`; by default Coder reads repository instructions when the run starts.
+
+Removing a capability while workflows using it are still running changes their replay history. Drain those workflows or use [Temporal worker versioning](https://docs.temporal.io/production-deployment/worker-deployments/worker-versioning) before deploying the change.
 
 ## API reference
 
