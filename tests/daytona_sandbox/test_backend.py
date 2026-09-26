@@ -404,6 +404,36 @@ class TestErrorsAndFilesystem:
         with pytest.raises(WorkspaceError, match='Could not create'):
             await backend.write_bytes('/pkg/a.py', b'x')
 
+    @pytest.mark.parametrize(
+        ('message', 'expected'),
+        [
+            ('Not a directory', NotADirectoryError),
+            ('Is a directory', IsADirectoryError),
+            ('Permission denied', PermissionError),
+            ('File exists', FileExistsError),
+        ],
+    )
+    async def test_toolbox_validation_errors_use_builtin_types(
+        self, fake_daytona: FakeDaytona, message: str, expected: type[OSError]
+    ) -> None:
+        backend = await started()
+        fake_daytona.sandboxes[0].fs_error = DaytonaValidationError(message, status_code=400)
+        with pytest.raises(expected):
+            await backend.stat('/bad')
+
+    async def test_symlink_loop_is_not_an_existing_file(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        fake_daytona.sandboxes[0].fs_error = DaytonaValidationError(
+            'Too many levels of symbolic links', status_code=400
+        )
+        assert await backend.exists('/loop') is False
+
+    async def test_newline_in_path_is_rejected_before_acquisition(self, fake_daytona: FakeDaytona) -> None:
+        backend = DaytonaSandboxBackend()
+        with pytest.raises(ValueError, match='newline'):
+            await backend.stat('/bad\nname')
+        assert not fake_daytona.sandboxes
+
     async def test_path_authorization_error_is_permission_denied(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         sandbox = fake_daytona.sandboxes[0]

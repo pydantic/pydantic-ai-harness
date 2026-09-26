@@ -347,6 +347,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         self._resolved_working_dir = None
 
     async def read_bytes(self, path: str) -> bytes:
+        _check_path(path)
         sandbox = await self.get_client()
         async with _translated_filesystem_error(sandbox, path):
             try:
@@ -361,6 +362,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                 raise
 
     async def write_bytes(self, path: str, data: bytes) -> None:
+        _check_path(path)
         sandbox = await self.get_client()
         parent = posixpath.dirname(path)
         if parent not in ('', '.', '/'):
@@ -374,6 +376,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             await sandbox.fs.upload_file(data, path, timeout=_REQUEST_TIMEOUT)
 
     async def stat(self, path: str) -> FileEntry:
+        _check_path(path)
         sandbox = await self.get_client()
         async with _translated_filesystem_error(sandbox, path):
             entry = await sandbox.fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
@@ -385,6 +388,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         )
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
+        _check_path(path)
         sandbox = await self.get_client()
         async with _translated_filesystem_error(sandbox, path):
             entries = await sandbox.fs.list_files(path, request_timeout=_REQUEST_TIMEOUT)
@@ -399,11 +403,13 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         ]
 
     async def make_dir(self, path: str) -> None:
+        _check_path(path)
         sandbox = await self.get_client()
         async with _translated_filesystem_error(sandbox, path):
             await sandbox.fs.create_folder(path, '755', request_timeout=_REQUEST_TIMEOUT)
 
     async def remove(self, path: str) -> None:
+        _check_path(path)
         sandbox = await self.get_client()
         async with _translated_filesystem_error(sandbox, path):
             # Whether the toolbox rejects removing a missing path is not documented; looking it up
@@ -416,6 +422,12 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             await self.stat(path)
         except FileNotFoundError:
             return False
+        except WorkspaceError as error:
+            if isinstance(error.__cause__, daytona.DaytonaValidationError) and (
+                'Too many levels of symbolic links' in str(error.__cause__)
+            ):
+                return False
+            raise
         return True
 
     async def _create(self, client: AsyncDaytona) -> AsyncSandbox:
@@ -590,6 +602,16 @@ def _translated(error: Exception, context: str, *, sandbox_id: str | None = None
     retry as transient. A not-found answer is a missing `path` for a path operation, the sandbox
     being gone for a call naming `sandbox_id`, and a refused request otherwise.
     """
+    if path is not None and isinstance(error, daytona.DaytonaValidationError):
+        # Toolbox 400s include POSIX strerror text rather than an errno field.
+        for phrase, error_type in (
+            ('Not a directory', NotADirectoryError),
+            ('Is a directory', IsADirectoryError),
+            ('Permission denied', PermissionError),
+            ('File exists', FileExistsError),
+        ):
+            if phrase in str(error):
+                return error_type(f'{phrase} in the Daytona sandbox: {path!r}')
     if path is not None and isinstance(error, daytona.DaytonaAuthorizationError):
         # Toolbox authorization is about the requested file, not the API credentials.
         return PermissionError(f'Permission denied in the Daytona sandbox: {path!r}')
@@ -650,6 +672,12 @@ async def _is_deleted(sandbox: AsyncSandbox) -> bool:
     except Exception:
         return False
     return _in_deleted_state(sandbox)
+
+
+def _check_path(path: str) -> None:
+    # Daytona's toolbox uses newline-delimited paths; embedded line breaks change the request's meaning.
+    if '\n' in path or '\r' in path:
+        raise ValueError('Daytona file paths cannot contain a newline or carriage return')
 
 
 def _mkdir_error(output: str, parent: str) -> Exception:
