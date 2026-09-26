@@ -106,6 +106,20 @@ class TestSpritesSandbox:
         with pytest.raises(ValueError, match="expected 'sprites'"):
             SpritesSandboxBackend(ref=WorkspaceRef(provider='other', id='x'))
 
+    async def test_destroy_ref_uses_id_without_attaching(self, transport: SpriteTransport) -> None:
+        provider = SpritesSandbox[None]()
+        transport.names.add('target')
+        ref = WorkspaceRef(provider='sprites', id='target')
+        backend = provider.backend(ref)
+        assert isinstance(backend, SpritesSandboxBackend)
+        assert backend.ref == ref
+        await provider.destroy(ref)
+        assert 'target' not in transport.names
+        assert transport.execs == []
+        assert transport.close_calls == 1
+        with pytest.raises(ValueError, match='provider'):
+            await provider.destroy(WorkspaceRef(provider='other', id='target'))
+
     async def test_native_handle_conflict_and_identity(self, transport: SpriteTransport) -> None:
         seed = SpritesSandboxBackend()
         native = await seed.get_client()

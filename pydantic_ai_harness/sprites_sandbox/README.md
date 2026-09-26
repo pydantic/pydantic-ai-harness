@@ -112,17 +112,14 @@ The Sprite keeps its files and installed packages after the run ends. Pydantic A
 
 ```python {names="defined"}
 from pydantic_ai.workspaces import WorkspaceRef
-from pydantic_ai_harness.sprites_sandbox import SpritesSandboxBackend
+from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
 
 
 async def delete_sprite(ref: WorkspaceRef) -> None:
-    backend = SpritesSandboxBackend(ref=ref)
-    sprite = await backend.get_client()
-    await sprite.delete()
-    await backend.aclose()
+    await SpritesSandbox().destroy(ref)
 ```
 
-`get_client()` returns the `sprites.AsyncSprite`, and `aclose()` closes the Sprites client the backend opened. See [Sprite lifecycle](https://docs.sprites.dev/concepts/lifecycle/).
+`destroy(ref)` deletes by Sprite id without attaching or waking it. Use `backend(ref)` to construct a lazy backend for an existing Sprite. See [Sprite lifecycle](https://docs.sprites.dev/concepts/lifecycle/).
 
 A failed run returns no result, so there is no ref to store. To terminate its sandbox, clean up in an `on_run_error` hook; `after_run` doesn't run when a run fails. If creation's reply was lost, the ref may identify a Sprite that is not yet visible to the API; a lookup failure does not prove it was never created:
 

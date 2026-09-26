@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -10,6 +11,7 @@ from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
+from sprites import AsyncSpritesClient
 
 from pydantic_ai_harness._workspace import innermost_backend
 from pydantic_ai_harness._workspace_provider import check_working_dir
@@ -17,7 +19,6 @@ from pydantic_ai_harness.sprites_sandbox._backend import SpritesSandboxBackend
 
 if TYPE_CHECKING:
     from pydantic_ai.agent import AgentRunResult
-    from sprites import AsyncSpritesClient
 
 
 class _SuppliedBackend(SpritesSandboxBackend):
@@ -63,6 +64,25 @@ class SpritesSandbox(AbstractCapability[AgentDepsT]):
             )
         # Checked here rather than at the first workspace operation, so a bad value fails where it is written.
         check_working_dir(self.working_dir)
+
+    def backend(self, ref: WorkspaceRef) -> SpritesSandboxBackend:
+        """Construct a lazy backend for an existing Sprite."""
+        return SpritesSandboxBackend(
+            client=self.client, ref=ref, runtime=self.runtime, working_dir=self.working_dir, env=self.env
+        )
+
+    async def destroy(self, ref: WorkspaceRef) -> None:
+        """Delete a Sprite by id without attaching or waking it."""
+        if ref.provider != 'sprites':
+            raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'sprites'")
+        if self.client is not None:
+            await self.client.destroy_sprite(ref.id)
+        else:
+            token = os.getenv('SPRITE_TOKEN')
+            if not token:
+                raise ValueError('SPRITE_TOKEN is required to delete a Sprite')
+            async with AsyncSpritesClient(token=token) as client:
+                await client.destroy_sprite(ref.id)
 
     def get_workspace(self, ctx: RunContext[AgentDepsT], *, ref: WorkspaceRef | None) -> WorkspaceBackend | None:
         """Build the backend for this run. No I/O here: it attaches or creates on first use."""
