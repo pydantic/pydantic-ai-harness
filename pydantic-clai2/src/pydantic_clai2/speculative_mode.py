@@ -210,12 +210,12 @@ async def _workspace_mount(workspace: Workspace, mode: _MountMode | None) -> Mou
     """The run's working directory at its real path, when `mode` allows a mount and the workspace is local.
 
     A sandbox plugin's workspace lives elsewhere, so a host mount would hand `pathlib` a different
-    filesystem than the one the file tools act on.
+    filesystem than the one the file tools act on. A read-only workspace is mounted read-only.
     """
     if mode is None or not _is_local(workspace):
         return None
     directory = await workspace.working_dir()
-    return MountDir(virtual_path=directory, host_path=directory, mode=mode)
+    return MountDir(virtual_path=directory, host_path=directory, mode='read-only' if workspace.read_only else mode)
 
 
 @dataclass
