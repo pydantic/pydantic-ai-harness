@@ -29,6 +29,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import anyio
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ToolReturnPart
@@ -169,6 +170,31 @@ async def test_a_timed_out_command_is_killed(client: AsyncSpritesClient) -> None
         assert str(exc_info.value) == 'Command timed out after 5 seconds'
         check = await backend.run(['sh', '-c', 'sleep 3; kill -0 "$(cat "$1")"', 'sh', pid_file], timeout=60)
         assert check.exit_code != 0
+
+
+async def test_timeout_and_cancellation_stop_foreground_child(client: AsyncSpritesClient) -> None:
+    """The fake kills its subprocess group on close; only a real Sprite can prove child death."""
+    backend = SpritesSandboxBackend(client=client)
+    native = await backend.get_client()
+    with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as refs:
+        refs.write(f'sprites sprites {native.name}\n')
+    try:
+        for mode in ('timeout', 'cancel'):
+            pid_file = f'/tmp/{_unique("child")}.pid'
+            command = f'sleep 30 & echo $! > {pid_file}; wait'
+            if mode == 'timeout':
+                with pytest.raises(WorkspaceTimeoutError):
+                    await backend.run(command, shell=True, timeout=3)
+            else:
+                with anyio.move_on_after(3) as scope:
+                    await backend.run(command, shell=True)
+                assert scope.cancelled_caught
+            check = await backend.run(['sh', '-c', 'sleep 2; kill -0 "$(cat "$1")"', 'sh', pid_file], timeout=30)
+            assert check.exit_code != 0, f'{mode}: foreground child survived'
+    finally:
+        await native.delete()
+        with pytest.raises(NotFoundError):
+            await client.get_sprite(native.name)
 
 
 async def test_timeout_keeps_stderr_and_cleans_capture(client: AsyncSpritesClient) -> None:
