@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 
@@ -196,7 +197,8 @@ async def test_failed_acquisition_can_retry(fake_e2b: FakeE2B) -> None:
     assert len(fake_e2b.create_calls) == 2
 
 
-async def test_cancelled_creation_keeps_the_sandbox_it_made(fake_e2b: FakeE2B) -> None:
+@pytest.mark.parametrize('anyio_backend', ['asyncio', 'trio'])
+async def test_cancelled_creation_keeps_the_sandbox_it_made(fake_e2b: FakeE2B, anyio_backend: str) -> None:
     # E2B can make the sandbox before its response arrives. A caller cancelled in between still
     # records it, so `ref` names it and a retry reuses it instead of creating a second one.
     fake_e2b.create_response_held = held = anyio.Event()
@@ -221,6 +223,23 @@ async def test_cancelled_creation_keeps_the_sandbox_it_made(fake_e2b: FakeE2B) -
     assert cancelled == [True]
     assert backend.ref == WorkspaceRef(provider='e2b', id='sbx-1')
     assert await backend.get_client() is fake_e2b.sandboxes[0]
+    assert len(fake_e2b.create_calls) == 1
+
+
+async def test_native_cancellation_during_creation_retains_sandbox(fake_e2b: FakeE2B) -> None:
+    fake_e2b.create_response_held = held = anyio.Event()
+    backend = E2BSandboxBackend()
+    first = asyncio.create_task(backend.get_client())
+    with anyio.fail_after(5):
+        while not fake_e2b.sandboxes:
+            await anyio.sleep(0)
+        first.cancel()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        held.set()
+        assert await backend.get_client() is fake_e2b.sandboxes[0]
+    assert backend.ref == WorkspaceRef(provider='e2b', id='sbx-1')
     assert len(fake_e2b.create_calls) == 1
 
 

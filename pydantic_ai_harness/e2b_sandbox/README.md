@@ -130,7 +130,7 @@ E2B file reads reject FIFOs rather than waiting for a writer. An ordinary read p
 
 ## Clean up
 
-The sandbox keeps running, and billing, after the run ends. Pydantic AI never kills it. Kill it with the ref you stored:
+The sandbox keeps running, and billing, after the run ends. Pydantic AI never kills it. If acquisition is cancelled while creation is in flight, the backend finishes recording the ref when E2B responds; a lost response may still leave a sandbox without a ref. Kill it with the ref you stored:
 
 ```python {names="defined"}
 from pydantic_ai.workspaces import WorkspaceRef

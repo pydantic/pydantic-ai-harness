@@ -63,11 +63,12 @@ async def _owned(**settings: object) -> AsyncGenerator[E2BSandboxBackend]:
     native = await backend.get_client()
     # Keep an audit record before using the live sandbox, even if the test fails.
     with open('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log', 'a') as refs:
-        refs.write(f'e2b-adopt e2b {native.sandbox_id}\n')
+        refs.write(f'anyio-e2b e2b {native.sandbox_id}\n')
     try:
         yield backend
     finally:
         await native.kill()
+        assert not await native.is_running()
 
 
 @pytest.fixture(scope='module')

@@ -21,6 +21,7 @@ or Go's errno text, which `_path_error` reads.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import posixpath
 import shlex
@@ -31,6 +32,7 @@ from typing import TYPE_CHECKING
 
 import anyio
 import anyio.lowlevel
+import sniffio
 from pydantic_ai.workspaces import (
     CommandResult,
     FileEntry,
@@ -207,6 +209,7 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         # sandbox's default, resolved once with `pwd -P`.
         self._resolved_working_dir: str | None = None
         self._lock = anyio.Lock()
+        self._acquisition: asyncio.Task[e2b.AsyncSandbox] | None = None
         self._template = template
         self._sandbox_timeout = sandbox_timeout
         self._env = dict(env) if env is not None else None
@@ -225,6 +228,23 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         Attaching by `ref` to a sandbox that no longer exists raises
         `WorkspaceUnavailableError`; it does not create a replacement.
         """
+        if self._ref is None and sniffio.current_async_library() == 'asyncio':
+            # An AnyIO shield cannot stop native Task.cancel(); the backend owns this task
+            # until it has recorded the paid sandbox, even if every caller leaves.
+            task = self._acquisition
+            if task is None:
+                task = asyncio.create_task(self._acquire_detached(), name='e2b-sandbox-acquisition')
+                self._acquisition = task
+            return await asyncio.shield(task)
+        return await self._acquire()
+
+    async def _acquire_detached(self) -> e2b.AsyncSandbox:
+        try:
+            return await self._acquire()
+        finally:
+            self._acquisition = None
+
+    async def _acquire(self) -> e2b.AsyncSandbox:
         async with self._lock:
             if (sandbox := self._sandbox) is not None:
                 return sandbox
@@ -367,9 +387,9 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     async def _create(self) -> e2b.AsyncSandbox:
         """Provision a fresh E2B sandbox.
 
-        The call is shielded: E2B may create the sandbox before its response arrives, and a
-        cancellation then would lose the only handle to a billed sandbox. `_CREATE_TIMEOUT`
-        still bounds it, so cancellation waits at most that long. A request E2B refuses (an
+        E2B may create the sandbox before its response arrives. The asyncio acquisition task
+        survives caller cancellation, and the Trio path shields this call; `_CREATE_TIMEOUT`
+        bounds the SDK request, though a response lost after remote creation cannot be recovered. A request E2B refuses (an
         unknown template, a lifetime over the plan's limit) is `WorkspaceUnavailableError`:
         retrying it cannot succeed.
         """
