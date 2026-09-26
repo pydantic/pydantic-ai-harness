@@ -12,6 +12,19 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceCommand, WorkspaceRef, WorkspaceTimeoutError
 
 
+def safe_credential_reason(error: Exception) -> str:
+    """Classify a provider credential rejection without copying its possibly secret-bearing text."""
+    message = str(error).lower()
+    # Provider errors can embed the rejected token; emit only fixed labels.
+    if 'malformed' in message or 'invalid format' in message:
+        return 'API key is malformed'
+    if 'expired' in message:
+        return 'Credential expired'
+    if 'missing' in message or 'not configured' in message:
+        return 'Credential missing'
+    return 'Credentials rejected'
+
+
 class SandboxProvider(Protocol):
     """Provider-specific ref lifecycle, without leasing or implicitly attaching a sandbox."""
 

@@ -20,8 +20,17 @@ from pydantic_ai_harness._workspace_provider import (
     check_working_dir,
     command_argv,
     command_deadline,
+    safe_credential_reason,
     stop_shielded,
 )
+
+
+def test_credential_reason_keeps_safe_context_without_echoing_key() -> None:
+    assert (
+        safe_credential_reason(ValueError('API key is malformed: expected the e2b_ prefix')) == 'API key is malformed'
+    )
+    assert safe_credential_reason(ValueError('token abc-secret-123 expired')) == 'Credential expired'
+    assert 'abc-secret-123' not in safe_credential_reason(ValueError('token abc-secret-123 rejected'))
 
 
 @pytest.mark.anyio
