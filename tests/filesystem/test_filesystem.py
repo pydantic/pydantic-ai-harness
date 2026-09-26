@@ -46,6 +46,7 @@ from pydantic_ai_harness.filesystem._toolset import (
     _is_binary,
     _sanitize_recoverable_error,
 )
+from pydantic_ai_harness.shell._toolset import ShellToolset
 
 from .._tool_calls import call_tool, call_tools
 
@@ -641,6 +642,15 @@ class TestReadFile:
 
 
 class TestWriteFile:
+    async def test_default_patterns_protect_nested_env_and_git(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
+        (fs_root / 'subdir' / '.git').mkdir()
+        toolset = FileSystem[None]().get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        for path in ('subdir/.env', 'subdir/.env.local', 'subdir/.git/config'):
+            with pytest.raises(ModelRetry, match='protected'):
+                await toolset.write_file(path, 'secret', workspace=ws)
+            assert not (fs_root / path).exists()
+
     async def test_write_new_file(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
     ) -> None:
@@ -659,6 +669,14 @@ class TestWriteFile:
     ) -> None:
         with pytest.raises(ModelRetry, match="Path 'subdir' exists and is not a regular file"):
             await toolset.write_file('subdir', 'content', workspace=ws)
+
+    async def test_write_missing_parent_does_not_suggest_unregistered_tool(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        with pytest.raises(ModelRetry) as error:
+            await toolset.write_file('missing/file.txt', 'hello', workspace=ws)
+        assert 'create_directory' not in str(error.value)
+        assert 'parent directory' in str(error.value).lower()
 
     async def test_write_nonexistent_parent_raises(
         self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
@@ -1988,8 +2006,8 @@ class TestFileSystemCapability:
 
     def test_read_only_defaults(self) -> None:
         fs = FileSystem()
-        assert '.git/*' in fs.read_only_patterns
-        assert '.env' in fs.read_only_patterns
+        assert '**/.git/*' in fs.read_only_patterns
+        assert '**/.env' in fs.read_only_patterns
 
     def test_protected_patterns_is_a_deprecated_alias(self) -> None:
         with pytest.warns(
@@ -2134,6 +2152,27 @@ class TestModelSafeRecoverableErrors:
 
 class TestWorkspaceBackends:
     """Behavior that depends on what the attached workspace can do, or on how it fails."""
+
+    async def test_shell_hides_tools_on_filesystem_only_workspace(self, fs_root: Path) -> None:
+        shell: ShellToolset[None] = ShellToolset(
+            allowed_commands=[],
+            denied_commands=[],
+            denied_operators=[],
+            default_timeout=10,
+            max_output_chars=1000,
+            persist_cwd=False,
+            allow_interactive=False,
+        )
+        ctx = RunContext[None](
+            deps=None,
+            model=TestModel(),
+            usage=RunUsage(),
+            prompt=None,
+            messages=[],
+            run_step=0,
+            workspace=Workspace(FilesystemOnlyWorkspace(fs_root)),
+        )
+        assert await shell.get_tools(ctx) == {}
 
     async def test_filesystem_only_backend_serves_the_default_tools(self, fs_root: Path) -> None:
         toolset = FileSystem[None](root_dir=fs_root).get_toolset()

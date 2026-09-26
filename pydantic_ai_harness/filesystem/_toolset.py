@@ -902,7 +902,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         except FileNotFoundError as e:
             parent_rel = posixpath.relpath(parent, scope.root)
             raise FileNotFoundError(
-                f"Parent directory '{parent_rel}' does not exist. Use create_directory first."
+                f"Parent directory '{parent_rel}' does not exist. Create the parent directory first."
             ) from e
         except NotADirectoryError as e:
             raise ModelRetry(f'Path {path!r} has a parent that is not a directory.') from e
