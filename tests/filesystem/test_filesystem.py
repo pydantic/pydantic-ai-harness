@@ -393,10 +393,10 @@ class TestPathSecurity:
 class TestRootDir:
     """`root_dir` is resolved on the run's first file operation, against the run's workspace."""
 
-    @pytest.fixture(autouse=True)
-    def asyncio_only(self, anyio_backend: object) -> None:
-        if str(anyio_backend) != 'asyncio':
-            pytest.skip('Agent.run requires asyncio event loop')
+    @pytest.fixture
+    def anyio_backend(self) -> str:
+        # Agent.run needs asyncio.
+        return 'asyncio'
 
     async def test_root_above_the_working_directory_reaches_a_sibling(self, tmp_path: Path) -> None:
         (tmp_path / 'project').mkdir()
@@ -1948,9 +1948,8 @@ class TestFileSystemCapability:
         everything = FileSystem[None](root_dir=tmp_path, read_only=True, tools=FILE_SYSTEM_TOOL_NAMES)
         assert set(await everything.get_toolset().get_tools(context)) == READ_ONLY_TOOL_NAMES
 
+    @pytest.mark.parametrize('anyio_backend', ['asyncio'])  # Agent.run needs asyncio
     async def test_read_only_workspace_hides_write_tools(self, tmp_path: Path, anyio_backend: object) -> None:
-        if str(anyio_backend) != 'asyncio':
-            pytest.skip('Agent.run requires asyncio event loop')
         model = TestModel(call_tools=[])
         capabilities: list[AbstractCapability[None]] = [
             FileSystem[None](root_dir=tmp_path, tools=FILE_SYSTEM_TOOL_NAMES),
@@ -1964,9 +1963,8 @@ class TestFileSystemCapability:
         )
 
     @pytest.mark.parametrize('read_only', [True, False], ids=['read-only', 'filesystem-only'])
+    @pytest.mark.parametrize('anyio_backend', ['asyncio'])  # Agent.run needs asyncio
     async def test_ripgrep_tools_need_commands(self, tmp_path: Path, anyio_backend: object, read_only: bool) -> None:
-        if str(anyio_backend) != 'asyncio':
-            pytest.skip('Agent.run requires asyncio event loop')
         (tmp_path / 'notes.txt').write_text('needle\n')
         workspace: WorkspaceBackend = (
             ReadOnlyWorkspace(Workspace(LocalWorkspaceBackend(tmp_path)))
@@ -1985,10 +1983,9 @@ class TestFileSystemCapability:
         )
         assert await call_tool([capability], 'find_files', {'pattern': '*.txt'}, workspace=workspace) == 'notes.txt'
 
+    @pytest.mark.parametrize('anyio_backend', ['asyncio'])  # Agent.run needs asyncio
     async def test_read_only_refusal_is_a_failed_tool_result(self, tmp_path: Path, anyio_backend: object) -> None:
         """A mutation a read-only workspace refuses fails the call; it is not a permission retry."""
-        if str(anyio_backend) != 'asyncio':
-            pytest.skip('Agent.run requires asyncio event loop')
         capability = FileSystem[None](root_dir=tmp_path)
         # The environment refuses writes without advertising `read_only`, so the tools stay offered.
         calls: list[tuple[str, dict[str, object]]] = [
@@ -2264,12 +2261,11 @@ class TestWorkspaceBackends:
         else:
             assert 'nested.py' in await toolset.search_files('x', workspace=FilesystemOnlyWorkspace(workspace))
 
+    @pytest.mark.parametrize('anyio_backend', ['asyncio'])  # Agent.run needs asyncio
     async def test_read_only_refusal_of_a_read_is_not_a_permission_retry(
         self, fs_root: Path, anyio_backend: object
     ) -> None:
         """`WorkspaceReadOnlyError` is a `PermissionError`; the announcement read must not treat it as one."""
-        if str(anyio_backend) != 'asyncio':
-            pytest.skip('Agent.run requires asyncio event loop')
         workspace = FailingWorkspace(fs_root, {'read_bytes': WorkspaceReadOnlyError('refused')}, where='hello.txt')
         result = await call_tool(
             [FileSystem[None](root_dir=fs_root)],
@@ -2298,9 +2294,8 @@ class TestWorkspaceBackends:
     ) -> None:
         assert await toolset.search_files('x', path='missing', workspace=ws) == 'No matches found.'
 
+    @pytest.mark.parametrize('anyio_backend', ['asyncio'])  # Agent.run needs asyncio
     async def test_file_info_tool(self, fs_root: Path, anyio_backend: object, ws: LocalWorkspaceBackend) -> None:
-        if str(anyio_backend) != 'asyncio':
-            pytest.skip('Agent.run requires asyncio event loop')
         result = await call_tool([FileSystem[None](root_dir=fs_root)], 'file_info', {'path': 'hello.txt'}, workspace=ws)
         assert 'size: 14 bytes' in result
 
@@ -2350,11 +2345,10 @@ class TestWalkBounds:
         assert result.splitlines()[0] == 'No matches found.'
         assert result.splitlines()[1].startswith('[... walk cut short after ')
 
+    @pytest.mark.parametrize('anyio_backend', ['asyncio'])  # Agent.run needs asyncio
     async def test_cut_walk_marks_the_event_truncated(
         self, loop_root: Path, anyio_backend: object, ws: LocalWorkspaceBackend
     ) -> None:
-        if str(anyio_backend) != 'asyncio':
-            pytest.skip('Agent.run requires asyncio event loop')
         seen: list[FilesSearchedEvent] = []
 
         class Recorder(AbstractCapability[None]):
