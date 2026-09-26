@@ -165,24 +165,24 @@ class _DaytonaProcess:
     async def wait(self) -> CommandResult:
         marker_waiter = asyncio.create_task(self._ended.wait())
         try:
-            done, _ = await asyncio.wait((self._logs, marker_waiter), return_when=asyncio.FIRST_COMPLETED)
-            if self._logs in done:
-                await self._logs  # preserve stream errors even if the websocket closed early
-            else:
-                # A detached child may hold the follow websocket open after the wrapper exits.
+            while True:
+                done, _ = await asyncio.wait(
+                    (self._logs, marker_waiter), timeout=0.2, return_when=asyncio.FIRST_COMPLETED
+                )
+                if self._logs in done:
+                    await self._logs  # preserve stream errors even if the websocket closed early
+                # The real follow websocket may withhold even the wrapper's markers until a
+                # detached child closes its inherited descriptors; status is authoritative.
+                command = await self._process.get_session_command(
+                    self._session_id, self._command_id, request_timeout=_REQUEST_TIMEOUT
+                )
+                if command.exit_code is not None or self._logs in done:
+                    break
+                if marker_waiter in done:
+                    await anyio.sleep(0.1)
+            if not self._logs.done():
                 self._logs.cancel()
                 await asyncio.gather(self._logs, return_exceptions=True)
-            command = await self._process.get_session_command(
-                self._session_id, self._command_id, request_timeout=_REQUEST_TIMEOUT
-            )
-            if command.exit_code is None and self._ended.is_set():
-                # The follow stream can deliver the last marker before Daytona persists exit status.
-                with anyio.move_on_after(_REQUEST_TIMEOUT):
-                    while command.exit_code is None:
-                        await anyio.sleep(0.1)
-                        command = await self._process.get_session_command(
-                            self._session_id, self._command_id, request_timeout=_REQUEST_TIMEOUT
-                        )
         except Exception as error:
             await _raise_failure(self._sandbox, error, 'Could not read the command result')
         finally:

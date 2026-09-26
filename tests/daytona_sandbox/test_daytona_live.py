@@ -22,6 +22,7 @@ Run locally:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
@@ -82,6 +83,15 @@ async def _owned(client: daytona.AsyncDaytona) -> AsyncGenerator[DaytonaSandboxB
                 await native.delete()
         except daytona.DaytonaNotFoundError:
             pass
+        # Daytona accepts deletion asynchronously; confirm this test's ID has disappeared.
+        for _ in range(60):
+            try:
+                await client.get(native.id)
+            except daytona.DaytonaNotFoundError:
+                break
+            await asyncio.sleep(1)
+        else:
+            raise AssertionError(f'Daytona sandbox {native.id} was not deleted')
 
 
 async def test_creates_a_fresh_sandbox_and_runs_a_command(client: daytona.AsyncDaytona) -> None:
@@ -156,6 +166,17 @@ async def test_timeout_stops_only_its_command(client: daytona.AsyncDaytona) -> N
             await backend.run(f'sleep 5; touch {marker}', shell=True, timeout=1)
         assert (await backend.run(['true'], timeout=30)).exit_code == 0
         assert not await backend.exists(marker)
+
+
+async def test_detached_child_does_not_hold_command_result(client: daytona.AsyncDaytona) -> None:
+    """Check whether a real follow websocket remains open with inherited stdout descriptors."""
+    async with _owned(client) as backend:
+        try:
+            result = await backend.run('sleep 4 & echo ready', shell=True, timeout=3)
+        except WorkspaceTimeoutError:
+            pytest.xfail('Daytona does not report command completion before inherited output closes')
+        assert result.exit_code == 0
+        assert result.stdout.strip() == 'ready'
 
 
 async def test_reattach_to_a_deleted_sandbox_is_unavailable(client: daytona.AsyncDaytona) -> None:
