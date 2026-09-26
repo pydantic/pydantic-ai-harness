@@ -275,6 +275,46 @@ class TestRun:
             for handle in fake_e2b.sandboxes[0].commands.handles:
                 handle.close()
 
+    async def test_cancel_before_remote_start_fences_late_start_and_retry(
+        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        fake_e2b.host_root = tmp_path
+        backend = await started()
+        commands = fake_e2b.sandboxes[0].commands
+        original = commands.run
+        entered = anyio.Event()
+        release = anyio.Event()
+        launches: list[str] = []
+
+        async def delayed(cmd: str, **kwargs: Any) -> Any:
+            if cmd.startswith('setsid '):
+                launches.append(cmd)
+                entered.set()
+                await release.wait()
+            return await original(cmd, **kwargs)
+
+        monkeypatch.setattr(commands, 'run', delayed)
+        marker = tmp_path / 'late-marker'
+        try:
+            for _ in range(2):
+                entered = anyio.Event()
+                release = anyio.Event()
+                task = asyncio.create_task(backend.run(f'touch {marker}', shell=True))
+                await entered.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                release.set()
+                # Simulate a lost SDK acknowledgement: the remote RPC still executes later.
+                handle = await original(launches[-1], background=True)
+                assert isinstance(handle, FakeCommandHandle)
+                with pytest.raises(Exception, match='143'):
+                    await handle.wait()
+            assert not marker.exists()
+        finally:
+            for handle in commands.handles:
+                handle.close()
+
     async def test_argv_is_quoted_into_one_shell_word_string(self, fake_e2b: FakeE2B) -> None:
         # E2B has no argv form: every command goes through `/bin/bash -l -c`, so the quoting
         # is what keeps an argument with a space or a `$` one literal word.

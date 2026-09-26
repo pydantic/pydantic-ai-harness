@@ -440,19 +440,25 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
         # The token is allocated before the start RPC: a lost ACK must not make the
         # remote group undiscoverable. setsid isolates this invocation from other jobs.
         pgid_file = f'/tmp/pydantic-e2b-pgid-{uuid.uuid4().hex}'
-        launch = f'echo $$ > {pgid_file}; exec {line}'
+        claim = f'{pgid_file}.claim'
+        # The launcher and canceller race on one atomic mkdir. A cancelled late launcher
+        # exits before user code; if launch wins, the canceller waits for its registration.
+        # Keep a cancellation claim when the start ACK is lost so a late RPC stays fenced.
+        launch = f'mkdir {claim} 2>/dev/null || exit 143; echo "$$:$(ps -o lstart= -p $$)" > {pgid_file}; exec {line}'
         launch = f'setsid sh -c {shlex.quote(launch)}'
 
         async def stop() -> None:
             # A new SDK command can run even when the original output stream is blocked.
-            # Poll briefly for a late start ACK; a start later than this grace remains uncertain.
             script = (
-                f'i=0; while [ ! -s {pgid_file} ] && [ "$i" -lt 12 ]; do '
+                f'if mkdir {claim} 2>/dev/null; then exit 0; fi; '
+                f'i=0; while [ ! -s {pgid_file} ] && [ "$i" -lt 100 ]; do '
                 'sleep 0.1; i=$((i+1)); done; '
-                f'if [ -s {pgid_file} ]; then p=$(cat {pgid_file}); '
+                f'if [ -s {pgid_file} ]; then record=$(cat {pgid_file}); p=${{record%%:*}}; '
+                # Match the leader's creation time too, so PID reuse cannot signal another run.
+                'if [ "$(ps -o pgid= -p "$p" 2>/dev/null | tr -d " ")" = "$p" ] && '
+                '[ "$(ps -o lstart= -p "$p")" = "${record#*:}" ]; then '
                 'kill -TERM -"$p" 2>/dev/null || true; sleep 0.1; '
-                'kill -KILL -"$p" 2>/dev/null || true; fi; '
-                f'rm -f {pgid_file}'
+                'kill -KILL -"$p" 2>/dev/null || true; fi; fi'
             )
             try:
                 stopper = await sandbox.commands.run(
@@ -501,13 +507,14 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
                     raise translated from error
             raise
         finally:
-            # The token file is no longer useful once the command has exited or stop
-            # completed. If the start RPC is still in flight, stop's poll is the rendezvous.
-            with anyio.move_on_after(0.5, shield=True):
-                try:
-                    await sandbox.files.remove(pgid_file)
-                except Exception:
-                    pass
+            # Only a completed start and result proves no late RPC can use this claim.
+            if result is not None:
+                with anyio.move_on_after(0.5, shield=True):
+                    try:
+                        await sandbox.files.remove(pgid_file)
+                        await sandbox.files.remove(claim)
+                    except Exception:
+                        pass
 
 
 async def _is_running(sandbox: e2b.AsyncSandbox) -> bool:
