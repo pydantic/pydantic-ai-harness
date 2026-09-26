@@ -324,6 +324,10 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     async def read_bytes(self, path: str) -> bytes:
         absolute_path('path', path)
         sandbox = await self.get_client()
+        # Modal's filesystem read opens FIFOs in blocking mode and its FileInfo omits the
+        # file kind. Probe through the sandbox shell before entering that unbounded SDK read.
+        if (await self.run(['test', '-p', path], timeout=_INTERNAL_EXEC_TIMEOUT)).exit_code == 0:
+            raise OSError(f'Cannot read FIFO in the Modal sandbox: {path!r}')
         async with self._mapped_errors(sandbox, f'Could not read {path!r}', path):
             return await sandbox.filesystem.read_bytes.aio(path)
 

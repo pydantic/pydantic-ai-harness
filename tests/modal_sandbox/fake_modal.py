@@ -13,6 +13,7 @@ production failures.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import posixpath
 import shutil
@@ -95,6 +96,12 @@ class _GatedCreate(_AioCallable):
         if self._control.create_reply_error is not None:
             raise self._control.create_reply_error
         return created
+
+
+class _HostExec(_AioCallable):
+    async def aio(self, *args: Any, **kwargs: Any) -> Any:
+        # subprocess.run blocks; let stop exec and cancellation run while the host command waits.
+        return await asyncio.to_thread(self._fn, *args, **kwargs)
 
 
 class _HangingExec(_AioCallable):
@@ -337,6 +344,8 @@ def _host_errors(remote_path: str) -> Generator[None]:
         raise FakeSandboxFilesystemNotFoundError(f'No such file or directory: {remote_path}') from e
     except IsADirectoryError as e:
         raise FakeSandboxFilesystemIsADirectoryError(f'Is a directory: {remote_path}') from e
+    except NotADirectoryError as e:
+        raise FakeSandboxFilesystemNotADirectoryError(f'Not a directory: {remote_path}') from e
 
 
 class _HostFilesystem:
@@ -360,7 +369,11 @@ class _HostFilesystem:
 
     def _write_bytes(self, data: bytes, remote_path: str) -> None:
         with _host_errors(remote_path):
-            Path(remote_path).parent.mkdir(parents=True, exist_ok=True)
+            try:
+                Path(remote_path).parent.mkdir(parents=True, exist_ok=True)
+            except FileExistsError as e:
+                # mkdir on a file parent reports EEXIST on macOS, but traversal is ENOTDIR.
+                raise FakeSandboxFilesystemNotADirectoryError(f'Not a directory: {remote_path}') from e
             Path(remote_path).write_bytes(data)
 
     def _list_files(self, remote_path: str) -> list[FileInfo]:
@@ -418,7 +431,7 @@ class FakeSandbox:
         self.workdir: str | None = None
         self._filesystem: _FakeFilesystem | _HostFilesystem = _FakeFilesystem(self)
         if control.host_root is not None:
-            self.exec = _AioCallable(self._host_exec)
+            self.exec = _HostExec(self._host_exec)
             self._filesystem = _HostFilesystem()
 
     @property
@@ -443,11 +456,12 @@ class FakeSandbox:
         # Runs the command on the host, rooted at the sandbox's working directory, so the
         # conformance suite sees real exit codes, output, `cwd`, `env`, and deadlines.
         argv = list(args)
-        # The fake host lacks Linux `setsid`; emulate the wrapper while preserving command
-        # records for tests of the public argv contract.
-        if argv[:4] == ['setsid', '-w', 'sh', '-c']:
+        # macOS lacks util-linux setsid. Start the wrapper in its own group so the
+        # backend's stop exec can signal the same group it would signal on Modal.
+        isolated = argv[:4] == ['setsid', '-w', 'sh', '-c']
+        if isolated:
             self.start_scripts.append(argv[4])
-            argv = argv[8:]
+            argv = argv[2:]
         self.exec_calls.append(ExecCall(argv=argv, timeout=timeout, text=text, workdir=workdir, env=env))
         if self.shutting_down:
             raise FakeConflictError('Modal Sandbox is shutting down.')
@@ -455,7 +469,15 @@ class FakeSandbox:
         variables = {**os.environ, **{key: value for key, value in (env or {}).items() if value is not None}}
         cwd = workdir or self.workdir or str(self._control.host_root)
         try:
-            completed = subprocess.run(argv, cwd=cwd, env=variables, capture_output=True, timeout=timeout, check=False)
+            completed = subprocess.run(
+                argv,
+                cwd=cwd,
+                env=variables,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+                start_new_session=isolated,
+            )
         except subprocess.TimeoutExpired as expired:
             # Modal reports a command stopped at its deadline with exit code -1.
             return _FakeProcess(expired.stdout or b'', expired.stderr or b'', -1, None, False)
