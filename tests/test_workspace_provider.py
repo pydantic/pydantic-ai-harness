@@ -145,6 +145,22 @@ async def test_native_repeated_cancel_cannot_abandon_stop(anyio_backend: str) ->
     await exercise(None, 2)
 
 
+@pytest.mark.anyio
+async def test_stop_cleanup_finishes_before_stop_shielded_returns() -> None:
+    events: list[str] = []
+
+    async def stop() -> None:
+        try:
+            await anyio.sleep(100)
+        finally:
+            # Providers log "may still be running" here once the grace cuts them off.
+            events.append('stop cleanup')
+
+    await stop_shielded(stop, grace=0.05)
+    events.append('returned')
+    assert events == ['stop cleanup', 'returned']
+
+
 def test_absolute_path_passes_none_and_absolute_paths_through() -> None:
     assert absolute_path('workdir', None) is None
     assert absolute_path('workdir', '/home/user/../project') == '/home/user/../project'
