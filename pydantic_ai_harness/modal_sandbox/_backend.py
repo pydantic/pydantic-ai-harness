@@ -267,6 +267,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         # canonical absolute path, which only `pwd -P` in the sandbox can give.
         self._resolved_working_dir: str | None = None
         self._lock = anyio.Lock()
+        # Keep the detached acquisition alive after a caller's native Task.cancel().
         self._acquisition: asyncio.Task[modal.Sandbox] | None = None
         self._create_name: str | None = None
         # The default Debian image includes setsid; custom and attached images need a probe.
@@ -380,13 +381,17 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         async with self._mapped_errors(sandbox, f'Could not list {path!r}', path):
             entries = await sandbox.filesystem.list_files.aio(path)
             # Limit simultaneous SDK requests without making large link-heavy listings serial.
-            limit = asyncio.Semaphore(8)
+            limit = anyio.Semaphore(8)
+            results: list[FileEntry | None] = [None] * len(entries)
 
-            async def resolve(entry: modal.types.FileInfo) -> FileEntry:
+            async def resolve(index: int, entry: modal.types.FileInfo) -> None:
                 async with limit:
-                    return await _file_entry(sandbox, entry, posixpath.join(path, entry.name))
+                    results[index] = await _file_entry(sandbox, entry, posixpath.join(path, entry.name))
 
-            return await asyncio.gather(*(resolve(entry) for entry in entries))
+            async with anyio.create_task_group() as group:
+                for index, entry in enumerate(entries):
+                    group.start_soon(resolve, index, entry)
+            return [result for result in results if result is not None]
 
     async def make_dir(self, path: str) -> None:
         absolute_path('path', path)
@@ -639,51 +644,21 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                 # cancellation/error and leave its ref available for explicit cleanup.
                 logger.warning('Could not stop Modal command in sandbox %s', sandbox.object_id)
 
-        tasks: tuple[asyncio.Task[str], asyncio.Task[str], asyncio.Task[int]] | None = None
         snapshots = ['', '']
 
         def captured() -> tuple[str, str]:
             return snapshots[0], snapshots[1]
 
-        async def read(reader: modal.io_streams.StreamReader[bytes], index: int) -> str:
-            decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
-            pieces: list[str] = []
-            async for chunk in reader:
-                text = decoder.decode(chunk)
-                pieces.append(text)
-                # Keep a bounded snapshot even when Modal interrupts a streaming read.
-                snapshots[index] = (snapshots[index] + text)[-_PARTIAL_OUTPUT_LIMIT:]
-            tail = decoder.decode(b'', final=True)
-            pieces.append(tail)
-            snapshots[index] = (snapshots[index] + tail)[-_PARTIAL_OUTPUT_LIMIT:]
-            return ''.join(pieces)
-
-        try:
-            async with command_deadline(timeout, stop=stop, output=captured):
-                async with self._mapped_errors(sandbox, 'Command could not run in the workspace'):
-                    process = await sandbox.exec.aio(
-                        *wrapped, timeout=deadline, workdir=workdir, env=variables, text=False
-                    )
-                tasks = (
-                    asyncio.create_task(read(process.stdout, 0)),
-                    asyncio.create_task(read(process.stderr, 1)),
-                    asyncio.create_task(process.wait.aio()),
-                )
-                try:
-                    stdout, stderr, exit_code = await asyncio.gather(*tasks)
-                except Exception as error:
-                    mapped = await _failure(sandbox, error, 'Could not read the command result')
-                    if mapped is not None:
-                        raise mapped from error
-                    raise
-        except BaseException:
-            if tasks is not None:
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                with anyio.CancelScope(shield=True):
-                    await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+        async with command_deadline(timeout, stop=stop, output=captured):
+            async with self._mapped_errors(sandbox, 'Command could not run in the workspace'):
+                process = await sandbox.exec.aio(*wrapped, timeout=deadline, workdir=workdir, env=variables, text=False)
+            try:
+                stdout, stderr, exit_code = await _collect_output(process, snapshots)
+            except Exception as error:
+                mapped = await _failure(sandbox, error, 'Could not read the command result')
+                if mapped is not None:
+                    raise mapped from error
+                raise
 
         elapsed = time.monotonic() - server_started_at
         if deadline is not None and (
@@ -691,6 +666,60 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         ):
             raise WorkspaceTimeoutError(timed_out, stdout=stdout, stderr=stderr)
         return CommandResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
+
+
+async def _collect_output(
+    process: modal.container_process.ContainerProcess[bytes], snapshots: list[str]
+) -> tuple[str, str, int]:
+    """Drain both streams and wait as one owned operation."""
+
+    async def read(reader: modal.io_streams.StreamReader[bytes], index: int) -> str:
+        decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+        pieces: list[str] = []
+        async for chunk in reader:
+            text = decoder.decode(chunk)
+            pieces.append(text)
+            # Keep a bounded snapshot even when Modal interrupts a streaming read.
+            snapshots[index] = (snapshots[index] + text)[-_PARTIAL_OUTPUT_LIMIT:]
+        tail = decoder.decode(b'', final=True)
+        pieces.append(tail)
+        snapshots[index] = (snapshots[index] + tail)[-_PARTIAL_OUTPUT_LIMIT:]
+        return ''.join(pieces)
+
+    stdout, stderr, exit_code = '', '', 0
+    read_error: Exception | None = None
+
+    async with anyio.create_task_group() as group:
+
+        async def collect(reader: modal.io_streams.StreamReader[bytes], index: int) -> None:
+            nonlocal stdout, stderr, read_error
+            try:
+                result = await read(reader, index)
+                if index == 0:
+                    stdout = result
+                else:
+                    stderr = result
+            except Exception as error:
+                # Cancel the other reader and wait together; preserve the SDK error
+                # without wrapping a single failure in an ExceptionGroup.
+                read_error = error
+                group.cancel_scope.cancel()
+
+        async def wait() -> None:
+            nonlocal exit_code, read_error
+            try:
+                exit_code = await process.wait.aio()
+            except Exception as error:
+                read_error = error
+                group.cancel_scope.cancel()
+
+        group.start_soon(collect, process.stdout, 0)
+        group.start_soon(collect, process.stderr, 1)
+        group.start_soon(wait)
+    if read_error is not None:
+        raise read_error
+
+    return stdout, stderr, exit_code
 
 
 async def _check_stop(process: modal.container_process.ContainerProcess[bytes], sandbox_id: str) -> None:
