@@ -7,16 +7,24 @@ import json
 import re
 import warnings
 from collections.abc import Generator
+from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
+import anyio
 import pytest
 from dbos import DBOS, DBOSConfig
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.durable_exec.dbos import DBOSDurability
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, PydanticAIWorkflow, TemporalDurability
 from pydantic_ai.messages import ModelMessage, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+from temporalio import workflow
+from temporalio.client import Client
+from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import Worker
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.filesystem import FileChangeRequestEvent, FileSystem
@@ -166,3 +174,77 @@ def _assert_results(root: Path, capability: str, outputs: list[str], vetoes: lis
         assert str(root / 'dir') in outputs[0] and str(root / 'dir') in outputs[1]
         assert 'ID: ' in outputs[2]
         assert '[status: finished]' in outputs[-1]
+
+
+_restart_ready: anyio.Event | None = None
+_restart_continue: anyio.Event | None = None
+
+
+async def _restart_model(messages: list[ModelMessage], info: object) -> ModelResponse:
+    returns = [p for m in messages for p in m.parts if isinstance(p, ToolReturnPart)]
+    if not returns:
+        return ModelResponse(parts=[ToolCallPart('run_command', {'command': 'cd dir && pwd'})])
+    if len(returns) == 1:
+        assert _restart_ready is not None and _restart_continue is not None
+        _restart_ready.set()
+        # The worker stops here, after the first durable command and before the next model turn.
+        await _restart_continue.wait()
+        return ModelResponse(parts=[ToolCallPart('run_command', {'command': 'pwd'})])
+    return ModelResponse(parts=[TextPart('done')])
+
+
+async def _restart_stream(messages: list[ModelMessage], info: object):
+    for index, part in enumerate((await _restart_model(messages, info)).parts):
+        if isinstance(part, TextPart):
+            yield part.content
+        elif isinstance(part, ToolCallPart):
+            yield {index: DeltaToolCall(name=part.tool_name, json_args=json.dumps(part.args))}
+
+
+@workflow.defn
+class ShellRestartWorkflow(PydanticAIWorkflow):
+    agent: Agent[None, str]
+
+    @workflow.run
+    async def run(self) -> list[str]:
+        result = await self.agent.run('go')
+        return [str(p.content) for m in result.all_messages() for p in m.parts if isinstance(p, ToolReturnPart)]
+
+
+@pytest.mark.anyio
+async def test_temporal_new_worker_keeps_shell_cwd(tmp_path: Path) -> None:
+    global _restart_ready, _restart_continue
+    (tmp_path / 'dir').mkdir()
+    _restart_ready = anyio.Event()
+    _restart_continue = anyio.Event()
+    agent = Agent(
+        FunctionModel(_restart_model, stream_function=_restart_stream),
+        name='restart_shell',
+        capabilities=[LocalWorkspace(tmp_path), Shell(persist_cwd=True), TemporalDurability()],
+    )
+    ShellRestartWorkflow.agent = agent
+    ShellRestartWorkflow.__pydantic_ai_agents__ = [agent]
+    runner = SandboxedWorkflowRunner(
+        restrictions=SandboxRestrictions.default.with_passthrough_modules(__name__, 'annotated_types')
+    )
+    queue = f'restart-{uuid4().hex}'
+    try:
+        async with await WorkflowEnvironment.start_local() as env:  # pyright: ignore[reportUnknownMemberType]
+            client = await Client.connect(env.client.service_client.config.target_host, plugins=[PydanticAIPlugin()])
+            async with Worker(client, task_queue=queue, workflows=[ShellRestartWorkflow], workflow_runner=runner):
+                handle = await client.start_workflow(
+                    ShellRestartWorkflow.run, id=queue, task_queue=queue, execution_timeout=timedelta(seconds=30)
+                )
+                with anyio.fail_after(20):
+                    await _restart_ready.wait()
+            # Unblock the model activity only after the old worker is gone; the new worker executes call 2.
+            assert _restart_continue is not None
+            _restart_continue.set()
+            async with Worker(client, task_queue=queue, workflows=[ShellRestartWorkflow], workflow_runner=runner):
+                with anyio.fail_after(20):
+                    outputs = await handle.result()
+        assert str(tmp_path / 'dir') in outputs[0]
+        assert str(tmp_path / 'dir') in outputs[1]
+    finally:
+        _restart_ready = None
+        _restart_continue = None
