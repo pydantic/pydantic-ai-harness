@@ -1689,6 +1689,15 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if not scope.checks_realpath:
                 allowed.update(paths)
                 return
+            if all(record.real_path is not None for record in records):
+                allowed.update(
+                    posixpath.normpath(posixpath.join(cwd, record.path))
+                    for record in records
+                    if record.real_path is not None
+                    and _contains(scope.root, record.real_path)
+                    and self._is_accessible(posixpath.relpath(record.real_path, scope.root))
+                )
+                return
             # Resolve all candidates in the workspace in one command; never trust a lexical
             # path alone, since an in-root symlink can expose an out-of-root target.
             for offset in range(0, len(paths), 500):

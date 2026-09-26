@@ -54,10 +54,10 @@ async def test_no_rg_uses_one_command_and_preserves_ignores(tmp_path: Path) -> N
     tools = FileSystem[None](tools=['grep', 'list_files']).get_toolset()
     assert isinstance(tools, FileSystemToolset)
     assert await tools.grep('needle', workspace=workspace) == 'src/visible.py:1:needle'
-    assert backend.commands == 3  # probe, search and one batch of path checks
+    assert backend.commands == 2  # probe then POSIX search with canonical paths
     assert backend.reads == 0
     assert await tools.list_files(glob='*.py', workspace=workspace) == 'src/visible.py'
-    assert backend.commands == 5
+    assert backend.commands == 3
     assert backend.reads == 0
 
 
@@ -105,13 +105,24 @@ async def test_many_search_results_use_batched_path_checks(tmp_path: Path) -> No
         assert backend.realpaths <= 2
 
 
+async def test_large_listing_checks_paths_in_search_command(tmp_path: Path) -> None:
+    for index in range(600):
+        (tmp_path / f'{index:03}.txt').write_text('needle\n')
+    backend = CountingBackend(tmp_path)
+    tools = FileSystem[None](root_dir=tmp_path, max_find_results=600).get_toolset()
+    assert isinstance(tools, FileSystemToolset)
+    assert len((await tools.list_files(workspace=backend)).splitlines()) == 600
+    assert backend.commands <= 3
+    assert backend.reads == 0
+
+
 async def test_first_search_files_uses_command_not_walker(tmp_path: Path) -> None:
     (tmp_path / 'visible.txt').write_text('needle\n')
     backend = CountingBackend(tmp_path)
     tools = FileSystem[None](root_dir=tmp_path).get_toolset()
     assert isinstance(tools, FileSystemToolset)
     assert await tools.search_files('needle', workspace=backend) == 'visible.txt:1:needle'
-    assert backend.commands == 3  # probe rg, search, then batch path checks
+    assert backend.commands == 2  # probe rg, then search with canonical paths
     assert backend.reads == 0
 
 

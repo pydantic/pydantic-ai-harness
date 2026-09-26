@@ -50,6 +50,8 @@ class Record:
     """The path as `rg` printed it, relative to the directory it was run in."""
     text: str
     """Empty for a file listing; otherwise `<line>:<text>` for a match or `<line>-<text>` for context."""
+    real_path: str | None = None
+    """POSIX search may supply the canonical path alongside each candidate."""
 
 
 async def run_ripgrep(

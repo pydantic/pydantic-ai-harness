@@ -62,8 +62,11 @@ async def run_posix_search(
         + (" ! -path . -name '.*' -prune -o " if not include_hidden else ' ')
         + '-type f -print0; fi'
     )
+    # Carry the canonical path with each candidate, so a single search command can
+    # authorize thousands of files without per-result sandbox round trips.
+    canonical = 'real=$(realpath -- "$file" && printf .) || continue; real=${real%.}; real=${real%?}; '
     if pattern is None:
-        processing = 'xargs -0 sh -c \'for file do printf "%s\\0" "$file"; done\' sh'
+        processing = "xargs -0 sh -c 'for file do " + canonical + 'printf "%s\\0%s\\0" "$file" "$real"; done\' sh'
     else:
         flags = '-nIhF' if literal else '-nIhE'
         if ignore_case:
@@ -74,9 +77,10 @@ async def run_posix_search(
         # must not be turned into a plausible empty result by xargs or the output pipe.
         processing = (
             "xargs -0 sh -c 'tmp=$(mktemp) || exit 2; pattern=$1; shift; for file do "
-            f'grep {flags} -e "$pattern" -- "$file" > "$tmp"; code=$?; '
+            + canonical
+            + f'grep {flags} -e "$pattern" -- "$file" > "$tmp"; code=$?; '
             'if [ "$code" -gt 1 ]; then rm -f -- "$tmp"; exit "$code"; fi; '
-            'while IFS= read -r line; do printf "%s\\0%s\\n" "$file" "$line"; done < "$tmp"; '
+            'while IFS= read -r line; do printf "%s\\0%s\\0%s\\n" "$file" "$real" "$line"; done < "$tmp"; '
             'done; rm -f -- "$tmp"\' sh ' + shlex.quote(pattern)
         )
     # Capture enumeration's status before sorting: a failed git/find must not masquerade
@@ -95,26 +99,8 @@ async def run_posix_search(
     output = result.stdout
     cut = len(output.encode('utf-8', errors='surrogateescape')) >= _MAX_OUTPUT_BYTES
     results: list[_T] = []
-    records: list[Record] = []
-    start = 0
-    while (end := output.find('\0', start)) >= 0:
-        path = output[start:end]
-        if pattern is None:
-            text = ''
-            start = end + 1
-        else:
-            line_end = output.find('\n', end + 1)
-            if line_end < 0:
-                cut = True
-                break
-            text = output[end + 1 : line_end]
-            start = line_end + 1
-        if start - end > _MAX_RECORD_BYTES:
-            cut = True
-            break
-        records.append(Record(path=path, text=text))
-    if start < len(output):
-        cut = True
+    records, incomplete = _parse_records(output, listing=pattern is None)
+    cut |= incomplete
     if prepare is not None:
         await prepare(records)
     for record in records:
@@ -125,3 +111,31 @@ async def run_posix_search(
                 break
             results.append(kept)
     return results, cut
+
+
+def _parse_records(output: str, *, listing: bool) -> tuple[list[Record], bool]:
+    records: list[Record] = []
+    start = 0
+    incomplete = False
+    while (end := output.find('\0', start)) >= 0:
+        path = output[start:end]
+        real_end = output.find('\0', end + 1)
+        if real_end < 0:
+            incomplete = True
+            break
+        real_path = output[end + 1 : real_end]
+        if listing:
+            text = ''
+            start = real_end + 1
+        else:
+            line_end = output.find('\n', real_end + 1)
+            if line_end < 0:
+                incomplete = True
+                break
+            text = output[real_end + 1 : line_end]
+            start = line_end + 1
+        if start - end > _MAX_RECORD_BYTES:
+            incomplete = True
+            break
+        records.append(Record(path=path, text=text, real_path=real_path))
+    return records, incomplete or start < len(output)
