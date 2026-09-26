@@ -229,7 +229,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'sprites'")
         if workspace is not None and ref is not None:
             raise ValueError('pass either `workspace` or `ref`, not both')
-        self._sandbox = workspace
+        self._sprite = workspace
         self._ref = ref if workspace is None else WorkspaceRef(provider='sprites', id=workspace.name)
         self._new_sprite_name = f'pydantic-ai-{uuid.uuid4().hex}'
         self._runtime = runtime
@@ -251,15 +251,13 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         This is the Sprite handle, not the `AsyncSpritesClient` passed as `client=`. A handle
         obtained before `aclose()` belongs to the closed client; call this again for a fresh one.
 
-        The only place `_client` and `_sandbox` are read, so nothing can reach an
-        unhydrated one: both stay optional and every other method comes through here.
         The lock serializes concurrent first uses -- two callers each creating a Sprite
         would leave the loser billed and unreferenced. Attaching by `ref` to a Sprite that
         no longer exists raises `WorkspaceUnavailableError`; it does not create a replacement.
         """
         async with self._lock:
-            if (workspace := self._sandbox) is not None:
-                return workspace
+            if (sprite := self._sprite) is not None:
+                return sprite
 
             client = self._client
             if client is None:
@@ -275,13 +273,13 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             async def acquire() -> AsyncSprite:
                 with anyio.move_on_after(_ACQUIRE_TIMEOUT):
                     if ref is not None:
-                        workspace = await client.get_sprite(ref.id)
+                        sprite = await client.get_sprite(ref.id)
                     else:
-                        workspace = await client.create_sprite(self._new_sprite_name, runtime=self._runtime)
+                        sprite = await client.create_sprite(self._new_sprite_name, runtime=self._runtime)
                     # Recorded as soon as the SDK returns, so a cancelled caller still leaves it named.
-                    self._sandbox = workspace
-                    self._ref = WorkspaceRef(provider='sprites', id=workspace.name)
-                    return workspace
+                    self._sprite = sprite
+                    self._ref = WorkspaceRef(provider='sprites', id=sprite.name)
+                    return sprite
                 # Only our own bound lands here; an SDK `TimeoutError` propagates as raised. A stalled
                 # control plane is a transport failure, which propagates for a retry;
                 # `WorkspaceTimeoutError` is reserved for command deadlines.
@@ -323,7 +321,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                     logger.warning('Could not close Sprites SDK client: %r', error)
                 else:
                     self._client = None
-                    self._sandbox = None
+                    self._sprite = None
 
         # Finished even when the caller (a run being cancelled) is cancelled meanwhile.
         await _run_to_completion(close)
@@ -461,8 +459,8 @@ def _split_output(stdout: bytes, stderr: bytes, marker: str) -> tuple[str, str]:
     there is, and the command's stderr is lost with its unlinked file. Anything on the stderr stream itself came
     from the wrapper and is kept.
     """
-    head, found, tail = _decode(stdout).partition(f'\n{marker}\n')
-    return head, (tail + _decode(stderr)) if found else _decode(stderr)
+    head, _, tail = _decode(stdout).partition(f'\n{marker}\n')
+    return head, tail + _decode(stderr)
 
 
 def _with_env(args: list[str], env: dict[str, str]) -> list[str]:
