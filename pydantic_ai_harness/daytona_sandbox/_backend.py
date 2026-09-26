@@ -55,11 +55,10 @@ from pydantic_ai.workspaces import (
     WorkspaceBackend,
     WorkspaceError,
     WorkspaceRef,
-    WorkspaceTimeoutError,
     WorkspaceUnavailableError,
 )
 
-from pydantic_ai_harness._workspace_provider import absolute_path, command_argv
+from pydantic_ai_harness._workspace_provider import absolute_path, command_argv, command_deadline
 
 if TYPE_CHECKING:
     from daytona import AsyncDaytona, AsyncSandbox
@@ -542,22 +541,24 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         # Acquiring the sandbox has its own bound; the timeout is the command's alone.
         sandbox = await self.get_client()
         process: _DaytonaProcess | None = None
-        with anyio.move_on_after(timeout) as scope:
-            try:
-                process = await self._start(sandbox, argv, shell=False, cwd=checked_cwd, env=env)
-                result = await process.wait()
-                if checked_cwd is not None and f'{process.marker}-cwd' in result.stderr:
-                    raise FileNotFoundError(checked_cwd)
-                return result
-            finally:
-                if process is not None:
-                    await process.kill()
-        assert scope.cancel_called
-        raise WorkspaceTimeoutError(
-            f'Command timed out after {timeout:g} seconds.',
-            stdout=_until_marker(process.stdout, process.marker) if process is not None else '',
-            stderr=_until_marker(process.stderr, process.marker) if process is not None else '',
-        )
+
+        async def stop() -> None:
+            if process is not None:
+                await process.kill()
+
+        def output() -> tuple[str, str]:
+            if process is None:
+                return '', ''
+            return _until_marker(process.stdout, process.marker), _until_marker(process.stderr, process.marker)
+
+        async with command_deadline(timeout, stop=stop, output=output):
+            process = await self._start(sandbox, argv, shell=False, cwd=checked_cwd, env=env)
+            result = await process.wait()
+            if checked_cwd is not None and f'{process.marker}-cwd' in result.stderr:
+                raise FileNotFoundError(checked_cwd)
+        # A finished command still needs its session removed without killing the sandbox.
+        await stop()
+        return result
 
     async def _start(
         self,

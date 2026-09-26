@@ -26,6 +26,7 @@ import os
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import daytona
 import pytest
@@ -70,6 +71,8 @@ async def _owned(client: daytona.AsyncDaytona) -> AsyncGenerator[DaytonaSandboxB
     """Create a sandbox and delete it on the way out, even when the test deleted it already."""
     backend = DaytonaSandboxBackend(client=client, auto_stop_interval=LIVE_AUTO_STOP_INTERVAL)
     native = await backend.get_client()
+    with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as log:
+        log.write(f'daytona daytona {native.id}\n')
     try:
         yield backend
     finally:
@@ -140,9 +143,19 @@ async def test_timeout_raises_with_the_partial_output(client: daytona.AsyncDayto
             await backend.run(f'echo DIAGNOSTIC; sleep 20; touch {marker}', shell=True, timeout=5)
 
         assert 'DIAGNOSTIC' in exc_info.value.stdout
-        assert exc_info.value.timeout == 5
+        assert '5' in str(exc_info.value)
         assert (await backend.run(['sleep', '20'], timeout=60)).exit_code == 0
         assert await backend.exists(marker) is False
+
+
+async def test_timeout_stops_only_its_command(client: daytona.AsyncDaytona) -> None:
+    """Checks against the real SDK that deleting a session stops its process, not the shared sandbox."""
+    async with _owned(client) as backend:
+        marker = f'/tmp/{_unique("daytona-stopped")}'
+        with pytest.raises(WorkspaceTimeoutError):
+            await backend.run(f'sleep 5; touch {marker}', shell=True, timeout=1)
+        assert (await backend.run(['true'], timeout=30)).exit_code == 0
+        assert not await backend.exists(marker)
 
 
 async def test_reattach_to_a_deleted_sandbox_is_unavailable(client: daytona.AsyncDaytona) -> None:

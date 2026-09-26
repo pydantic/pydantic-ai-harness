@@ -791,6 +791,13 @@ def test_network_block_warning_names_essential_services(page: str) -> None:
     assert 'network-limits' in text
 
 
+@pytest.mark.parametrize('page', ['docs/daytona-sandbox.md', 'pydantic_ai_harness/daytona_sandbox/README.md'])
+def test_timeout_and_default_user_guidance(page: str) -> None:
+    text = (Path(__file__).parents[2] / page).read_text()
+    assert '## What a timeout stops' in text
+    assert 'non-root `daytona`' in text and '/home/daytona' in text
+
+
 def test_client_lifetime_docstrings_describe_sdk_reopening() -> None:
     assert 'lazily reopens' in (_backend.__doc__ or '')
     assert 'leaks an aiohttp session' in (DaytonaSandboxBackend.aclose.__doc__ or '')

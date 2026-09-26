@@ -138,6 +138,10 @@ async def terminate_failed_run(ctx: RunContext[None], *, error: BaseException) -
 agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(), Coder(), hooks])
 ```
 
+## What a timeout stops
+
+A `run(timeout=...)` deadline starts after sandbox acquisition. Daytona deletes the command session to stop its foreground work, leaving the sandbox available for other commands; session deletion can take around 10 seconds. `WorkspaceTimeoutError` carries partial stdout and stderr. Cancellation also attempts to stop the session. If Daytona cannot confirm deletion, the command may still be running: inspect or delete the sandbox yourself. `timeout=None` removes the command deadline, not Daytona's idle auto-stop or transport limits.
+
 ## Configuration
 
 | Option | What it does |
@@ -145,7 +149,7 @@ agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(), Coder
 | `snapshot` | Daytona snapshot a new sandbox starts from. Default: Daytona's. |
 | `auto_stop_interval` | Idle minutes before Daytona stops a new sandbox; `0` disables it. Default: Daytona's, 15 minutes. |
 | `network_block_all` | Block DNS and non-allowlisted outbound traffic from a new sandbox. Daytona still allows package registries, GitHub, and AI APIs, so this is not an exfiltration boundary. See [Daytona's network limits](https://www.daytona.io/docs/en/network-limits/). Default: `False`. |
-| `working_dir` | Absolute directory commands start in and relative paths resolve against. Default: the sandbox's own. |
+| `working_dir` | Absolute directory commands start in and relative paths resolve against. Default: `/home/daytona` for the non-root `daytona` user in Daytona's default image. Prefer relative paths or set `working_dir=` for portable code. |
 | `env` | Environment variables every command gets. Nothing from your machine's environment reaches the sandbox. |
 | `client` | An `AsyncDaytona` client to share across runs. You close it; `DaytonaSandbox` never does. |
 
