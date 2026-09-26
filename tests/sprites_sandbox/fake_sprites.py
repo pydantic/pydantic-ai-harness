@@ -6,7 +6,7 @@ are replaced. `SpriteTransport.connect` stands in for the `websockets` `connect`
 calls, so the SDK builds the real exec URL, sends stdin EOF, and reads the real frames. Commands run
 for real: an exec socket runs the URL's `cmd` argv in a local subprocess, in its `dir`
 (`SpriteTransport.root` by default) and this process's environment, so commands share one host
-directory and deadlines are real. Output streams back as STDOUT and STDERR frames, then an EXIT
+directory and deadlines are real. Output streams back as STDOUT frames (both pipes), then an EXIT
 frame. Closing the socket kills a command that is still running, as a positive
 `max_run_after_disconnect` makes the Sprite do (the fake does it at once instead of after that time).
 
@@ -44,35 +44,34 @@ from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
 
-_STDOUT, _STDERR, _EXIT, _STDIN_EOF = 1, 2, 3, 4
+_STDOUT, _EXIT, _STDIN_EOF = 1, 3, 4
 
 
 class FakeSocketTransport:
-    def __init__(self, sprites: SpriteTransport) -> None:
-        self.sprites = sprites
+    def __init__(self, sprite_transport: SpriteTransport) -> None:
+        self.sprite_transport = sprite_transport
 
     def abort(self) -> None:
-        self.sprites.aborted += 1
+        self.sprite_transport.aborted += 1
 
 
 class FakeExecSocket:
     """One exec WebSocket, from the handshake to the EXIT frame."""
 
-    def __init__(self, sprites: SpriteTransport, url: str) -> None:
-        self.sprites = sprites
+    def __init__(self, sprite_transport: SpriteTransport, url: str) -> None:
+        self.sprite_transport = sprite_transport
         self.query = parse_qs(urlsplit(url).query)
-        self.transport = FakeSocketTransport(sprites)
+        self.transport = FakeSocketTransport(sprite_transport)
         # Read by the SDK when the stream ends without an EXIT frame.
         self.close_code: int | None = None
         self.close_reason: str | None = None
-        self.sent: list[bytes] = []
         # Set on the client's stdin EOF; output printed before then is not streamed.
         self.attached = False
         self._frames: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._loop = asyncio.get_running_loop()
         self.process = subprocess.Popen(
             self.query['cmd'],
-            cwd=self.query.get('dir', [str(sprites.root)])[0],
+            cwd=self.query.get('dir', [str(sprite_transport.root)])[0],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -86,25 +85,24 @@ class FakeExecSocket:
         process = self.process
         assert process.stdout is not None and process.stderr is not None
         readers = [
-            threading.Thread(target=self._pump, args=(process.stdout, _STDOUT)),
-            threading.Thread(target=self._pump, args=(process.stderr, _STDERR)),
+            threading.Thread(target=self._pump, args=(process.stdout,)),
+            threading.Thread(target=self._pump, args=(process.stderr,)),
         ]
         for reader in readers:
             reader.start()
         code = process.wait()
         for reader in readers:
             reader.join()
-        if self.sprites.connection_dropped:
+        if self.sprite_transport.connection_dropped:
             self.close_code = 1006
             self._send(None)
         else:
-            exit_code = code if self.sprites.exit_override is None else self.sprites.exit_override
+            exit_code = code if self.sprite_transport.exit_override is None else self.sprite_transport.exit_override
             self._send(bytes([_EXIT, exit_code % 256]))
 
-    def _pump(self, source: IO[bytes], stream: int) -> None:
+    def _pump(self, source: IO[bytes]) -> None:
         # The live Sprite delivered stderr on the stdout stream in some runs and not others; this
         # takes the worst case every time, so the backend must not rely on the stderr stream.
-        del stream
         while chunk := os.read(source.fileno(), 4096):
             if self.attached:  # pragma: no branch - only an ungated command prints before it attaches
                 self._send(bytes([_STDOUT]) + chunk)
@@ -123,24 +121,23 @@ class FakeExecSocket:
         return frame
 
     async def send(self, message: bytes) -> None:
-        self.sent.append(message)
         # The backend sends no stdin data, only the EOF the SDK sends once the socket is open.
         assert message == bytes([_STDIN_EOF]) and self.process.stdin is not None
-        if self.sprites.release_stdin_eof is not None:
-            await self.sprites.release_stdin_eof.wait()
+        if self.sprite_transport.release_stdin_eof is not None:
+            await self.sprite_transport.release_stdin_eof.wait()
         self.attached = True
         self.process.stdin.close()
 
     async def close(self) -> None:
-        sprites = self.sprites
-        sprites.exec_close_started.set()
-        if sprites.release_exec_close is not None:
-            await sprites.release_exec_close.wait()
-        if sprites.exec_close_hang:
+        sprite_transport = self.sprite_transport
+        sprite_transport.exec_close_started.set()
+        if sprite_transport.release_exec_close is not None:
+            await sprite_transport.release_exec_close.wait()
+        if sprite_transport.exec_close_hang:
             await anyio.sleep(1)
-        if sprites.exec_close_error is not None:
-            raise sprites.exec_close_error
-        sprites.exec_closes += 1
+        if sprite_transport.exec_close_error is not None:
+            raise sprite_transport.exec_close_error
+        sprite_transport.exec_closes += 1
         if self.process.poll() is None:
             os.killpg(self.process.pid, signal.SIGKILL)
         self._frames.put_nowait(None)
@@ -244,11 +241,12 @@ class SpriteTransport:
         if not entries:
             raise FileNotFoundError_('stat', str(path))
         entry = entries[0]
+        entry_stat = entry.stat()
         return FileStat(
             name=entry.name,
             path=str(entry),
-            size=entry.stat().st_size,
-            mode=f'{entry.stat().st_mode & 0o777:o}',
+            size=entry_stat.st_size,
+            mode=f'{entry_stat.st_mode & 0o777:o}',
             mod_time=datetime.now(),
             is_dir=entry.is_dir(),
         )

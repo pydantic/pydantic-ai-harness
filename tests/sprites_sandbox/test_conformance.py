@@ -4,8 +4,8 @@
 local subprocesses under a temporary host directory. `TestLiveSpritesSandboxBackend` runs the same
 rules against a real Sprite and is gated like `test_sprites_live.py`.
 
-The backend implements `SupportsCommands` only; the suite derives the filesystem operations, and
-with them its reattach and destroy rules, through `Workspace`, so those rules run here too.
+The backend implements `SupportsCommands` and `SupportsFilesystem`, so the suite's command,
+filesystem, reattach, and destroy rules all run here.
 """
 
 from __future__ import annotations

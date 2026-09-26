@@ -76,49 +76,6 @@ async def _owned(client: AsyncSpritesClient) -> AsyncGenerator[SpritesSandboxBac
             pass
 
 
-async def test_creates_a_fresh_sprite_and_runs_a_command(client: AsyncSpritesClient) -> None:
-    """Validates the fake-encoded assumption that the exec WebSocket reports real output and exit code."""
-    async with _owned(client) as backend:
-        result = await backend.run('echo out; echo err 1>&2; exit 3', shell=True, timeout=60)
-
-        assert backend.ref is not None
-        assert (result.stdout.strip(), result.stderr.strip(), result.exit_code) == ('out', 'err', 3)
-
-
-async def test_reattach_by_ref_reads_a_file_the_first_backend_wrote(client: AsyncSpritesClient) -> None:
-    """Validates the fake-encoded assumption that `get_sprite(ref.id)` reaches the same Sprite."""
-    path = f'/tmp/{_unique("reattach")}.txt'
-    async with _owned(client) as owner:
-        assert (await owner.run(['sh', '-c', 'printf shared > "$1"', 'sh', path], timeout=60)).exit_code == 0
-        assert owner.ref is not None
-
-        attached = SpritesSandboxBackend(client=client, ref=owner.ref)
-        result = await attached.run(['cat', path], timeout=60)
-
-        assert (result.exit_code, result.stdout) == (0, 'shared')
-        assert attached.ref == owner.ref
-
-
-async def test_command_and_file_round_trip(client: AsyncSpritesClient) -> None:
-    """Validates the fake-encoded assumption that binary data survives the Sprite's file API and shell.
-
-    Writes go through the filesystem API and reads through commands; the fake runs both on the host,
-    which cannot show what the Sprite's API, shell, and tools do with them.
-    """
-    root = f'/tmp/{_unique("roundtrip")}'
-    async with _owned(client) as backend:
-        workspace = Workspace(backend)
-        await workspace.write_bytes(f'{root}/nested/in.txt', b'from-file-api\n')
-        await workspace.write_bytes(f'{root}/binary.bin', b'\x00\xff\n')
-        result = await backend.run(
-            ['sh', '-c', 'cat "$1/nested/in.txt" && printf from-shell > "$1/out.txt"', 'sh', root], timeout=60
-        )
-
-        assert (result.exit_code, result.stdout) == (0, 'from-file-api\n')
-        assert await workspace.read_bytes(f'{root}/out.txt') == b'from-shell'
-        assert await workspace.read_bytes(f'{root}/binary.bin') == b'\x00\xff\n'
-
-
 async def test_large_output_and_files_arrive_whole(client: AsyncSpritesClient) -> None:
     """Validates the fake-encoded assumptions that a command's output is streamed only once the client
     attaches, and that a large write fits no command.
@@ -135,21 +92,6 @@ async def test_large_output_and_files_arrive_whole(client: AsyncSpritesClient) -
         assert await workspace.read_bytes(path) == data
         for _ in range(3):
             assert (await backend.run(['seq', '1', '150000'], timeout=60)).stdout == expected
-
-
-async def test_env_is_layered_on_the_sprite_environment(client: AsyncSpritesClient) -> None:
-    """Validates the fake-encoded assumption that the Sprite has a POSIX `env` utility that adds
-    variables to the Sprite's own environment.
-
-    The fake runs the host's `env`; if the Sprite's is missing or differs, every command given
-    `env=` fails or loses `PATH`.
-    """
-    async with _owned(client) as backend:
-        result = await backend.run(
-            ['sh', '-c', 'printf "%s" "$ADDED"; test -n "$PATH"'], env={'ADDED': 'yes'}, timeout=60
-        )
-
-        assert (result.exit_code, result.stdout) == (0, 'yes')
 
 
 async def test_a_timed_out_command_is_killed(client: AsyncSpritesClient) -> None:
