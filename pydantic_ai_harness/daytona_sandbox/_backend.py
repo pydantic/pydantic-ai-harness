@@ -582,6 +582,9 @@ def _translated(error: Exception, context: str, *, sandbox_id: str | None = None
     retry as transient. A not-found answer is a missing `path` for a path operation, the sandbox
     being gone for a call naming `sandbox_id`, and a refused request otherwise.
     """
+    if path is not None and isinstance(error, daytona.DaytonaAuthorizationError):
+        # Toolbox authorization is about the requested file, not the API credentials.
+        return PermissionError(f'Permission denied in the Daytona sandbox: {path!r}')
     if isinstance(error, (daytona.DaytonaAuthenticationError, daytona.DaytonaAuthorizationError)):
         return WorkspaceUnavailableError(_AUTH_MESSAGE)
     if isinstance(error, daytona.DaytonaNotFoundError):

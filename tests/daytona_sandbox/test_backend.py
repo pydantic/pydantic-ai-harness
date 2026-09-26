@@ -381,6 +381,13 @@ class TestErrorsAndFilesystem:
         with pytest.raises(WorkspaceError, match='Could not create'):
             await backend.write_bytes('/pkg/a.py', b'x')
 
+    async def test_path_authorization_error_is_permission_denied(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.fs_error = DaytonaAuthorizationError('permission denied', status_code=403)
+        with pytest.raises(PermissionError, match='Permission denied'):
+            await backend.stat('/private')
+
     async def test_rejected_credentials_on_filesystem_calls_are_unavailable(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         sandbox = fake_daytona.sandboxes[0]
