@@ -407,6 +407,13 @@ class TestSkillValidation:
         with pytest.raises(ValueError, match=error):
             await _run(Skills('skills'), tmp_path)
 
+    async def test_non_utf8_skill_names_its_file(self, tmp_path: Path) -> None:
+        directory = tmp_path / 'skills' / 'latin'
+        directory.mkdir(parents=True)
+        (directory / 'SKILL.md').write_bytes(b'---\ndescription: \xe9\n---\n')
+        with pytest.raises(ValueError, match=r'SKILL.md is not valid UTF-8'):
+            await _run(Skills('skills'), tmp_path)
+
     async def test_multiline_description_continues_on_indented_lines(self, tmp_path: Path) -> None:
         # An indented `---` inside a block scalar is not a frontmatter delimiter.
         _write_skill(tmp_path / 'skills', 'multiline', frontmatter='description: |\n  First line.\n  ---\n  Last line.')
