@@ -40,6 +40,8 @@ class SandboxProvider(Protocol):
 
 
 _pending_stops: set[asyncio.Task[None]] = set()
+# Extra wait past the stop grace so a stop cut off at the deadline can finish its cleanup.
+_STOP_SETTLE = 0.5
 
 
 async def stop_shielded(stop: Callable[[], Awaitable[object]], *, grace: float = 2.0) -> None:
@@ -63,7 +65,9 @@ async def stop_shielded(stop: Callable[[], Awaitable[object]], *, grace: float =
         child = asyncio.create_task(bounded_stop())
         _pending_stops.add(child)
         child.add_done_callback(_pending_stops.discard)
-        with anyio.move_on_after(grace, shield=True):
+        # The child already bounds itself by `grace`; the margin lets its cleanup (e.g. a
+        # provider's "may still be running" log) finish before we return, instead of racing it.
+        with anyio.move_on_after(grace + _STOP_SETTLE, shield=True):
             await asyncio.shield(child)
     else:
         with anyio.move_on_after(grace, shield=True):
