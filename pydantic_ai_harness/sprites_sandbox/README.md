@@ -158,26 +158,64 @@ agent = Agent('anthropic:claude-opus-5-5', capabilities=[SpritesSandbox(), Coder
 
 If the exec socket drops after connection but before an exit status arrives, the command may have run. This raises a non-retryable workspace error rather than replaying a potentially non-idempotent command. Connection failures before the socket opens remain retryable.
 
-Under [Temporal](https://pydantic.dev/docs/ai/capabilities/durable_execution/temporal/) or another durable engine, create one client when the worker starts and pass it as `client=`. Otherwise every activity opens its own client and never closes it.
+A shared client is created at module import so activities on this worker reuse it. Close it when the worker stops. Run a Temporal dev server on `localhost:7233` first.
 
-```python {names="defined"}
+```python
+import asyncio
 import os
+import uuid
+
 
 from pydantic_ai import Agent
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, PydanticAIWorkflow, TemporalDurability
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
-from sprites import AsyncSpritesClient
+from temporalio import workflow
+from temporalio.client import Client
+from temporalio.worker import Worker
+
+# The provider SDK must not be re-imported inside Temporal's restricted workflow sandbox.
+with workflow.unsafe.imports_passed_through():
+    from sprites import AsyncSpritesClient
+
+CLIENT = AsyncSpritesClient(token=os.environ['SPRITE_TOKEN'])
+agent = Agent(
+    'anthropic:claude-opus-5-5',
+    name='sprites_coder',
+    capabilities=[SpritesSandbox(client=CLIENT), Coder(), TemporalDurability()],
+)
 
 
-async def run_worker() -> None:
-    async with AsyncSpritesClient(token=os.environ['SPRITE_TOKEN']) as client:
-        agent = Agent('anthropic:claude-opus-5-5', capabilities=[SpritesSandbox(client=client), Coder()])
-        ...  # wrap `agent` for Temporal and start the worker
+@workflow.defn
+class SandboxWorkflow(PydanticAIWorkflow):
+    __pydantic_ai_agents__ = [agent]
+
+    @workflow.run
+    async def run(self, prompt: str) -> str:
+        return (await agent.run(prompt)).output
+
+
+async def main() -> None:
+    client = await Client.connect('localhost:7233', plugins=[PydanticAIPlugin()])
+    async with CLIENT:
+        async with Worker(client, task_queue='sandbox', workflows=[SandboxWorkflow]):
+            print(
+                await client.execute_workflow(
+                    SandboxWorkflow.run,
+                    'Use the shell tool to run pwd.',
+                    id=f'sandbox-{uuid.uuid4()}', task_queue='sandbox',
+                )
+            )
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
 ```
 
-[`Coder`](../coder/#durable-execution), [`Shell`](../shell/#durable-execution), and [`FileSystem`](../filesystem/#durable-execution) work under DBOS, Temporal, and Prefect; each page's durable execution section lists what they can't do yet.
+`Coder`, `Shell`, and `FileSystem` work under DBOS, Temporal and Prefect. See the [Coder](https://pydantic.dev/docs/ai/harness/coder/#durable-execution), [Shell](https://pydantic.dev/docs/ai/harness/shell/#durable-execution), and [FileSystem](https://pydantic.dev/docs/ai/harness/filesystem/#durable-execution) guides for engine-specific limits.
 
-See [Workspaces: Durable execution](https://pydantic.dev/docs/ai/core-concepts/workspace/#durable-execution) for how workspaces work under durable engines.
+Removing a capability while workflows using it are still running changes their replay history. Drain those workflows or use [Temporal worker versioning](https://docs.temporal.io/production-deployment/worker-deployments/worker-versioning) before deploying the change.
+
 
 ## API reference
 
