@@ -172,7 +172,7 @@ async def run_worker() -> None:
         ...  # wrap `agent` for Temporal and start the worker
 ```
 
-`Coder`, `Shell`, and `FileSystem` work under DBOS, but not yet under Temporal or Prefect.
+`Coder`, `Shell`, and `FileSystem` work under DBOS, Temporal and Prefect. See the [Coder](https://pydantic.dev/docs/ai/harness/coder/#durable-execution), [Shell](https://pydantic.dev/docs/ai/harness/shell/#durable-execution), and [FileSystem](https://pydantic.dev/docs/ai/harness/filesystem/#durable-execution) guides for engine-specific limits (including activity event delivery and persisted shell state). Keep a shared `client=` alive for the worker's lifetime.
 
 See [Workspaces: Durable execution](https://pydantic.dev/docs/ai/core-concepts/workspace/#durable-execution) for how workspaces work under durable engines.
 

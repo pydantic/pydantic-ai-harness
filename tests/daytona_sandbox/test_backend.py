@@ -927,6 +927,14 @@ def test_timeout_and_default_user_guidance(page: str) -> None:
     assert 'non-root `daytona`' in text and '/home/daytona' in text
 
 
+@pytest.mark.parametrize('page', ['docs/daytona-sandbox.md', 'pydantic_ai_harness/daytona_sandbox/README.md'])
+def test_durable_capabilities_match_their_documented_engines(page: str) -> None:
+    text = (Path(__file__).parents[2] / page).read_text()
+    assert 'not yet under Temporal or Prefect' not in text
+    assert 'DBOS, Temporal and Prefect' in text
+    assert 'shell.md#durable-execution' in text or '/shell/#durable-execution' in text
+
+
 def test_client_lifetime_docstrings_describe_sdk_reopening() -> None:
     assert 'lazily reopens' in (_backend.__doc__ or '')
     assert 'leaks an aiohttp session' in (DaytonaSandboxBackend.aclose.__doc__ or '')
