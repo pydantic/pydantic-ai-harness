@@ -176,6 +176,14 @@ def test_capability_takes_the_base_class_options_and_the_creation_settings() -> 
     assert capability.get_instructions() is None
 
 
+def test_modal_docs_name_default_user_and_directory() -> None:
+    for path in (Path('docs/modal-sandbox.md'), Path('pydantic_ai_harness/modal_sandbox/README.md')):
+        text = path.read_text()
+        assert 'root user' in text
+        assert 'relative paths' in text
+        assert "working_dir='/workspace'" in text
+
+
 def test_modal_docs_distinguish_command_timeout_from_sandbox_lifetime() -> None:
     for path in (Path('docs/modal-sandbox.md'), Path('pydantic_ai_harness/modal_sandbox/README.md')):
         text = path.read_text()
