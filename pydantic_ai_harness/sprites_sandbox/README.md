@@ -161,17 +161,18 @@ Under [Temporal](https://pydantic.dev/docs/ai/capabilities/durable_execution/tem
 import os
 
 from pydantic_ai import Agent
+from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
 from sprites import AsyncSpritesClient
 
 
 async def run_worker() -> None:
     async with AsyncSpritesClient(token=os.environ['SPRITE_TOKEN']) as client:
-        agent = Agent('anthropic:claude-opus-5-5', capabilities=[SpritesSandbox(client=client)])
+        agent = Agent('anthropic:claude-opus-5-5', capabilities=[SpritesSandbox(client=client), Coder()])
         ...  # wrap `agent` for Temporal and start the worker
 ```
 
-`Coder`, `Shell`, and `FileSystem` work under DBOS, but not yet under Temporal or Prefect.
+[`Coder`](../coder/#durable-execution), [`Shell`](../shell/#durable-execution), and [`FileSystem`](../filesystem/#durable-execution) work under DBOS, Temporal, and Prefect; each page's durable execution section lists what they can't do yet.
 
 See [Workspaces: Durable execution](https://pydantic.dev/docs/ai/core-concepts/workspace/#durable-execution) for how workspaces work under durable engines.
 
