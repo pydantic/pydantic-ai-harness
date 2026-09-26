@@ -473,6 +473,7 @@ class FileStore:
             )
         self._own = secondary_workspace(workspace, 'FileStore')
         self._run: Workspace | None = None
+        self._real_root: tuple[str, str] | None = None
         self._lock = anyio.Lock()
 
     def bind(self, workspace: Workspace) -> FileStore:
@@ -482,8 +483,11 @@ class FileStore:
         """
         if self._own is not None:
             return self
+        if self._run is workspace:
+            return self
         bound = copy(self)
         bound._run = workspace
+        bound._real_root = None
         return bound
 
     def _workspace(self) -> Workspace:
@@ -505,10 +509,13 @@ class FileStore:
             raise ValueError(f'{path!r} is reserved for FileStore bookkeeping')
         return posixpath.join(root, path)
 
-    @staticmethod
-    async def _confine(workspace: Workspace, root: str, target: str, path: str) -> str:
+    async def _confine(self, workspace: Workspace, root: str, target: str, path: str) -> str:
         """Return `target` with symlinks resolved, refusing one that leaves the store directory."""
-        return FileStore._confined(await workspace.realpath(root), await workspace.realpath(target), path)
+        # Keep the original root boundary for this binding: if it is replaced by a
+        # symlink later, target realpaths outside it fail closed rather than following it.
+        if self._real_root is None or self._real_root[0] != root:
+            self._real_root = (root, await workspace.realpath(root))
+        return FileStore._confined(self._real_root[1], await workspace.realpath(target), path)
 
     @staticmethod
     def _confined(real_root: str, real_target: str, path: str) -> str:

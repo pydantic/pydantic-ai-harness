@@ -378,6 +378,27 @@ async def test_file_store_search_skips_a_file_that_disappears_after_listing(tmp_
     assert result.truncated
 
 
+async def test_file_store_reuses_root_realpath_within_bound_run(tmp_path: Path) -> None:
+    root = tmp_path / 'root'
+    root.mkdir()
+
+    class CountingBackend(LocalWorkspaceBackend):
+        root_calls = 0
+
+        async def realpath(self, path: str) -> str:
+            if path == str(root):
+                self.root_calls += 1
+            return await super().realpath(path)
+
+    backend = CountingBackend(root)
+    store = FileStore('.').bind(Workspace(backend))
+    await store.write('main/first.md', 'one', expected_version=None)
+    await store.write('main/second.md', 'two', expected_version=None)
+    assert (root / 'main' / 'first.md').read_text() == 'one'
+    assert (root / 'main' / 'second.md').read_text() == 'two'
+    assert backend.root_calls == 1
+
+
 async def test_file_store_rejects_symlink_escape(tmp_path: Path) -> None:
     root = tmp_path / 'root'
     outside = tmp_path / 'outside'
