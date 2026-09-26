@@ -14,6 +14,8 @@ idea the rest of the setup exists, so it can neither honor it nor translate it.
 
 ## The solution
 
+Autoloaded instruction symlinks resolving outside the directory being scanned are skipped, including shared dotfiles in another directory.
+
 `RepoContext` bundles three strategies, each independently toggleable. Construct it with `RepoContext(...)` in an `Agent`'s `capabilities`, with a workspace attached to the run:
 
 ```python

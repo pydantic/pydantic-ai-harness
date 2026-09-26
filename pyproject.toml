@@ -278,7 +278,7 @@ executionEnvironments = [
 addopts = '-p no:cassetter'
 testpaths = ['tests']
 xfail_strict = true
-markers = ['modal_live: runs against a real Modal control plane; needs credentials']
+markers = ['modal_live: runs against a real Modal control plane; needs credentials', 'e2b_live: runs against a real E2B sandbox; needs credentials']
 filterwarnings = [
     'error',
     # DBOS's run_sync triggers this on Python 3.12+ — not our code.

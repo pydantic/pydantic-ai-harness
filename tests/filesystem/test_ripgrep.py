@@ -291,16 +291,16 @@ class _CountingProbes(LocalWorkspaceBackend):
 
 
 class TestWithoutRipgrep:
-    """A workspace without `rg` (E2B's default template, say) gets the same tools, served by walking the tree."""
+    """A workspace without `rg` uses the in-workspace POSIX search tools."""
 
     @pytest.fixture
     def without_rg(self, workspace: Path) -> LocalWorkspaceBackend:
-        return LocalWorkspaceBackend(workspace, env={'PATH': str(workspace)})
+        return LocalWorkspaceBackend(workspace, env={'PATH': '/usr/bin:/bin'})
 
     async def test_list_files(self, workspace: Path, without_rg: LocalWorkspaceBackend) -> None:
         ts = toolset(workspace)
-        # Ignore files need ripgrep, so `ignored.log` is listed; hidden files still are not.
-        assert (await ts.list_files(workspace=without_rg)).splitlines() == ['ignored.log', 'notes.txt', 'src/app.py']
+        # Git-backed POSIX enumeration also applies a root .ignore outside a repository.
+        assert (await ts.list_files(workspace=without_rg)).splitlines() == ['notes.txt', 'src/app.py']
         assert await ts.list_files(glob='*.py', workspace=without_rg) == 'src/app.py'
         assert await ts.list_files(glob='src/*.py', workspace=without_rg) == 'src/app.py'
 
@@ -314,7 +314,7 @@ class TestWithoutRipgrep:
             await ts.grep('os', file_type='py', workspace=without_rg)
 
     async def test_missing_rg_is_probed_once_per_workspace(self, workspace: Path) -> None:
-        backend = _CountingProbes(workspace, env={'PATH': str(workspace)})
+        backend = _CountingProbes(workspace, env={'PATH': '/usr/bin:/bin'})
         ts, ws = toolset(workspace), Workspace(backend)
         await ts.grep('os', workspace=ws)
         await ts.list_files(workspace=ws)

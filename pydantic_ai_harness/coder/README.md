@@ -22,9 +22,9 @@ pip install "pydantic-ai-harness[coder]"
 ```
 
 The extra installs `ripgrep==14.1.0` except on Android, where `rg` must be supplied separately on `PATH`.
-In a workspace without `rg`, such as a sandbox image that lacks it, `list_files` and `grep` walk the files instead.
+In a workspace without `rg`, such as a sandbox image that lacks it, `list_files` and `grep` use a single POSIX git/grep/find command instead.
 
-For remote workspaces, use file tools (`grep`, `find_files`, `read_file`) instead of sending whole files through shell `cat`. Install `rg` and `git` in the sandbox image for fast search (the Coder extra installs `rg` on the agent host, not in a remote image). For large or generated trees, run `rg -n 'pattern' path` or `rg --files` through Shell and cap its output. Without `rg`, file walks make many remote calls; filesystem-only backends use this slower, bounded path. Check ignored and hidden files explicitly when using the fallback.
+For remote workspaces, use file tools (`grep`, `find_files`, `read_file`) instead of sending whole files through shell `cat`. Install `rg` and `git` in the sandbox image for fast search (the Coder extra installs `rg` on the agent host, not in a remote image). For large or generated trees, run `rg -n 'pattern' path` or `rg --files` through Shell and cap its output. Without `rg`, command-capable POSIX workspaces use one in-sandbox git/grep/find command for `grep`, `list_files`, and `search_files` (after an initial `rg` probe). Backends that are filesystem-only use bounded file walks. The POSIX fallback honors nested `.gitignore` in repositories and search-root `.ignore` with git available; nested `.ignore` rules are not applied by the POSIX fallback, and rg-specific regex features require `rg`. Without git, the POSIX fallback cannot apply ignore files. Searches report output and result caps rather than presenting partial results as complete.
 Add a provider extra such as `[coder,anthropic]` when needed.
 `Coder` works in the run's [workspace](https://pydantic.dev/docs/ai/core-concepts/workspace/). Here that is the current directory on your machine:
 
