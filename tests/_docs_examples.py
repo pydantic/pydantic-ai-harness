@@ -14,18 +14,19 @@ Then it answers in text. Each run the model finishes is returned as a `ScriptedR
 
 Sandboxes a block creates keep running after it, so `run_block` passes every workspace ref
 the model saw to the provider's `cleanup`, even when the block fails. `documented_cleanup` takes
-that cleanup from the page itself. A block that connects to Temporal at `localhost:7233` runs
-against a local dev server started for it.
+that cleanup from the page itself. A block that connects to Temporal at `localhost:7233` runs as
+a script file against a local dev server started for it.
 """
 
 from __future__ import annotations
 
 import inspect
 import os
+import runpy
+import tempfile
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Generator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from unittest import mock
@@ -48,6 +49,8 @@ from pydantic_ai.workspaces import WorkspaceRef
 from pytest_examples import CodeExample, find_examples
 
 _ROOT = Path(__file__).parent.parent
+
+_TEMPORAL_ADDRESS = 'localhost:7233'
 
 HOME_ECHO = 'sandbox HOME='
 """What the scripted command prints before `$HOME`."""
@@ -104,8 +107,11 @@ def run_block(
         return model
 
     try:
-        with _temporal_server_for(example), mock.patch.object(models, 'infer_model', infer_model):
-            exec(code, namespace)
+        with mock.patch.object(models, 'infer_model', infer_model):
+            if _TEMPORAL_ADDRESS in example.source:
+                namespace = _run_temporal_script(example)
+            else:
+                exec(code, namespace)
     finally:
         if refs:
             assert cleanup is not None, (
@@ -118,22 +124,23 @@ def run_block(
     return namespace, runs
 
 
-@contextmanager
-def _temporal_server_for(example: CodeExample) -> Generator[None]:
-    """Serve Temporal on `localhost:7233` while `example` runs, if it connects there."""
-    if 'localhost:7233' not in example.source:
-        yield
-        return
+def _run_temporal_script(example: CodeExample) -> dict[str, object]:
+    """Run `example` as a script file against a local Temporal dev server on `localhost:7233`."""
     from temporalio.testing import WorkflowEnvironment  # noqa: PLC0415 - only Temporal examples need it
 
     # The block runs its own `asyncio.run(main())`, so the server lives on a portal thread's loop.
     async def start() -> WorkflowEnvironment:
         return await WorkflowEnvironment.start_local(port=7233)  # pyright: ignore[reportUnknownMemberType]
 
-    with start_blocking_portal() as portal:
+    with start_blocking_portal() as portal, tempfile.TemporaryDirectory() as directory:
         env = portal.call(start)
         try:
-            yield
+            # Temporal validates a workflow by re-importing its module, so `__main__` must be a
+            # real file, as with `python example.py`; `exec` would leave pytest as `__main__`.
+            script = Path(directory) / 'example.py'
+            # Padding keeps traceback line numbers equal to the docs page's.
+            script.write_text('\n' * (example.start_line - 1) + example.source)
+            return runpy.run_path(str(script), run_name='__main__')
         finally:
             portal.call(env.shutdown)
 
