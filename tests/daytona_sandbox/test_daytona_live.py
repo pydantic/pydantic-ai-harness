@@ -25,9 +25,8 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import daytona
 import pytest
@@ -68,29 +67,6 @@ async def client() -> AsyncIterator[daytona.AsyncDaytona]:
     # aiohttp closes SSL transports on the next loop ticks after ClientSession.close().
     # Let them finish before pytest tears down this module's event loop.
     await asyncio.sleep(0.25)
-
-
-@pytest.fixture(autouse=True)
-def record_created_sandboxes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Record every accepted create, including sandboxes started by documentation examples."""
-    original = daytona.AsyncDaytona.create
-
-    async def create(
-        client: daytona.AsyncDaytona,
-        params: daytona.CreateSandboxFromSnapshotParams | daytona.CreateSandboxFromImageParams | None = None,
-        *,
-        timeout: float = 60,
-        on_snapshot_create_logs: Callable[[str], None] | None = None,
-    ) -> daytona.AsyncSandbox:
-        if isinstance(params, daytona.CreateSandboxFromSnapshotParams):
-            native = await original(client, params, timeout=timeout)
-        else:
-            native = await original(client, params, timeout=timeout, on_snapshot_create_logs=on_snapshot_create_logs)
-        with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as log:
-            log.write(f'anyio-daytona2 daytona {native.id}\n')
-        return native
-
-    monkeypatch.setattr(daytona.AsyncDaytona, 'create', create)
 
 
 @asynccontextmanager
