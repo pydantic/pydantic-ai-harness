@@ -280,6 +280,14 @@ class TestSpritesSandbox:
             if not isinstance(error, AuthenticationError):
                 assert str(caught.value) == f'Could not start Sprites sandbox: {error}'
 
+    async def test_lost_create_reply_recovers_same_sprite(self, transport: SpriteTransport) -> None:
+        backend = SpritesSandboxBackend()
+        transport.create_error_after_commit = NetworkError('lost reply')
+        sprite = await backend.get_client()
+        assert backend.ref == WorkspaceRef(provider='sprites', id=sprite.name)
+        assert transport.created == [sprite.name]
+        assert await backend.get_client() is sprite
+
     async def test_missing_token(self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('SPRITE_TOKEN')
         with pytest.raises(WorkspaceUnavailableError, match='SPRITE_TOKEN'):

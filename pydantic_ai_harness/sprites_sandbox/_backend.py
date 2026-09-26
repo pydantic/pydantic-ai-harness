@@ -277,7 +277,19 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                     if ref is not None:
                         workspace = await client.get_sprite(ref.id)
                     else:
-                        workspace = await client.create_sprite(self._new_sprite_name, runtime=self._runtime)
+                        try:
+                            workspace = await client.create_sprite(self._new_sprite_name, runtime=self._runtime)
+                        except (NetworkError, TimeoutError, SpriteError) as error:
+                            if isinstance(error, SpriteError) and not (
+                                isinstance(error, NetworkError) or '(status 409)' in str(error)
+                            ):
+                                raise
+                            # A lost create reply can leave a billed Sprite. The random name is ours alone;
+                            # do not enumerate or delete any other Sprite to recover it.
+                            try:
+                                workspace = await client.get_sprite(self._new_sprite_name)
+                            except NotFoundError:
+                                raise error from None
                     # Recorded as soon as the SDK returns, so a cancelled caller still leaves it named.
                     self._sandbox = workspace
                     self._ref = WorkspaceRef(provider='sprites', id=workspace.name)

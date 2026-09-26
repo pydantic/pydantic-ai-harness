@@ -161,6 +161,7 @@ class SpriteTransport:
         self.exec_started = asyncio.Event()
         self.get_error: Exception | None = None
         self.create_error: Exception | None = None
+        self.create_error_after_commit: Exception | None = None
         self.close_error: Exception | None = None
         self.close_calls = 0
         self.close_started = asyncio.Event()
@@ -214,6 +215,8 @@ class SpriteTransport:
         self.names.add(name)
         self.created.append(name)
         self.create_started.set()
+        if self.create_error_after_commit is not None:
+            raise self.create_error_after_commit
         if self.release_create is not None:
             await self.release_create.wait()
         return AsyncSprite(name, client)
