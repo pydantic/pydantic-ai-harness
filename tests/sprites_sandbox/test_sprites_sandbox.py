@@ -469,7 +469,7 @@ class TestSpritesSandbox:
         [socket] = transport.execs
         # The command runs under a `sh` that ends both streams with a marker line; the fake conformance suite checks the streams stay apart.
         assert socket.query['cmd'][:2] == ['sh', '-c']
-        assert socket.query['cmd'][3:] == ['sh', 'echo', 'a b']
+        assert socket.query['cmd'][5:] == ['echo', 'a b']
         assert socket.query['dir'] == [str(transport.root)]
         # Without it a non-TTY command outlives a closed socket by 10 seconds.
         assert socket.query['max_run_after_disconnect'] == ['1s']
@@ -591,8 +591,15 @@ class TestSpritesSandbox:
         with pytest.raises(WorkspaceTimeoutError, match='Command timed out after 0.3 seconds') as caught:
             await backend.run('printf ready; exec sleep 5', shell=True, timeout=0.3)
         assert caught.value.stdout == 'ready'
-        [socket] = transport.execs
-        assert socket.process.wait(timeout=1) == -signal.SIGKILL
+        assert transport.execs[0].process.wait(timeout=1) == -signal.SIGKILL
+
+    async def test_timeout_keeps_partial_stderr_and_removes_capture(self, transport: SpriteTransport) -> None:
+        backend = SpritesSandboxBackend()
+        await backend.get_client()
+        with pytest.raises(WorkspaceTimeoutError) as caught:
+            await backend.run('printf ready >&2; exec sleep 5', shell=True, timeout=0.3)
+        assert caught.value.stderr == 'ready'
+        assert not Path(transport.execs[0].query['cmd'][4]).exists()
 
     async def test_cancellation_closes_the_socket(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
@@ -601,8 +608,7 @@ class TestSpritesSandbox:
             group.start_soon(backend.run, ['sleep', '5'])
             await transport.exec_started.wait()
             group.cancel_scope.cancel()
-        [socket] = transport.execs
-        assert socket.process.wait(timeout=1) == -signal.SIGKILL
+        assert transport.execs[0].process.wait(timeout=1) == -signal.SIGKILL
 
     @pytest.mark.parametrize('timeout', [0, -1, float('inf')])
     async def test_invalid_timeout(self, transport: SpriteTransport, timeout: float) -> None:

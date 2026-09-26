@@ -77,7 +77,7 @@ from pydantic_ai.workspaces import (
 from pydantic_ai.workspaces.workspace import _ShellFilesystem  # pyright: ignore[reportPrivateUsage]
 from websockets.exceptions import InvalidHandshake, InvalidMessage
 
-from pydantic_ai_harness._workspace_provider import absolute_path, command_argv
+from pydantic_ai_harness._workspace_provider import absolute_path, command_argv, stop_shielded
 
 try:
     from sprites import AsyncSprite, AsyncSpritesClient
@@ -362,20 +362,23 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        _capture_stderr: bool = True,
     ) -> CommandResult:
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         directory = absolute_path('cwd', cwd) if cwd is not None else self._working_dir
         marker = f'pydantic-ai-end-{uuid.uuid4().hex}'
+        capture = f'/tmp/pydantic-ai-stderr-{uuid.uuid4().hex}'
         # `env` runs inside the wrapper: a `sh` such as dash drops variables whose names are not shell
         # identifiers from the environment it passes on.
-        args = _ending_with(marker, _with_env(command_argv(command, shell), {**self._env, **(env or {})}))
+        args = _ending_with(marker, capture, _with_env(command_argv(command, shell), {**self._env, **(env or {})}))
 
         # Acquiring the Sprite has its own bound; the deadline is the command's alone.
         sprite = await self.get_client()
         exec_command = _ExecCommand(sprite.command(*args, cwd=directory))
         deadline = anyio.CancelScope(deadline=math.inf if timeout is None else anyio.current_time() + timeout)
         code = -1
+        interrupted = False
         try:
             with deadline:
                 try:
@@ -393,21 +396,44 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                         raise NetworkError(f'Sprites exec handshake failed: {retry_error}') from retry_error
                 code = await exec_command.wait()
             if timeout is not None and deadline.cancelled_caught:
+                interrupted = True
+                await _close_command(exec_command)
                 partial = _split_output(exec_command.get_stdout(), exec_command.get_stderr(), marker)
+                stderr = await self._collect_stderr(capture) if _capture_stderr else ''
                 raise WorkspaceTimeoutError(
-                    f'Command timed out after {timeout:g} seconds',
-                    stdout=partial[0],
-                    stderr=partial[1],
+                    f'Command timed out after {timeout:g} seconds', stdout=partial[0], stderr=stderr + partial[1]
                 )
         except BaseException as error:
             # On a timeout or a cancellation, closing the socket is what ends the command in the Sprite.
-            await _close_command(exec_command)
+            if not interrupted:
+                await _close_command(exec_command)
+                if _capture_stderr:
+                    await self._collect_stderr(capture)
             if isinstance(error, Exception) and (mapped := _map_error(error, sprite.name)) is not None:
                 raise mapped from error
             raise
         await _close_command(exec_command)
         stdout, stderr = _split_output(exec_command.get_stdout(), exec_command.get_stderr(), marker)
         return CommandResult(exit_code=code, stdout=stdout, stderr=stderr)
+
+    async def _collect_stderr(self, path: str) -> str:
+        output = ''
+
+        async def collect() -> None:
+            nonlocal output
+            # Bounded to avoid moving an unbounded stderr capture through the exec URL/output buffer.
+            result = await self.run(
+                ['sh', '-c', 'head -c 65536 -- "$1"; rm -f -- "$1"', 'sh', path],
+                timeout=1,
+                _capture_stderr=False,
+            )
+            output = result.stdout
+
+        try:
+            await stop_shielded(collect)
+        except Exception:
+            logger.warning('Could not retrieve Sprite stderr capture')
+        return output
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         # Not through a command: the exec API sends argv in the URL, which caps a command at about 40 KB.
@@ -459,7 +485,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         return await _ShellFilesystem(self).exists(path)
 
 
-def _ending_with(marker: str, args: list[str]) -> list[str]:
+def _ending_with(marker: str, capture: str, args: list[str]) -> list[str]:
     """`args` run under a `sh` that reports their stdout, a `marker` line, then their stderr, all on stdout.
 
     The `sh` first reads stdin to its EOF, which the client sends once its socket is open: output
@@ -472,10 +498,10 @@ def _ending_with(marker: str, args: list[str]) -> list[str]:
     status is the command's.
     """
     script = (
-        'cat >/dev/null; err=$(mktemp) || exit 125; '
+        'cat >/dev/null; err=$1; shift; : >"$err" || exit 125; '
         f'"$@" 2>"$err"; status=$?; printf "\\n%s\\n" {marker}; cat "$err"; rm -f "$err"; exit "$status"'
     )
-    return ['sh', '-c', script, 'sh', *args]
+    return ['sh', '-c', script, 'sh', capture, *args]
 
 
 def _split_output(stdout: bytes, stderr: bytes, marker: str) -> tuple[str, str]:
