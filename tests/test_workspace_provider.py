@@ -1,3 +1,5 @@
+import asyncio
+
 import anyio
 import pytest
 from pydantic_ai.exceptions import UserError
@@ -98,6 +100,49 @@ async def test_stop_shielded_finishes_under_outer_cancellation() -> None:
         await stop_shielded(stop)
     assert scope.cancelled_caught or scope.cancel_called
     assert stopped == ['stop']
+
+
+@pytest.mark.anyio
+async def test_native_repeated_cancel_cannot_abandon_stop(anyio_backend: str) -> None:
+    if anyio_backend != 'asyncio':
+        pytest.skip('Native task.cancel() is asyncio-specific')
+
+    async def exercise(timeout: float | None, cancellations: int) -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        finished = asyncio.Event()
+        calls = 0
+
+        async def stop() -> None:
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await release.wait()
+            finished.set()
+
+        async def work() -> None:
+            async with command_deadline(timeout, stop=stop):
+                await asyncio.sleep(100)
+
+        task = asyncio.create_task(work())
+        if timeout is None:
+            await asyncio.sleep(0)
+            task.cancel()
+        await asyncio.wait_for(entered.wait(), 3)
+        for _ in range(cancellations):
+            task.cancel()
+            await asyncio.sleep(0)
+        release.set()
+        try:
+            await asyncio.wait_for(task, 3)
+        except (asyncio.CancelledError, WorkspaceTimeoutError):
+            pass
+        await asyncio.wait_for(finished.wait(), 3)
+        assert calls == 1
+
+    await exercise(0.01, 0)
+    await exercise(None, 1)
+    await exercise(None, 2)
 
 
 def test_absolute_path_passes_none_and_absolute_paths_through() -> None:
