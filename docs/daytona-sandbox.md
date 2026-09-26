@@ -158,16 +158,17 @@ Under [Temporal](https://pydantic.dev/docs/ai/capabilities/durable_execution/tem
 ```python {names="defined"}
 from daytona import AsyncDaytona
 from pydantic_ai import Agent
+from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
 
 
 async def run_worker() -> None:
     async with AsyncDaytona() as client:
-        agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(client=client)])
+        agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(client=client), Coder()])
         ...  # wrap `agent` for Temporal and start the worker
 ```
 
-`Coder`, `Shell`, and `FileSystem` work under DBOS, but not yet under Temporal or Prefect.
+[`Coder`](coder.md#durable-execution), [`Shell`](shell.md#durable-execution), and [`FileSystem`](filesystem.md#durable-execution) work under DBOS, Temporal, and Prefect; each page's durable execution section lists what they can't do yet.
 
 See [Workspaces: Durable execution](https://pydantic.dev/docs/ai/core-concepts/workspace/#durable-execution) for how workspaces work under durable engines.
 
