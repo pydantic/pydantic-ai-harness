@@ -50,6 +50,11 @@ _ROOT = Path(__file__).parent.parent
 _HARNESS = 'pydantic_ai_harness'
 
 
+def test_coder_mentions_post_run_backend_close() -> None:
+    for path in ('docs/coder.md', 'pydantic_ai_harness/coder/README.md'):
+        assert 'result.workspace.backend.aclose()' in Path(path).read_text()
+
+
 def test_coder_explains_sandbox_creation_timing() -> None:
     for path in ('docs/coder.md', 'pydantic_ai_harness/coder/README.md', 'docs/index.md'):
         text = Path(path).read_text()
