@@ -317,6 +317,8 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                 else:
                     state = await self._cwd_state_path(ctx)
                     await ctx.workspace.make_dir(posixpath.dirname(state))
+                    # Parallel calls in one run each use their starting cwd; last completion wins.
+                    # Workspace backends do not provide a cross-worker compare-and-swap for this state.
                     await ctx.workspace.write_bytes(state, posixpath.normpath(recorded).encode('utf-8'))
         except (OSError, ValueError):
             return

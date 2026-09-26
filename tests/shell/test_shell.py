@@ -532,6 +532,24 @@ class TestDurableCwd:
         assert str(shell_dir / 'subdir') not in await other.run_command(second, 'pwd')
 
 
+class TestSameRunConcurrentCwd:
+    async def test_last_completed_command_wins(self, persist_toolset: ShellToolset[None], shell_dir: Path) -> None:
+        (shell_dir / 'other').mkdir()
+        ctx = _ctx(shell_dir)
+        ctx.run_id = 'parallel-run'
+        # Both commands start at the root; the slower completion publishes its cwd last.
+        results: list[str] = []
+
+        async def run(command: str) -> None:
+            results.append(await persist_toolset.run_command(ctx, command))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run, 'touch started-a; while [ ! -f started-b ]; do sleep 0.01; done; cd subdir; sleep 0.2')
+            tg.start_soon(run, 'touch started-b; while [ ! -f started-a ]; do sleep 0.01; done; cd other')
+        assert len(results) == 2 and all('[exit code:' not in result for result in results)
+        assert str(shell_dir / 'subdir') in await persist_toolset.run_command(ctx, 'pwd')
+
+
 class TestPersistCwdHardening:
     """B4: regression tests for the old stdout-sentinel footguns -- a command's
     output spoofing the cwd, and `;` silently disabling tracking."""
