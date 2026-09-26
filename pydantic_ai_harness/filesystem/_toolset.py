@@ -705,6 +705,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """
         entries: list[WorkspaceFileEntry] = []
         pending: list[tuple[str, int]] = [(directory, 1)]
+        seen_dirs = {await scope.workspace.realpath(directory)}
         listed = 0
         while pending:
             if listed >= _MAX_WALK_DIRECTORIES or len(entries) >= _MAX_WALK_ENTRIES:
@@ -721,12 +722,13 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 continue
             entries.extend(children)
             if max_depth is None or depth < max_depth:
-                for child in children:
-                    if (
-                        child.is_dir
-                        and not child.name.startswith('.')
-                        and await self._real_path_inside(scope, child.path)
-                    ):
+                # Prefer a directory's own spelling over aliases, and do not revisit a real
+                # directory through a loop or another symlink inside the same walk.
+                directories = [child for child in children if child.is_dir and not child.name.startswith('.')]
+                resolved_dirs = [(child, await scope.workspace.realpath(child.path)) for child in directories]
+                for child, real in sorted(resolved_dirs, key=lambda pair: pair[0].path != pair[1]):
+                    if real not in seen_dirs and _contains(scope.root, real):
+                        seen_dirs.add(real)
                         pending.append((child.path, depth + 1))
         return entries, False
 

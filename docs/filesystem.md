@@ -75,6 +75,8 @@ so they are left out when it can't run commands; `search_files` and
 
 For remote workspaces, use the file tools (`grep`, `find_files`, `read_file`) rather than `cat` through a shell. Install `rg` and `git` in the sandbox image for fast searches; installing `rg` on the agent host does not install it in a remote workspace. For large or generated trees, use Shell with `rg -n 'pattern' path` and cap its output. Without `rg`, command-capable POSIX workspaces use one in-sandbox git/grep/find command for `grep` and `list_files`; filesystem-only backends use slower, bounded file walks. Git repositories honor `.gitignore`; non-git directories do not honor `.ignore` on this fallback.
 
+Recursive file walks visit each real directory once, so aliases to a directory do not duplicate its contents.
+
 ### Tool selection and the ripgrep tools
 
 `tools` names the tools to register, from `FILE_SYSTEM_TOOL_NAMES`. The default,

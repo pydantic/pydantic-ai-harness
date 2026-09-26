@@ -349,7 +349,7 @@ class TestPathSecurity:
         await toolset.write_file('new.txt', 'x\n', workspace=workspace)
         assert 'x' in await toolset.read_file('new.txt', workspace=workspace)
         assert await toolset.search_files('^x$', workspace=workspace) == 'new.txt:1:x'
-        assert workspace.realpath_calls == 0
+        assert workspace.realpath_calls == 2  # the recursive walk resolves directories to avoid alias loops
 
     async def test_symlinked_working_directory_is_the_default_root(self, tmp_path: Path) -> None:
         (tmp_path / 'real').mkdir()
@@ -998,6 +998,14 @@ class TestListDirectory:
 
 
 class TestSearchFiles:
+    async def test_symlinked_directory_loop_does_not_duplicate_matches(self, fs_root: Path) -> None:
+        (fs_root / 'loop').symlink_to('.', target_is_directory=True)
+        toolset = FileSystem[None](root_dir=fs_root).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        found = await toolset.find_files('**/*.txt', workspace=LocalWorkspaceBackend(fs_root))
+        assert found.splitlines().count('hello.txt') == 1
+        assert not any('loop/' in line for line in found.splitlines())
+
     async def test_skips_large_and_unreadable_files(self, fs_root: Path) -> None:
         (fs_root / 'large.txt').write_text('needle' * 2_000_000)
         (fs_root / 'unreadable.txt').write_text('needle')
@@ -1216,7 +1224,8 @@ class TestFindFiles:
         (fs_root / 'inner_dir').symlink_to(fs_root / 'subdir')
         result = await toolset.find_files('**', workspace=ws)
         assert 'secret.txt' not in result
-        assert 'inner_dir/nested.py' in result
+        assert 'subdir/nested.py' in result
+        assert 'inner_dir/nested.py' not in result
 
     async def test_find_skips_dangling_symlink(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
@@ -2306,7 +2315,7 @@ class TestWorkspaceBackends:
 
 
 class TestWalkBounds:
-    """Symlinked directories are followed, so two links back to the root would grow a walk exponentially."""
+    """A walk deduplicates symlink loops, while directory/entry caps still bound large trees."""
 
     @pytest.fixture
     def loop_root(self, tmp_path: Path) -> Path:
@@ -2319,6 +2328,8 @@ class TestWalkBounds:
     async def test_symlink_loop_walk_is_cut_short(
         self, loop_root: Path, monkeypatch: pytest.MonkeyPatch, cap: str, ws: LocalWorkspaceBackend
     ) -> None:
+        for index in range(21):
+            (loop_root / f'dir{index}').mkdir()
         monkeypatch.setattr(f'pydantic_ai_harness.filesystem._toolset.{cap}', 20)
         toolset = FileSystem[None](root_dir=loop_root).get_toolset()
         assert isinstance(toolset, FileSystemToolset)
@@ -2334,11 +2345,13 @@ class TestWalkBounds:
         assert isinstance(toolset, FileSystemToolset)
         with anyio.fail_after(30):
             found = await toolset.find_files('**/*.txt', workspace=ws)
-        assert 'walk cut short' in found.splitlines()[-1]
+        assert found == 'a.txt'  # aliases are deduplicated without consuming the walk cap
 
     async def test_cut_walk_with_no_matches_still_says_so(
         self, loop_root: Path, monkeypatch: pytest.MonkeyPatch, ws: LocalWorkspaceBackend
     ) -> None:
+        for index in range(6):
+            (loop_root / f'dir{index}').mkdir()
         monkeypatch.setattr('pydantic_ai_harness.filesystem._toolset._MAX_WALK_DIRECTORIES', 5)
         toolset = FileSystem[None](root_dir=loop_root).get_toolset()
         assert isinstance(toolset, FileSystemToolset)
@@ -2358,6 +2371,8 @@ class TestWalkBounds:
             async def searched(self, ctx: RunContext[None], event: FilesSearchedEvent) -> None:
                 seen.append(event)
 
+        for index in range(6):
+            (loop_root / f'dir{index}').mkdir()
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr('pydantic_ai_harness.filesystem._toolset._MAX_WALK_DIRECTORIES', 5)
             await call_tool(
