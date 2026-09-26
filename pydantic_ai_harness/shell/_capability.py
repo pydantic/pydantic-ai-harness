@@ -5,12 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-from pydantic_ai.capabilities import AbstractCapability
+import anyio
+from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
+from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import AgentDepsT, RunContext
 
 from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored
 from pydantic_ai_harness._workspace import require_workspace
+from pydantic_ai_harness.shell._jobs import CONTROL_TIMEOUT
 from pydantic_ai_harness.shell._toolset import RUN_SCOPED_TOOL_NAMES, ShellToolset
 
 _DEFAULT_DENIED_COMMANDS: tuple[str, ...] = (
@@ -139,6 +143,15 @@ class Shell(AbstractCapability[AgentDepsT]):
             warn_argument_ignored('Shell', 'cwd', WORKING_DIR_IS_THE_WORKSPACES)
         if self.denied_commands is _DEFAULT_DENIED_COMMANDS:
             self.denied_commands = [] if self.allowed_commands else list(_DEFAULT_DENIED_COMMANDS)
+
+    async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
+        result = await handler()
+        if self.persist_cwd and ctx.run_id is not None:
+            # A cancelled worker may be replaced while the workflow is still active;
+            # only a completed run can safely discard the cwd needed by its successor.
+            with anyio.move_on_after(CONTROL_TIMEOUT, shield=True):
+                await self.get_toolset().clear_run_cwd(ctx)
+        return result
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Fail the run at its start when it has no workspace to run commands in."""

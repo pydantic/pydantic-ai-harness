@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, LocalWorkspace
 from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior, UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
     AgentStreamEvent,
@@ -270,6 +270,21 @@ class TestDelegation:
         )
         result = await parent.run('go', workspace=facade)
 
+        assert str(tmp_path) in _delegate_returns(result)[0]
+
+    async def test_delegate_uses_own_workspace_without_parent_workspace(self, tmp_path: Path) -> None:
+        worker: Agent[object, str] = Agent(
+            TestModel(call_tools=['workspace_working_dir']), name='worker', capabilities=[LocalWorkspace(tmp_path)]
+        )
+
+        @worker.tool
+        async def workspace_working_dir(ctx: RunContext[object]) -> str:
+            return await ctx.workspace.working_dir()
+
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('worker'), capabilities=[SubAgents(agents=[SubAgent(worker)])]
+        )
+        result = await parent.run('go')
         assert str(tmp_path) in _delegate_returns(result)[0]
 
     async def test_unavailable_parent_workspace_is_forwarded(self) -> None:

@@ -14,6 +14,8 @@ idea the rest of the setup exists, so it can neither honor it nor translate it.
 
 ## The solution
 
+Autoloaded instruction symlinks resolving outside the directory being scanned are skipped, including shared dotfiles in another directory.
+
 `RepoContext` bundles three strategies, each independently toggleable. Construct it with `RepoContext(...)` in an `Agent`'s `capabilities`, with a workspace attached to the run:
 
 ```python
@@ -43,7 +45,7 @@ hash, so a symlinked `AGENTS.md -> CLAUDE.md` or two ancestors sharing identical
 content load once.
 
 When `home_dir` is `None` (the default), only the working directory is scanned -- no
-walk-up. Pass the workspace home path explicitly to walk up to it.
+walk-up. Pass the workspace home path explicitly to walk up to it. For a remote sandbox, use its home (for example `home_dir='/home/daytona'`), not the agent host's `Path.home()`.
 
 ### 2. Asset inventory (on by default)
 

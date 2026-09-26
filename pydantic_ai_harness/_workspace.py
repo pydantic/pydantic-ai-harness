@@ -10,6 +10,7 @@ from pydantic_ai.exceptions import ToolFailed, UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.workspaces import (
     SupportsCommands,
+    UnavailableWorkspace,
     Workspace,
     WorkspaceBackend,
     WorkspaceError,
@@ -78,6 +79,11 @@ def require_workspace(workspace: Workspace, owner: str) -> None:
     Called from `before_run`, so a missing workspace fails the run at its start rather than on
     the first tool call.
     """
+    backend = innermost_backend(workspace)
+    # The unattached placeholder subclasses UnavailableWorkspace; only the concrete
+    # backend represents a deliberate refusal with a reason supplied by the caller.
+    if type(backend) is UnavailableWorkspace:
+        raise UserError(f'`{owner}` cannot use this workspace: {backend.reason}')
     if not workspace.attached:
         raise UserError(
             f'`{owner}` needs a workspace, but none is attached to this run. '

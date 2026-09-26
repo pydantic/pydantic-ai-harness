@@ -18,7 +18,7 @@ import posixpath
 import shlex
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import anyio
 from pydantic_ai.exceptions import ModelRetry
@@ -61,7 +61,11 @@ a trap with an action is reset in a child. Stopping the group therefore still re
 command ended (`143` for `SIGTERM`); only a `SIGKILL` escalation leaves `exit_code` null.
 """
 
-_LAUNCHER = """(umask 077 && mkdir -p "$dir") || exit 125
+_LAUNCHER = """if [ "$exclusive" = 1 ]; then
+  (umask 077 && mkdir "$dir") || exit 126
+else
+  (umask 077 && mkdir -p "$dir") || exit 125
+fi
 if [ "$mode" = combined ]; then : > "$dir/output.log"; else : > "$dir/stdout.log"; : > "$dir/stderr.log"; fi
 if command -v setsid > /dev/null 2>&1; then
   setsid sh -c "$wrapper" sh "$dir" "$mode" "$cmd" "$limit" < /dev/null > /dev/null 2>&1 &
@@ -108,6 +112,7 @@ class Job:
     """The process group to signal, or `None` when only the wrapper's PID is safe to signal."""
     combined: bool
     """Whether stdout and stderr share `output.log`, rather than `stdout.log` and `stderr.log`."""
+    _final_status: str | None = field(default=None, init=False, repr=False)
 
     @classmethod
     async def launch(
@@ -120,13 +125,15 @@ class Job:
         env: Mapping[str, str] | None,
         combined: bool,
         file_limit: int | None = None,
+        job_id: str | None = None,
     ) -> Job:
-        directory = posixpath.join(base, uuid.uuid4().hex)
+        directory = posixpath.join(base, job_id or uuid.uuid4().hex)
         mode = 'combined' if combined else 'separate'
         assignments = ' '.join(
             f'{name}={shlex.quote(value)}'
             for name, value in (
                 ('dir', directory),
+                ('exclusive', '1' if job_id is not None else '0'),
                 ('mode', mode),
                 ('cmd', command),
                 ('limit', '' if file_limit is None else str(file_limit)),
@@ -136,6 +143,12 @@ class Job:
         result = await workspace.run(
             f'{assignments}\n{_LAUNCHER}', shell=True, cwd=cwd, env=env, timeout=CONTROL_TIMEOUT
         )
+        if job_id is not None and result.exit_code == 126:
+            # An existing claim can be an in-flight launch or a lost reply. Never
+            # spawn a second process in either case; a later retry can attach.
+            if existing := await cls.attach(workspace, directory, combined=combined):
+                return existing
+            raise ModelRetry('Background command launch is pending; retry with the same tool call ID.')
         fields = result.stdout.split()
         if result.exit_code != 0 or len(fields) != 2 or not fields[0].isdigit():
             detail = result.stderr.strip() or f'launcher output {result.stdout.strip()!r}'
@@ -177,10 +190,20 @@ class Job:
 
     async def status_text(self) -> str | None:
         """`status.json` as the wrapper published it, or `None` before the first publication."""
+        if self._final_status is not None:
+            return self._final_status
         try:
-            return (await self.workspace.read_bytes(self.status_path)).decode('utf-8', errors='replace')
+            text = (await self.workspace.read_bytes(self.status_path)).decode('utf-8', errors='replace')
         except FileNotFoundError:
             return None
+        try:
+            exit_code = json.loads(text)['exit_code']
+        except (ValueError, KeyError, TypeError):
+            exit_code = None
+        # A published exit code never changes; reuse it during drain and final rendering.
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+            self._final_status = text
+        return text
 
     async def status(self) -> tuple[bool, int | None]:
         """`(running, exit_code)`; a job whose status is not yet published counts as running."""
@@ -227,9 +250,17 @@ class Job:
         """Stop the job's process group: `SIGTERM`, then `SIGKILL` if it is still running after the grace period."""
         if not await self._signal('TERM'):
             return
+        if self.pgid is None:
+            return
+        # The wrapper's status says nothing about children left in its process group.
+        # When it is already finished, avoid waiting a grace period for zombie members.
+        if not (await self.status())[0]:
+            if await self._signal('0'):
+                await self._signal('KILL')
+            return
         interval = POLL_MIN
         with anyio.move_on_after(_KILL_GRACE_PERIOD):
-            while (await self.status())[0]:
+            while await self._signal('0'):
                 await anyio.sleep(interval)
                 interval = min(interval * 2, POLL_MAX)
             return

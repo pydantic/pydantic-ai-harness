@@ -50,12 +50,20 @@ so they are left out when it can't run commands; `search_files` and
 | `write_file` | Create or overwrite a file. Optional `expected_hash` rejects stale writes (optimistic concurrency). |
 | `edit_file` | Exact-string replacement: one `old_text`/`new_text` pair, or a `replacements` batch applied in order. Each `old_text` must match exactly once; a batch is checked in memory and written only if every replacement matches. Optional `expected_hash`. |
 | `list_directory` | List a directory's entries with type indicators and sizes. |
-| `search_files` | Regex search over file contents, optionally narrowed by an `include_glob`. |
+| `search_files` | Regex search over file contents, optionally narrowed by an `include_glob`; skips files over 10 MiB or unreadable files and reports skipped paths. |
 | `find_files` | Glob search over file names (e.g. `*.py`, `**/*.json`). The pattern is relative to `path`; absolute patterns are rejected. |
 | `create_directory` | Create a directory and any missing parents. |
 | `file_info` | Metadata for a file or directory: size, type, line count, hash, and symlink target, where the workspace provides them. |
+
+An explicitly unavailable run workspace fails at run start with its configured reason, rather than advice to attach a local workspace.
+
+Missing paths (including directories passed to `read_file`) return `Path not found: <path>` as a tool result, so repeated lookups do not exhaust the model's tool retry budget. Invalid arguments still request a retry.
 | `list_files` | Opt-in, ripgrep-backed: files under a directory, recursively, sorted by path, with an optional `glob`. |
 | `grep` | Opt-in, ripgrep-backed: content search with `glob`, `file_type`, `ignore_case`, `literal`, and `context` (0 to 20) options; a `path` may name a file or a directory. |
+
+For remote workspaces, use the file tools (`grep`, `find_files`, `read_file`) rather than `cat` through a shell. Install `rg` and `git` in the sandbox image for fast searches; installing `rg` on the agent host does not install it in a remote workspace. For large or generated trees, use Shell with `rg -n 'pattern' path` and cap its output. Without `rg`, command-capable POSIX workspaces use one in-sandbox git/grep/find command for `grep`, `list_files`, and `search_files` (after an initial `rg` probe). Filesystem-only backends use slower, bounded file walks. The POSIX fallback honors nested `.gitignore` in repositories and search-root `.ignore` with git available; nested `.ignore` rules are not applied by the POSIX fallback, and rg-specific regex features require `rg`. Without git, the POSIX fallback cannot apply ignore files. Searches report output and result caps rather than presenting partial results as complete.
+
+Recursive file walks visit each real directory once, so aliases to a directory do not duplicate its contents.
 
 ### Tool selection and the ripgrep tools
 
@@ -63,8 +71,7 @@ so they are left out when it can't run commands; `search_files` and
 `DEFAULT_TOOL_NAMES`, is the eight tools that need only the workspace's
 filesystem. `list_files` and `grep` run the `rg` executable inside the
 workspace when it is on its `PATH`, so they are opt-in by name. The
-`coder` extra installs `rg` for a local workspace. Without `rg`, both walk the
-files instead, without ignore files or `grep`'s `context` and `file_type`.
+`coder` extra installs `rg` for a local workspace. Without `rg`, both use an in-workspace POSIX command. The fallback lacks ripgrep `file_type` support and some ignore-file rules; `search_files` and `find_files` remain available for filesystem-only workspaces.
 
 ```python
 from pydantic_ai_harness import FileSystem
@@ -74,8 +81,7 @@ FileSystem(tools=['read_file', 'edit_file', 'list_files', 'grep'])
 
 Both respect ripgrep's defaults: `.gitignore` inside a git repository and
 `.ignore` files anywhere. As in ripgrep, an explicit `glob` takes precedence
-over those ignore files; unlike ripgrep, dotfiles and dot-directories stay
-hidden even then, as with the other walkers. Output is sorted by path, so a capped
+over those ignore files. Hidden files can be selected by an explicit dotfile glob, and hidden directories by naming them as the search path. `list_directory` and walker-backed `find_files`/`search_files` report hidden entries they saw but omitted; pruned hidden directories count as one entry, not their unseen contents. Command-backed searches do not count hidden omissions. Output is sorted by path, so a capped
 result is a deterministic prefix rather than a random subset. `grep` reports
 matches as `path:line:text` and context lines as `path-line-text`, paths relative
 to the working directory; a pattern uses ripgrep's regex syntax unless `literal` is set. A
@@ -278,7 +284,9 @@ need `**`.
 | `denied_patterns` | Matching paths are rejected (denylist), even when `allowed_patterns` matches them. |
 | `read_only_patterns` | Matching paths are read-only: reads succeed, writes are rejected. |
 
-`read_only_patterns` defaults to `.git/*`, `.env`/`.env.*`, `*.pem`, `*.key`,
+A directory pattern also applies to descendants: `denied_patterns=['private']` denies `private/notes.txt` as well as `private`. Read-only directory patterns similarly protect writes below them.
+
+`read_only_patterns` defaults to `**/.git/*`, `**/.env`/`**/.env.*` (at any depth), `*.pem`, `*.key`,
 and `**/secrets*`, and `**/.pydantic-ai-harness/**`, where harness capabilities keep
 their own files (spilled tool output, background job status). Pass an empty list to make every path writable.
 `protected_patterns` is its deprecated name and still works, with a warning.
@@ -321,7 +329,7 @@ FileSystem(
     denied_patterns=[],            # denylist globs
     read_only_patterns=[...],      # read-only globs (defaults to secrets/.git)
     max_read_lines=2000,           # cap for a single read_file
-    max_read_chars=None,           # optional cap on a whole read_file result, ending on a complete line
+    max_read_chars=50_000,         # cap on a whole read_file result, ending on a complete line
     max_list_results=1000,         # cap for list_directory
     max_search_results=1000,       # cap for search_files and grep
     max_find_results=1000,         # cap for find_files and list_files
@@ -361,10 +369,55 @@ or a workspace capability in Python).
 
 ## Durable execution
 
-`FileSystem` works under DBOS, Temporal and Prefect durable execution. Under Temporal its tools
-run in activities, which cannot reach the run's event stream yet
-([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)), so they emit no events there and a
-`FileChangeRequestEvent` listener cannot refuse a change.
+`FileSystem` works under DBOS, Temporal and Prefect durable execution. Under Temporal,
+file changes ask `FileChangeRequestEvent` listeners for approval in the workflow before
+workspace mutations run as durable activities. `FileReadEvent`, `DirectoryListedEvent`,
+and `FilesSearchedEvent` from read-only tools running in activities do not reach workflow
+listeners live; file-change requests and write notifications run in the workflow.
+On replay, approval listeners run again; make external listener effects idempotent
+([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
+
+For example, a Temporal worker can approve file changes in its workflow while the
+workspace operations run durably:
+
+```python
+import asyncio
+
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, PydanticAIWorkflow, TemporalDurability
+from pydantic_ai_harness.filesystem import FileChangeRequestEvent, FileSystem
+from temporalio import workflow
+from temporalio.client import Client
+from temporalio.worker import Worker
+
+agent = Agent(
+    'openai:gpt-5.2',
+    name='file_worker',
+    capabilities=[LocalWorkspace('.'), FileSystem(), TemporalDurability()],
+)
+
+@agent.on_event(FileChangeRequestEvent)
+async def approve(ctx: RunContext[None], event: FileChangeRequestEvent) -> None:
+    if event.path == 'protected.txt':
+        event.cancel('This file is protected.')
+
+@workflow.defn
+class FileWorkflow(PydanticAIWorkflow):
+    __pydantic_ai_agents__ = [agent]
+
+    @workflow.run
+    async def run(self, prompt: str) -> str:
+        return (await agent.run(prompt)).output
+
+async def main() -> None:
+    client = await Client.connect('localhost:7233', plugins=[PydanticAIPlugin()])
+    async with Worker(client, task_queue='files', workflows=[FileWorkflow]):
+        await asyncio.Event().wait()
+
+if __name__ == '__main__':
+    asyncio.run(main())
+```
 
 ## Further reading
 
