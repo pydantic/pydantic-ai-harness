@@ -285,7 +285,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         bookkeeping the toolset can drop, not a tool failure to report.
         """
         try:
-            recorded = (await ctx.workspace.read_bytes(cwd_file)).decode('utf-8').strip()
+            recorded = (await ctx.workspace.read_bytes(cwd_file)).decode('utf-8').removesuffix('\n')
             if not posixpath.isabs(recorded):
                 return
             if (await ctx.workspace.stat(recorded)).is_dir:
