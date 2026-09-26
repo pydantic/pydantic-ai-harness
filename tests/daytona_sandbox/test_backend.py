@@ -723,6 +723,13 @@ def test_cleanup_recipe_deletes_without_starting(page: str) -> None:
     assert 'backend.get_client()' not in recipe
 
 
+@pytest.mark.parametrize('page', ['docs/daytona-sandbox.md', 'pydantic_ai_harness/daytona_sandbox/README.md'])
+def test_network_block_warning_names_essential_services(page: str) -> None:
+    text = (Path(__file__).parents[2] / page).read_text()
+    assert 'not an exfiltration boundary' in text
+    assert 'network-limits' in text
+
+
 def test_client_lifetime_docstrings_describe_sdk_reopening() -> None:
     assert 'lazily reopens' in (_backend.__doc__ or '')
     assert 'leaks an aiohttp session' in (DaytonaSandboxBackend.aclose.__doc__ or '')

@@ -144,7 +144,7 @@ agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(), Coder
 | --- | --- |
 | `snapshot` | Daytona snapshot a new sandbox starts from. Default: Daytona's. |
 | `auto_stop_interval` | Idle minutes before Daytona stops a new sandbox; `0` disables it. Default: Daytona's, 15 minutes. |
-| `network_block_all` | Block outbound network access from a new sandbox. Default: `False`. |
+| `network_block_all` | Block DNS and non-allowlisted outbound traffic from a new sandbox. Daytona still allows package registries, GitHub, and AI APIs, so this is not an exfiltration boundary. See [Daytona's network limits](https://www.daytona.io/docs/en/network-limits/). Default: `False`. |
 | `working_dir` | Absolute directory commands start in and relative paths resolve against. Default: the sandbox's own. |
 | `env` | Environment variables every command gets. Nothing from your machine's environment reaches the sandbox. |
 | `client` | An `AsyncDaytona` client to share across runs. You close it; `DaytonaSandbox` never does. |
