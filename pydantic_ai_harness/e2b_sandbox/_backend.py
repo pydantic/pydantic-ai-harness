@@ -420,7 +420,6 @@ class E2BSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
                     f'Command timed out after {timeout:g} seconds',
                     stdout=handle.stdout if handle is not None else '',
                     stderr=handle.stderr if handle is not None else '',
-                    timeout=timeout,
                 )
             return CommandResult(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr)
         except e2b.CommandExitException as error:

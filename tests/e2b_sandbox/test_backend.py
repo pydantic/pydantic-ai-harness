@@ -262,7 +262,7 @@ class TestRun:
         with pytest.raises(WorkspaceTimeoutError) as exc:
             await backend.run(['sleep', '99'], timeout=0.05)
         assert isinstance(exc.value, TimeoutError)
-        assert (exc.value.stdout, exc.value.stderr, exc.value.timeout) == ('partial', 'oops', 0.05)
+        assert (exc.value.stdout, exc.value.stderr) == ('partial', 'oops')
         assert fake_e2b.sandboxes[0].commands.killed_pids == [4242]
 
     async def test_a_cancelled_run_kills_the_command(self, fake_e2b: FakeE2B) -> None:
