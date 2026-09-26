@@ -45,6 +45,16 @@ async def test_own_timeout_and_external_cancel_stop_once() -> None:
 
 
 @pytest.mark.anyio
+async def test_failed_stop_does_not_replace_original_cancellation() -> None:
+    async def stop() -> None:
+        raise RuntimeError('stop failed')
+
+    with pytest.raises(WorkspaceTimeoutError):
+        async with command_deadline(0.01, stop=stop):
+            await anyio.sleep_forever()
+
+
+@pytest.mark.anyio
 async def test_stop_shielded_finishes_under_outer_cancellation() -> None:
     stopped: list[str] = []
 

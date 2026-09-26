@@ -13,10 +13,18 @@ from pydantic_ai.workspaces import WorkspaceCommand, WorkspaceTimeoutError
 
 async def stop_shielded(stop: Callable[[], Awaitable[object]], *, grace: float = 2.0) -> None:
     """Attempt to stop a command under cancellation without cancelling its shared sandbox."""
+
+    async def best_effort_stop() -> None:
+        try:
+            await stop()
+        except Exception:
+            # Preserve the command timeout/cancellation if a provider's stop request fails.
+            pass
+
     # A child task owns the stop so repeated cancellation of the caller cannot interrupt cleanup.
     with anyio.move_on_after(grace, shield=True):
         async with anyio.create_task_group() as group:
-            group.start_soon(stop)
+            group.start_soon(best_effort_stop)
 
 
 @asynccontextmanager
