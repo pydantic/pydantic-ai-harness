@@ -373,7 +373,6 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                     f'Command timed out after {timeout:g} seconds',
                     stdout=partial[0],
                     stderr=partial[1],
-                    timeout=timeout,
                 )
         except BaseException as error:
             # On a timeout or a cancellation, closing the socket is what ends the command in the Sprite.
