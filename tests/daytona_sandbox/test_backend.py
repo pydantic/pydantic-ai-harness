@@ -184,6 +184,53 @@ class TestCommands:
         result = await backend.run(['seq', '1', '2'])
         assert (result.stdout, result.stderr) == ('1\n2\n', '')
 
+    async def test_many_stream_chunks_keep_only_bounded_partial_output(
+        self, fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_stdout = ['abc'] * 20000
+        sandbox.process_stderr = ['def'] * 20000
+        sandbox.process_stored_stdout = 'abc' * 20000
+        sandbox.process_stored_stderr = 'def' * 20000
+        original = backend._start
+        captured: list[Any] = []
+
+        async def capture(*args: Any, **kwargs: Any) -> Any:
+            process = await original(*args, **kwargs)
+            captured.append(process)
+            return process
+
+        monkeypatch.setattr(backend, '_start', capture)
+        result = await backend.run(['true'])
+        assert result.stdout == 'abc' * 20000
+        assert result.stderr == 'def' * 20000
+        assert len(''.join(captured[0].stdout)) <= 4096
+        assert len(''.join(captured[0].stderr)) <= 4096
+
+    async def test_split_markers_stop_open_follow_stream(
+        self, fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+
+        async def split_markers(session_id: str, command_id: str, on_stdout: Any, on_stderr: Any) -> None:
+            marker = re.search(r'pydantic-ai-end-[0-9a-f]{32}', sandbox.process_command)
+            assert marker is not None
+            on_stdout('before' + marker.group()[:9])
+            on_stdout(marker.group()[9:])
+            on_stderr(marker.group()[:7])
+            on_stderr(marker.group()[7:])
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(sandbox.process, 'get_session_command_logs_async', split_markers)
+        sandbox.process_stored_stdout = 'before'
+        sandbox.process_stored_stderr = ''
+        with anyio.fail_after(1):
+            result = await backend.run(['true'])
+        assert result.stdout == 'before'
+        assert sandbox.process_sessions == set()
+
     async def test_status_catches_up_after_follow_stream_closes(
         self, fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch
     ) -> None:

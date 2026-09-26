@@ -96,6 +96,8 @@ _LIFECYCLE_TIMEOUT = 60.0
 _TEARDOWN_TIMEOUT = 30.0
 # Pause between attempts to delete a command session.
 _RETRY_DELAY = 1.0
+# Streamed logs are only a timeout preview; finished output comes from stored logs.
+_PARTIAL_OUTPUT_LIMIT = 4096
 
 _logger = logging.getLogger(__name__)
 
@@ -154,6 +156,35 @@ def _until_marker(chunks: list[str], marker: str) -> str:
     output = ''.join(chunks)
     head, found, _ = output.rpartition(marker)
     return head if found else output
+
+
+def _stream_callbacks(
+    marker: str,
+) -> tuple[list[str], list[str], anyio.Event, Callable[[str], None], Callable[[str], None]]:
+    stdout: list[str] = ['']
+    stderr: list[str] = ['']
+    ended = anyio.Event()
+    tails = ['', '']
+    markers_seen = [False, False]
+
+    def on_chunk(chunk: str, index: int, preview: list[str]) -> None:
+        # Only the marker can straddle frames; neither detection nor timeout output
+        # needs the full follow stream (which grows quadratically when joined).
+        candidate = tails[index] + chunk
+        if marker in candidate:
+            markers_seen[index] = True
+        tails[index] = candidate[-(len(marker) - 1) :]
+        preview[0] = (preview[0] + chunk)[-_PARTIAL_OUTPUT_LIMIT:]
+        if all(markers_seen):
+            ended.set()
+
+    def on_stdout(chunk: str) -> None:
+        on_chunk(chunk, 0, stdout)
+
+    def on_stderr(chunk: str) -> None:
+        on_chunk(chunk, 1, stderr)
+
+    return stdout, stderr, ended, on_stdout, on_stderr
 
 
 @dataclass(kw_only=True)
@@ -770,19 +801,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                         daytona.SessionExecuteRequest(command=line, run_async=True),
                         timeout=_REQUEST_TIMEOUT,
                     )
-                stdout: list[str] = []
-                stderr: list[str] = []
-                ended = anyio.Event()
-
-                def on_stdout(chunk: str) -> None:
-                    stdout.append(chunk)
-                    if marker in ''.join(stdout) and marker in ''.join(stderr):
-                        ended.set()
-
-                def on_stderr(chunk: str) -> None:
-                    stderr.append(chunk)
-                    if marker in ''.join(stdout) and marker in ''.join(stderr):
-                        ended.set()
+                stdout, stderr, ended, on_stdout, on_stderr = _stream_callbacks(marker)
 
                 return _DaytonaProcess(
                     _process=process,
