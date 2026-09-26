@@ -35,7 +35,7 @@ from pydantic_ai.workspaces import WorkspaceTimeoutError, WorkspaceUnavailableEr
 from pytest_examples import CodeExample
 
 from pydantic_ai_harness.coder import Coder
-from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxBackend
+from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox, DaytonaSandboxBackend
 
 from .._docs_examples import documented_cleanup, python_blocks, run_block
 from .._tool_calls import call_tools
@@ -73,7 +73,7 @@ async def _owned(client: daytona.AsyncDaytona) -> AsyncGenerator[DaytonaSandboxB
     backend = DaytonaSandboxBackend(client=client, auto_stop_interval=LIVE_AUTO_STOP_INTERVAL)
     native = await backend.get_client()
     with Path('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log').open('a') as log:
-        log.write(f'daytona daytona {native.id}\n')
+        log.write(f'daytona-adopt daytona {native.id}\n')
     try:
         yield backend
     finally:
@@ -92,6 +92,17 @@ async def _owned(client: daytona.AsyncDaytona) -> AsyncGenerator[DaytonaSandboxB
             await asyncio.sleep(1)
         else:
             raise AssertionError(f'Daytona sandbox {native.id} was not deleted')
+
+
+async def test_destroy_by_ref_does_not_start_sandbox(client: daytona.AsyncDaytona) -> None:
+    """Validate that SDK get + delete does not resume a stopped sandbox."""
+    async with _owned(client) as backend:
+        assert backend.ref is not None
+        await DaytonaSandbox(client=client).destroy(backend.ref)
+        assert (await client.get(backend.ref.id)).state in (
+            daytona.SandboxState.DESTROYING,
+            daytona.SandboxState.DESTROYED,
+        )
 
 
 async def test_creates_a_fresh_sandbox_and_runs_a_command(client: daytona.AsyncDaytona) -> None:

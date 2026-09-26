@@ -59,7 +59,13 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 
-from pydantic_ai_harness._workspace_provider import absolute_path, command_argv, command_deadline, stop_shielded
+from pydantic_ai_harness._workspace_provider import (
+    absolute_path,
+    command_argv,
+    command_deadline,
+    safe_credential_reason,
+    stop_shielded,
+)
 
 if TYPE_CHECKING:
     from daytona import AsyncDaytona, AsyncSandbox
@@ -285,6 +291,9 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         # `pwd -P` of `_working_dir` (or of the image default): the protocol needs a canonical absolute path.
         self._resolved_working_dir: str | None = None
         self._lock = anyio.Lock()
+        self._active_runs = 0
+        self._runs_drained = asyncio.Event()
+        self._runs_drained.set()
 
     @property
     def ref(self) -> WorkspaceRef | None:
@@ -375,6 +384,10 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             return
 
         async def close() -> None:
+            # Agent cancellation may unwind the run before a tool's stop child deletes its
+            # session. Give that child a chance to finish before closing its HTTP client.
+            with anyio.move_on_after(_TEARDOWN_TIMEOUT):
+                await self._runs_drained.wait()
             async with self._lock:
                 await self._close_owned_client()
 
@@ -433,6 +446,10 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         _check_path(path)
         sandbox = await self.get_client()
         async with _translated_filesystem_error(sandbox, path):
+            # The toolbox download opens FIFOs for reading and can wait forever for a writer.
+            probe = await sandbox.process.exec(f'[ -p {shlex.quote(path)} ]', timeout=_REQUEST_TIMEOUT)
+            if probe.exit_code == 0:
+                raise OSError(f'Cannot read FIFO in the Daytona sandbox: {path!r}')
             try:
                 return await sandbox.fs.download_file(path, _REQUEST_TIMEOUT)
             except daytona.DaytonaError as error:
@@ -475,7 +492,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         sandbox = await self.get_client()
         async with _translated_filesystem_error(sandbox, path):
             entries = await sandbox.fs.list_files(path, request_timeout=_REQUEST_TIMEOUT)
-        return [
+        result = [
             FileEntry(
                 name=entry.name,
                 path=posixpath.join(path, entry.name),
@@ -484,12 +501,39 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
             )
             for entry in entries
         ]
+        # Daytona's toolbox silently omits looping symlinks (verified against live SDK);
+        # find sees the directory entries without following their targets.
+        try:
+            links = await sandbox.process.exec(
+                f'find {shlex.quote(path)} -mindepth 1 -maxdepth 1 -type l', timeout=_REQUEST_TIMEOUT
+            )
+        except Exception as error:
+            await _raise_failure(sandbox, error, f'Could not list symlinks in {path!r}', path=path)
+        if links.exit_code == 0:
+            existing = {entry.path for entry in result}
+            for link in links.result.splitlines():
+                if link not in existing:
+                    result.append(FileEntry(name=posixpath.basename(link), path=link, is_dir=False, size=None))
+        return sorted(result, key=lambda entry: entry.name)
 
     async def make_dir(self, path: str) -> None:
         _check_path(path)
         sandbox = await self.get_client()
         async with _translated_filesystem_error(sandbox, path):
-            await sandbox.fs.create_folder(path, '755', request_timeout=_REQUEST_TIMEOUT)
+            try:
+                await sandbox.fs.create_folder(path, '755', request_timeout=_REQUEST_TIMEOUT)
+            except daytona.DaytonaValidationError as error:
+                # Toolbox says "not a directory" for both a file at the target and
+                # a file in its parents; a target file is the protocol's FileExistsError.
+                if 'not a directory' in str(error).lower():
+                    try:
+                        info = await sandbox.fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
+                    except daytona.DaytonaError:
+                        pass
+                    else:
+                        if not info.is_dir:
+                            raise FileExistsError(f'File exists in the Daytona sandbox: {path!r}') from error
+                raise
 
     async def remove(self, path: str) -> None:
         _check_path(path)
@@ -631,21 +675,28 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                 return '', ''
             return _until_marker(process.stdout, process.marker), _until_marker(process.stderr, process.marker)
 
-        async with command_deadline(timeout, stop=stop, output=output):
-            try:
-                process = await self._start(sandbox, argv, shell=False, cwd=checked_cwd, env=env)
-            except Exception:
-                # A held handle may outlive Daytona's idle auto-stop; only retry setup,
-                # where no command was accepted, so the command cannot be duplicated.
-                if not await _restart_if_stopped(sandbox):
-                    raise
-                process = await self._start(sandbox, argv, shell=False, cwd=checked_cwd, env=env)
-            result = await process.wait()
-            if checked_cwd is not None and f'{process.marker}-cwd' in result.stderr:
-                raise FileNotFoundError(checked_cwd)
-        # A finished command still needs its session removed without killing the sandbox.
-        await stop()
-        return result
+        self._active_runs += 1
+        self._runs_drained.clear()
+        try:
+            async with command_deadline(timeout, stop=stop, output=output):
+                try:
+                    process = await self._start(sandbox, argv, shell=False, cwd=checked_cwd, env=env)
+                except Exception:
+                    # A held handle may outlive Daytona's idle auto-stop; only retry setup,
+                    # where no command was accepted, so the command cannot be duplicated.
+                    if not await _restart_if_stopped(sandbox):
+                        raise
+                    process = await self._start(sandbox, argv, shell=False, cwd=checked_cwd, env=env)
+                result = await process.wait()
+                if checked_cwd is not None and f'{process.marker}-cwd' in result.stderr:
+                    raise FileNotFoundError(checked_cwd)
+            # A finished command still needs its session removed without killing the sandbox.
+            await stop()
+            return result
+        finally:
+            self._active_runs -= 1
+            if not self._active_runs:
+                self._runs_drained.set()
 
     async def _start(
         self,
@@ -779,21 +830,21 @@ def _translated(error: Exception, context: str, *, sandbox_id: str | None = None
     retry as transient. A not-found answer is a missing `path` for a path operation, the sandbox
     being gone for a call naming `sandbox_id`, and a refused request otherwise.
     """
-    if path is not None and isinstance(error, daytona.DaytonaValidationError):
-        # Toolbox 400s include POSIX strerror text rather than an errno field.
+    if path is not None and isinstance(error, daytona.DaytonaError) and error.status_code == 400:
+        # Both typed validation errors and upload's plain 400 include POSIX strerror text.
         for phrase, error_type in (
             ('Not a directory', NotADirectoryError),
             ('Is a directory', IsADirectoryError),
             ('Permission denied', PermissionError),
             ('File exists', FileExistsError),
         ):
-            if phrase in str(error):
+            if phrase.lower() in str(error).lower():
                 return error_type(f'{phrase} in the Daytona sandbox: {path!r}')
     if path is not None and isinstance(error, daytona.DaytonaAuthorizationError):
         # Toolbox authorization is about the requested file, not the API credentials.
         return PermissionError(f'Permission denied in the Daytona sandbox: {path!r}')
     if isinstance(error, (daytona.DaytonaAuthenticationError, daytona.DaytonaAuthorizationError)):
-        return WorkspaceUnavailableError(_AUTH_MESSAGE)
+        return WorkspaceUnavailableError(f'{safe_credential_reason(error)}. {_AUTH_MESSAGE}')
     if isinstance(error, daytona.DaytonaNotFoundError):
         if path is not None:
             return FileNotFoundError(f'No such file or directory in the Daytona sandbox: {path!r}')

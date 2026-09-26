@@ -67,6 +67,10 @@ class FakeProcess:
             target = shlex.split(command)[-1]
             resolved = posixpath.normpath(posixpath.join(cwd or self.owner.workdir, target))
             return SimpleNamespace(result=resolved + '\n', exit_code=0)
+        if command.startswith('[ -p '):
+            return SimpleNamespace(result='', exit_code=1)
+        if command.startswith('find '):
+            return SimpleNamespace(result='', exit_code=0)
         assert command.startswith('mkdir -p -- ')
         return SimpleNamespace(result='', exit_code=self.owner.mkdir_exit_code)
 
@@ -371,8 +375,14 @@ class _HostFileSystem(FakeFileSystem):
         self._raise_if_needed()
         with _host_errors(path):
             children = sorted(Path(path).iterdir())
+        # An unresolvable symlink is still a directory entry; stat cannot follow its loop.
         return [
-            SimpleNamespace(name=child.name, is_dir=child.is_dir(), size=child.stat().st_size) for child in children
+            SimpleNamespace(
+                name=child.name,
+                is_dir=child.is_dir(),
+                size=child.stat().st_size if child.exists() else child.lstat().st_size,
+            )
+            for child in children
         ]
 
     async def create_folder(self, path: str, mode: str, request_timeout: float | None = None) -> None:
@@ -467,6 +477,12 @@ class FakeClient:
     def __init__(self, owner: FakeDaytona) -> None:
         self.owner = owner
         self.closed = False
+
+    async def __aenter__(self) -> FakeClient:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.close()
 
     async def create(self, params: CreateParams, *, timeout: float = 60) -> FakeSandbox:
         if self.owner.create_error is not None:

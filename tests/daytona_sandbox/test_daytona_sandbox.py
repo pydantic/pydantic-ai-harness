@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -175,6 +176,31 @@ async def test_concurrent_acquisition_and_operation_overlap(fake_daytona: FakeDa
 async def _touch(ctx: RunContext[None]) -> str:
     await ctx.workspace.write_bytes('/note', b'kept')
     return 'ok'
+
+
+async def test_cancelled_run_closes_owned_client_mid_command(fake_daytona: FakeDaytona) -> None:
+    async def long_command(ctx: RunContext[None]) -> str:
+        await ctx.workspace.run(['sleep', '30'])
+        return 'unexpected'
+
+    agent = Agent(
+        TestModel(call_tools=['long_command']),
+        deps_type=type(None),
+        tools=[long_command],
+        capabilities=[DaytonaSandbox()],
+    )
+    task = asyncio.create_task(agent.run('go'))
+    with anyio.fail_after(5):
+        while not fake_daytona.sandboxes:
+            await asyncio.sleep(0)
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_hangs = True
+        await sandbox.process_logs_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert fake_daytona.closed_clients == 1
+    assert sandbox.process_sessions == set()
 
 
 async def test_run_closes_the_client_it_opened_and_the_result_workspace_reopens(fake_daytona: FakeDaytona) -> None:

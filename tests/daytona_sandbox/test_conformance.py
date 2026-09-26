@@ -55,6 +55,11 @@ class TestFakeDaytonaSandboxBackend(WorkspaceBackendSuite):
         return DaytonaSandboxBackend()
 
     @pytest.fixture
+    def fresh_backend(self, fake_daytona: FakeDaytona, tmp_path: Path) -> Callable[[], WorkspaceBackend]:
+        fake_daytona.host_root = tmp_path.resolve()
+        return DaytonaSandboxBackend
+
+    @pytest.fixture
     def attach_backend(self) -> Callable[[WorkspaceRef], WorkspaceBackend]:
         return _attach
 
@@ -81,6 +86,9 @@ class TestLiveDaytonaSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover 
     async def backend(cls) -> AsyncIterator[DaytonaSandboxBackend]:
         backend = DaytonaSandboxBackend(auto_stop_interval=LIVE_AUTO_STOP_INTERVAL)
         try:
+            sandbox = await backend.get_client()
+            with open('/Users/adtyavrdhn/pydantic_repos/workspaces-qa/refs.log', 'a') as log:
+                log.write(f'daytona-adopt daytona {sandbox.id}\n')
             yield backend
         finally:
             try:

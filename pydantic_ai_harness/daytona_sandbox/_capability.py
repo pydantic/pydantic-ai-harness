@@ -73,6 +73,22 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
             # Core skips deferred capabilities when it selects the run's workspace.
             raise UserError('DaytonaSandbox cannot be deferred: a deferred capability never supplies the workspace.')
 
+    def backend(self, ref: WorkspaceRef) -> DaytonaSandboxBackend:
+        """Build a lazy backend for an existing sandbox."""
+        return DaytonaSandboxBackend(client=self.client, ref=ref, working_dir=self.working_dir, env=self.env)
+
+    async def destroy(self, ref: WorkspaceRef) -> None:
+        """Delete a sandbox without starting it, including one Daytona has stopped."""
+        if ref.provider != 'daytona' or not ref.id.strip():
+            raise ValueError('expected a Daytona workspace ref with a nonempty id')
+        if self.client is not None:
+            await (await self.client.get(ref.id)).delete()
+        else:
+            import daytona  # optional SDK is imported only when needed
+
+            async with daytona.AsyncDaytona() as client:
+                await (await client.get(ref.id)).delete()
+
     def get_workspace(self, ctx: RunContext[AgentDepsT], *, ref: WorkspaceRef | None) -> WorkspaceBackend | None:
         """Build the backend for this run. No I/O here: it attaches or creates on first use."""
         if ref is not None and ref.provider != 'daytona':

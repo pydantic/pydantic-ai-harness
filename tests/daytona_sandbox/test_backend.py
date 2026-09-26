@@ -85,6 +85,14 @@ class TestConformance:
         finally:
             logger.setLevel(previous)
 
+    async def test_provider_destroy_does_not_start_sandbox(self, fake_daytona: FakeDaytona) -> None:
+        sandbox = fake_daytona.sandbox('sb-cleanup')
+        sandbox.state = daytona.SandboxState.STOPPED
+        provider = DaytonaSandbox()
+        await provider.destroy(WorkspaceRef(provider='daytona', id=sandbox.id))
+        assert sandbox.state == daytona.SandboxState.DESTROYING
+        assert sandbox.start_calls == []
+
     async def test_get_client_is_lazy_and_reuses_the_sandbox(self, fake_daytona: FakeDaytona) -> None:
         backend = DaytonaSandboxBackend()
         assert not fake_daytona.sandboxes
@@ -387,6 +395,14 @@ class TestErrorsAndFilesystem:
         else:
             assert type(exc_info.value) is expected
             assert exc_info.value.__cause__ is sdk_error
+
+    async def test_auth_error_does_not_expose_token(self, fake_daytona: FakeDaytona) -> None:
+        fake_daytona.get_error = DaytonaAuthenticationError('expired token secret-value', status_code=401)
+        with pytest.raises(WorkspaceUnavailableError) as exc_info:
+            await DaytonaSandboxBackend().get_client()
+        assert 'Credential expired' in str(exc_info.value)
+        assert 'DAYTONA_API_KEY' in str(exc_info.value)
+        assert 'secret-value' not in str(exc_info.value)
 
     @pytest.mark.parametrize(
         ('error', 'expected'),

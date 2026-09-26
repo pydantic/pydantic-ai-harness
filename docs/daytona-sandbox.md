@@ -110,7 +110,7 @@ async def delete_sandbox(ref: WorkspaceRef) -> None:
         await (await client.get(ref.id)).delete()
 ```
 
-Use the SDK directly to delete the stored ref without first starting a stopped sandbox.
+Alternatively, `await DaytonaSandbox().destroy(ref)` deletes by ref without starting a stopped sandbox. If you pass `client=`, you own and must close that client (including after a cancelled run). Without one, the capability closes the client it opened when the run ends.
 
 By default, Daytona stops a sandbox after 15 idle minutes (a later run starts it again); set `auto_stop_interval=` to a smaller number of minutes to stop it sooner. A stopped sandbox keeps its disk, is archived after 7 days, and is never deleted. See [Daytona's SDK docs](https://www.daytona.io/docs/en/python-sdk/async/async-daytona/).
 
@@ -140,7 +140,7 @@ agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(), Coder
 
 ## What a timeout stops
 
-A `run(timeout=...)` deadline starts after sandbox acquisition. Daytona deletes the command session to stop its foreground work, leaving the sandbox available for other commands; a failed deletion is retried for up to two seconds during timeout or cancellation cleanup. `WorkspaceTimeoutError` carries partial stdout and stderr. Cancellation also attempts to stop the session. If Daytona cannot confirm deletion, the command may still be running: inspect or delete the sandbox yourself. `timeout=None` removes the command deadline, not Daytona's idle auto-stop or transport limits.
+A `run(timeout=...)` deadline starts after sandbox acquisition. A FIFO read fails rather than waiting for a writer. Daytona deletes the command session to stop its foreground work, leaving the sandbox available for other commands; a failed deletion is retried for up to two seconds during timeout or cancellation cleanup. `WorkspaceTimeoutError` carries partial stdout and stderr. Cancellation also attempts to stop the session. If Daytona cannot confirm deletion, the command may still be running: inspect or delete the sandbox yourself. `timeout=None` removes the command deadline, not Daytona's idle auto-stop or transport limits.
 
 ## Configuration
 
