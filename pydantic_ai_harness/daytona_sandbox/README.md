@@ -104,6 +104,7 @@ Already have a `daytona.AsyncSandbox`? Pass `workspace=DaytonaSandboxBackend(wor
 The sandbox keeps running, and billing, after the run ends. Pydantic AI never stops or deletes it. Sandboxes created by this backend carry the `created-by=pydantic-ai` label; filter by that label when auditing your Daytona account. Delete one with the ref you kept:
 
 ```python {names="defined"}
+from daytona import AsyncDaytona
 from pydantic_ai.workspaces import WorkspaceRef
 
 

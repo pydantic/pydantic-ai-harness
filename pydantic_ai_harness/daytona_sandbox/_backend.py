@@ -543,6 +543,14 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         destination = await self.realpath(path)
         staged = f'{destination}.pydantic-ai-{uuid.uuid4().hex}.tmp'
         async with _translated_filesystem_error(sandbox, path):
+            # Staging bypasses the toolbox's directory check on the original destination.
+            try:
+                info = await sandbox.fs.get_file_info(destination, request_timeout=_REQUEST_TIMEOUT)
+            except daytona.DaytonaNotFoundError:
+                pass
+            else:
+                if info.is_dir:
+                    raise IsADirectoryError(f'Is a directory in the Daytona sandbox: {path!r}')
             try:
                 await sandbox.fs.upload_file(data, staged, timeout=_REQUEST_TIMEOUT)
                 command = (

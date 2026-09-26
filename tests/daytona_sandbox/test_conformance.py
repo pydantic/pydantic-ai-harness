@@ -80,6 +80,11 @@ class TestLiveDaytonaSandboxBackend(WorkspaceBackendSuite):  # pragma: no cover 
         return 'asyncio'
 
     @pytest.fixture
+    def can_detect_exit_with_inherited_output_pipes(self) -> bool:
+        # Daytona keeps the session command open while a background child holds its output pipes.
+        return False
+
+    @pytest.fixture
     def destructive_backend(self) -> Callable[[], WorkspaceBackend]:
         # Destructive rules need their own sandbox, not the shared class-scoped fixture.
         return lambda: DaytonaSandboxBackend(auto_stop_interval=LIVE_AUTO_STOP_INTERVAL)
