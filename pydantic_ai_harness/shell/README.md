@@ -292,8 +292,8 @@ workspace capability in Python).
 
 `Shell` works under DBOS, Temporal and Prefect durable execution, with these limits:
 
-- Under Temporal, the `shell` tool emits no command events: tools run in activities, which cannot
-  reach the run's event stream yet ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
+- Under Temporal, `CommandStartedEvent`, `CommandOutputEvent`, and `CommandFinishedEvent` from
+  the `shell` tool are not delivered live to workflow listeners because the tool runs in an activity ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
 - With `persist_cwd=True`, the cwd is kept per run in the workspace under
   `.pydantic-ai-harness/shell/run-state/`, so it can be restored by another worker.
   The file is removed when the agent run ends (including cancellation).

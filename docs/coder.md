@@ -184,7 +184,9 @@ capabilities emit.
 
 `Coder` works under DBOS, Temporal and Prefect durable execution. Under Temporal,
 `FileChangeRequestEvent` listeners can refuse file changes before the durable workspace mutation.
-Read and post-write events emitted from activities are not forwarded to workflow listeners yet
+Read/search events from tools running in activities are not forwarded live to workflow
+listeners; file-change requests and write notifications run in the workflow.
+On replay, the workflow invokes file-change approval listeners again; make external listener effects idempotent
 ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
 
 ## Upgrading
