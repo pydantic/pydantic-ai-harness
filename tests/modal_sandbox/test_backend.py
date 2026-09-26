@@ -319,6 +319,24 @@ class TestWorkingDir:
 
 
 class TestCreate:
+    async def test_native_task_cancellation_records_in_flight_creation(self, fake_modal: FakeModal) -> None:
+        backend = ModalSandboxBackend()
+        fake_modal.create_gate = anyio.Event()
+        task = asyncio.create_task(backend.get_client())
+        with anyio.fail_after(2):
+            while not fake_modal.create_started:
+                await anyio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        fake_modal.create_gate.set()
+        with anyio.fail_after(2):
+            while backend.ref is None:
+                await anyio.sleep(0)
+        assert backend.ref == WorkspaceRef(provider='modal', id='sb-owned')
+        assert await backend.get_client() is fake_modal.sandboxes[0]
+        assert fake_modal.owned_creates == 1
+
     @pytest.mark.parametrize('operation', ['run', 'write_bytes'])
     async def test_ref_is_recorded_by_the_first_operation(self, fake_modal: FakeModal, operation: str) -> None:
         backend = ModalSandboxBackend()

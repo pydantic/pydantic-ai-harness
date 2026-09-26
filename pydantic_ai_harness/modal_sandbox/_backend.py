@@ -261,6 +261,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         # canonical absolute path, which only `pwd -P` in the sandbox can give.
         self._resolved_working_dir: str | None = None
         self._lock = anyio.Lock()
+        self._acquisition: asyncio.Task[modal.Sandbox] | None = None
 
     async def get_client(self) -> modal.Sandbox:
         """Return the typed `modal.Sandbox`, creating or attaching to it on first use.
@@ -272,6 +273,17 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         Raises:
             UserError: The `modal` package is not installed.
         """
+        if (sandbox := self._sandbox) is not None:
+            return sandbox
+        task = self._acquisition
+        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+            # Native Task.cancel() pierces AnyIO shields. The child owns recording the ref,
+            # so a cancelled caller cannot strand a committed sandbox without an identity.
+            task = asyncio.create_task(self._acquire())
+            self._acquisition = task
+        return await asyncio.shield(task)
+
+    async def _acquire(self) -> modal.Sandbox:
         async with self._lock:
             if (sandbox := self._sandbox) is not None:
                 return sandbox
