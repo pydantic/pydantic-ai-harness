@@ -46,6 +46,7 @@ from pydantic_ai_harness.filesystem._toolset import (
     _is_binary,
     _sanitize_recoverable_error,
 )
+from pydantic_ai_harness.shell._toolset import ShellToolset
 
 from .._tool_calls import call_tool, call_tools
 
@@ -2142,6 +2143,27 @@ class TestModelSafeRecoverableErrors:
 
 class TestWorkspaceBackends:
     """Behavior that depends on what the attached workspace can do, or on how it fails."""
+
+    async def test_shell_hides_tools_on_filesystem_only_workspace(self, fs_root: Path) -> None:
+        shell: ShellToolset[None] = ShellToolset(
+            allowed_commands=[],
+            denied_commands=[],
+            denied_operators=[],
+            default_timeout=10,
+            max_output_chars=1000,
+            persist_cwd=False,
+            allow_interactive=False,
+        )
+        ctx = RunContext[None](
+            deps=None,
+            model=TestModel(),
+            usage=RunUsage(),
+            prompt=None,
+            messages=[],
+            run_step=0,
+            workspace=Workspace(FilesystemOnlyWorkspace(fs_root)),
+        )
+        assert await shell.get_tools(ctx) == {}
 
     async def test_filesystem_only_backend_serves_the_default_tools(self, fs_root: Path) -> None:
         toolset = FileSystem[None](root_dir=fs_root).get_toolset()
