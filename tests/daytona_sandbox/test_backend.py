@@ -689,6 +689,11 @@ async def test_attach_timeout_is_transient(fake_daytona: FakeDaytona, monkeypatc
         await DaytonaSandboxBackend(ref=WorkspaceRef(provider='daytona', id=existing.id)).get_client()
 
 
+def test_working_dir_docstring_describes_cached_probe() -> None:
+    doc = DaytonaSandboxBackend.working_dir.__doc__ or ''
+    assert 'first call' in doc and 'cached' in doc
+
+
 @pytest.mark.parametrize(
     ('key', 'required', 'outcome'),
     [('key', '1', None), ('', '', pytest.skip.Exception), ('', '1', pytest.fail.Exception)],

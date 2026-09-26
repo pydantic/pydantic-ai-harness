@@ -472,8 +472,8 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
     async def working_dir(self) -> str:
         """Return the filesystem-canonical default directory inside the workspace.
 
-        A deleted sandbox raises `WorkspaceUnavailableError`, so this doubles as the check that the
-        environment still exists.
+        The probe runs only on the first call per connection. If the sandbox was deleted, that
+        call raises `WorkspaceUnavailableError`; later calls return the cached path without probing.
         """
         if self._resolved_working_dir is None:
             sandbox = await self.get_client()
