@@ -35,7 +35,7 @@ agent = Agent(
 agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caught.')
 ```
 
-`LocalWorkspace('.')` is where the agent works: its file tools and commands run on your machine, in this directory. It is not a sandbox, so commands can reach anything you can. To run the same agent in an isolated cloud machine, swap it for a sandbox capability (Modal, E2B, or Sprites); see [Workspaces](#workspaces).
+`LocalWorkspace('.')` is where the agent works: its file tools and commands run on your machine, in this directory. It is not a sandbox, so commands can reach anything you can. To run the same agent in an isolated cloud machine, swap it for a sandbox capability (Modal, E2B, Daytona, or Sprites); see [Workspaces](#workspaces).
 
 Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus `delegate_task` to hand a sub-task to a fresh run of the same agent, repository context, and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
 
@@ -122,6 +122,7 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 | [FileSystem](filesystem.md) | Harness | Read, write, edit, list, and search files under a root in the run's workspace, with opt-in ripgrep tools; path-traversal checked, secrets read-only |
 | [Shell](shell.md) | Harness | Command execution in the run's workspace with allowlists, denylists, timeouts, credential-stripping, and opt-in commands that outlive the run |
 | [Modal Sandbox](modal-sandbox.md) | Harness | Commands and files in an isolated [Modal](https://modal.com) cloud sandbox |
+| [Daytona Sandbox](daytona-sandbox.md) | Harness | Commands and files in an isolated [Daytona](https://www.daytona.io) cloud sandbox |
 
 ### Tools & native abilities
 

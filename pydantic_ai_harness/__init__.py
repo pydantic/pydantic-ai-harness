@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     )
     from .conversation_search import ConversationSearch
     from .day_ai import DayAI
+    from .daytona_sandbox import DaytonaSandbox
     from .dynamic_workflow import DynamicWorkflow
     from .exa import ExaAgent, ExaSearch
     from .filesystem import READ_ONLY_TOOL_NAMES, FileSystem
@@ -78,6 +79,7 @@ __all__ = [
     'ConversationSearch',
     'DEFAULT_RESEARCHER_INSTRUCTIONS',
     'DayAI',
+    'DaytonaSandbox',
     'DeduplicateFileReads',
     'DynamicWorkflow',
     'ExaAgent',
@@ -142,6 +144,7 @@ _CAPABILITY_EXPORTS = {
     'Coder': 'coder',
     'ConversationSearch': 'conversation_search',
     'DayAI': 'day_ai',
+    'DaytonaSandbox': 'daytona_sandbox',
     'DeduplicateFileReads': 'compaction',
     'DynamicWorkflow': 'dynamic_workflow',
     'ExaAgent': 'exa',

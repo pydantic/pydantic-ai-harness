@@ -43,7 +43,7 @@ agent = Agent(
 agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caught.')
 ```
 
-File paths resolve from the workspace's working directory, and commands start there. To work in an isolated cloud machine instead, swap `LocalWorkspace` for a sandbox capability (Modal, E2B, or Sprites); nothing else changes. Commands run without an allowlist, and the file tools' path limits don't apply to them.
+File paths resolve from the workspace's working directory, and commands start there. To work in an isolated cloud machine instead, swap `LocalWorkspace` for a sandbox capability (Modal, E2B, Daytona, or Sprites); nothing else changes. Commands run without an allowlist, and the file tools' path limits don't apply to them.
 
 [`agent.to_cli_sync()`](https://pydantic.dev/docs/ai/cli/) and [`agent.to_web()`](https://pydantic.dev/docs/ai/web/) use the same workspace.
 

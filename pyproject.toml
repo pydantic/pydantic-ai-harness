@@ -130,6 +130,9 @@ github = [
 slack = [
     "pydantic-ai-slim[mcp]>=2.44.0",
 ]
+daytona = [
+    "daytona>=0.198.0,<0.199.0",
+]
 coder = [
     "ripgrep==14.1.0 ; sys_platform != 'android'",
 ]
@@ -279,7 +282,11 @@ executionEnvironments = [
 addopts = '-p no:cassetter'
 testpaths = ['tests']
 xfail_strict = true
-markers = ['modal_live: runs against a real Modal control plane; needs credentials', 'e2b_live: runs against a real E2B sandbox; needs credentials']
+markers = [
+    'modal_live: runs against a real Modal control plane; needs credentials',
+    'daytona_live: runs against a real Daytona control plane; needs credentials',
+    'e2b_live: runs against a real E2B sandbox; needs credentials',
+]
 filterwarnings = [
     'error',
     # DBOS's run_sync triggers this on Python 3.12+ — not our code.
@@ -295,7 +302,7 @@ anyio_mode = 'auto'
 [tool.coverage.run]
 branch = true
 source = ['pydantic_ai_harness', 'tests']
-omit = ['tests/**/test_modal_live.py']
+omit = ['tests/**/test_modal_live.py', 'tests/**/test_daytona_live.py']
 
 [tool.coverage.paths]
 source = ['.', '/home/runner/work/pydantic-ai-harness/pydantic-ai-harness']
