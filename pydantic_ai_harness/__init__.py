@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from .spend import SpendLimits
     from .stackone import StackOne
     from .step_persistence import StepPersistence
+    from .structured_output import SchemaOutput
     from .subagents import SubAgent, SubAgents
     from .system_reminders import SystemReminders
     from .tool_output_limits import ToolOutputLimits
@@ -110,6 +111,7 @@ __all__ = [
     'ReportContextUsage',
     'RepoContext',
     'Researcher',
+    'SchemaOutput',
     'Shell',
     'Skills',
     'SlidingWindowCompaction',
@@ -186,6 +188,7 @@ _CONSTANT_EXPORTS = {
     'DEFAULT_RESEARCHER_INSTRUCTIONS': 'researcher',
     'LLM_API_KEY_ENV_PATTERNS': 'shell',
     'READ_ONLY_TOOL_NAMES': 'filesystem',
+    'SchemaOutput': 'structured_output',
     'SubAgent': 'subagents',
 }
 
