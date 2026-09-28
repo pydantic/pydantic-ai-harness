@@ -125,7 +125,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        python: ['3.11', '3.14']
+        python: ['3.10', '3.14']
     defaults:
       run:
         working-directory: pydantic-clai2

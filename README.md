@@ -1,5 +1,11 @@
 # Pydantic AI Harness
 
+> [!WARNING]
+> **This repository is being merged into [Pydantic AI](https://github.com/pydantic/pydantic-ai) and will be archived.**
+> `pydantic-ai-harness` and `pydantic-clai2` are now developed there, in [`src/pydantic_ai_harness`](https://github.com/pydantic/pydantic-ai/tree/main/src/pydantic_ai_harness) and [`src/pydantic_clai2`](https://github.com/pydantic/pydantic-ai/tree/main/src/pydantic_clai2), with their full history.
+> Please open new issues and pull requests on [pydantic/pydantic-ai](https://github.com/pydantic/pydantic-ai/issues).
+> The PyPI package names stay the same, and future releases will be published from Pydantic AI.
+
 [![CI](https://github.com/pydantic/pydantic-ai-harness/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/pydantic/pydantic-ai-harness/actions/workflows/main.yml?query=branch%3Amain)
 [![PyPI](https://img.shields.io/pypi/v/pydantic-ai-harness.svg)](https://pypi.python.org/pypi/pydantic-ai-harness)
 [![versions](https://img.shields.io/pypi/pyversions/pydantic-ai-harness.svg)](https://github.com/pydantic/pydantic-ai-harness)
@@ -41,7 +47,7 @@ print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus repository context and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
+Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus `delegate_task` to hand a sub-task to a fresh run of the same agent, repository context, and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
 
 ```bash
 uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
@@ -81,7 +87,7 @@ agent = Agent(
 
 ## No magic: it's capabilities all the way down
 
-`Coder` is a regular combined capability: [`FileSystem`](pydantic_ai_harness/filesystem/) with five of its tools and content hashes off, [`Shell`](pydantic_ai_harness/shell/) with its persistent `shell` tool and no allowlist, [`RepoContext`](pydantic_ai_harness/repo_context/), [`ClearToolResults` and `WarnNearLimits`](pydantic_ai_harness/compaction/), and a bounded [`ToolOutputLimits`](pydantic_ai_harness/tool_output_limits/), plus its default instructions and JSON argument repair. Use it whole, or build the same agent from those capabilities to change any setting; the [Coder page](pydantic_ai_harness/coder/) lists the exact configuration.
+`Coder` is a regular combined capability: [`FileSystem`](pydantic_ai_harness/filesystem/) with five of its tools and content hashes off, [`Shell`](pydantic_ai_harness/shell/) with its persistent `shell` tool and no allowlist, [`RepoContext`](pydantic_ai_harness/repo_context/), [`SubAgents`](pydantic_ai_harness/subagents/) delegating to the agent itself, [`ClearToolResults` and `WarnNearLimits`](pydantic_ai_harness/compaction/), and a bounded [`ToolOutputLimits`](pydantic_ai_harness/tool_output_limits/), plus its default instructions and JSON argument repair. Use it whole, or build the same agent from those capabilities to change any setting; the [Coder page](pydantic_ai_harness/coder/) lists the exact configuration.
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
@@ -96,7 +102,7 @@ agent = Agent(
 )
 ```
 
-See the Coder documentation for tool signatures, persistent shell lifecycle, and migration from the previous planning/delegation composition.
+See the Coder documentation for tool signatures, persistent shell lifecycle, and delegation.
 
 ## Capabilities
 
@@ -108,7 +114,7 @@ Complete agent stacks as regular combined capabilities: one import gives you a w
 
 | Harness | Package | What it provides |
 |---|---|---|
-| [Coder](pydantic_ai_harness/coder/) | Harness | Six coding tools, persistent shell commands, autonomous guidance, and context controls |
+| [Coder](pydantic_ai_harness/coder/) | Harness | Six coding tools, persistent shell commands, delegation to itself, autonomous guidance, and context controls |
 | [Researcher](pydantic_ai_harness/researcher/) | Harness | A complete web-research stack: search, page fetching, a delegated sub-researcher, and bounded tool output |
 
 ### Execution environments
@@ -129,7 +135,17 @@ Connections to systems outside the agent's workspace, and abilities the provider
 |---|---|---|
 | [MCP](https://ai.pydantic.dev/capabilities/mcp/) | Core | Connect any MCP server's tools; local by default, provider-native connectors opt-in |
 | [Image Generation](https://ai.pydantic.dev/capabilities/image-generation/) | Core | Generate and edit images; provider-native where supported, sub-agent fallback elsewhere |
+| [GitHub](pydantic_ai_harness/github/) | Harness | Read and change GitHub repositories, issues, pull requests, and other accessible resources. |
+| [Linear](pydantic_ai_harness/linear/) | Harness | Read and change Linear issues, projects, teams, and comments. |
+| [Notion](pydantic_ai_harness/notion/) | Harness | Search and change Notion workspace content. |
+| [Google Workspace](pydantic_ai_harness/google_workspace/) | Harness | Use Gmail, Calendar, Drive, and other Google Workspace tools. |
 | [StackOne](pydantic_ai_harness/stackone/) | Harness | Act on linked SaaS accounts (HRIS, ATS, CRM, …) via [StackOne](https://www.stackone.com) |
+| [Slack](pydantic_ai_harness/slack/) | Harness | Give an agent Slack messages, channels, and canvas tools. |
+| [Ordinal](pydantic_ai_harness/ordinal/) | Harness | Draft, schedule, and analyze social posts through [Ordinal](https://www.tryordinal.com)'s hosted MCP server |
+| [Grain](pydantic_ai_harness/grain/) | Harness | Search meetings, transcripts, and notes through [Grain](https://grain.com)'s hosted MCP server |
+| [Day AI](pydantic_ai_harness/day_ai/) | Harness | Search and update CRM records and meeting context through [Day AI](https://day.ai)'s hosted MCP server |
+| [PostHog](pydantic_ai_harness/posthog/) | Harness | Query product analytics and manage feature flags, experiments, and dashboards through [PostHog](https://posthog.com)'s hosted MCP server |
+| [Pylon](pydantic_ai_harness/pylon/) | Harness | Work with support issues, accounts, and contacts through [Pylon](https://www.usepylon.com)'s hosted MCP server |
 | [LocalStack](pydantic_ai_harness/localstack/) | Harness | An emulated AWS environment with AWS CLI tools |
 | [Macroscope](pydantic_ai_harness/macroscope/) | Harness | Run a local [Macroscope](https://docs.macroscope.com/cli) code review and hand the findings to the agent |
 
@@ -219,6 +235,7 @@ Outside the loop: how runs persist, survive failures, and get observed and confi
 | [AWS Lambda durability](pydantic_ai_harness/aws_lambda/) | Harness | Checkpoint model requests and tool calls into AWS Lambda durable function steps |
 | [Step Persistence](pydantic_ai_harness/step_persistence/) | Harness | Save, restore, resume (`continue_run`), and fork (`fork_run`) runs; file/SQLite/Mongo backends |
 | [Instrumentation](https://ai.pydantic.dev/capabilities/instrumentation/) | Core | OpenTelemetry GenAI spans for every model and tool call; the raw material for [Logfire](https://pydantic.dev/logfire) traces |
+| [Logfire MCP](pydantic_ai_harness/logfire_mcp/) | Harness | Query Logfire telemetry and manage observability resources. |
 | [Managed Prompt](pydantic_ai_harness/logfire/) | Harness | Back instructions with a [Logfire](https://pydantic.dev/logfire)-managed prompt; version and roll out without redeploying |
 | [Thread Executor](https://ai.pydantic.dev/capabilities/thread-executor/) | Core | Run sync tools on a shared thread pool |
 

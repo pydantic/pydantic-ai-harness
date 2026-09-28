@@ -3,10 +3,12 @@
 import asyncio
 import contextlib
 import math
+import time
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Self, cast
+from pathlib import Path
+from typing import cast
 
 from pydantic_ai import AgentStreamEvent, FunctionToolCallEvent, FunctionToolResultEvent, PartDeltaEvent, PartStartEvent
 from pydantic_ai.messages import (
@@ -17,9 +19,13 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolCallPartDelta,
 )
+from rich.cells import set_cell_size
 from rich.console import Console
+from typing_extensions import Self
 
 from . import theme
+from .spinners import BUILTIN_SPINNERS, DEFAULT_SPINNER, Spinner
+from .tool_output import terminal_text
 from .usage_report import format_cost
 
 StatusSegment = Callable[[], str]
@@ -31,6 +37,8 @@ class Status:
     """Reported context and explicitly approximate live output counts."""
 
     model: str = 'agent default'
+    workspace: str = ''
+    """The session's working directory; hidden while empty."""
     context_tokens: int | None = None
     context_alert: bool = False
     """Paint the context figure `WARNING`; set by whoever knows the window, such as the `compaction` plugin."""
@@ -70,7 +78,9 @@ class Status:
         if self.output_tokens is not None:
             output = f'{self.output_tokens:,} output tokens'
         cost = '' if self.cost is None else f' | {format_cost(self.cost)}'
-        head = f'{frame} {self.model} | context: '.lstrip()
+        # A POSIX directory name may hold a newline or an escape sequence; keep it inert on every painter.
+        workspace = f' | {_short_path(terminal_text(self.workspace, keep=""))}' if self.workspace else ''
+        head = f'{frame} {self.model}{workspace} | context: '.lstrip()
         return head, context, f' tokens | {output}{cost} | {self.activity}', self._plugin_text()
 
     def _plugin_text(self) -> str:
@@ -101,20 +111,24 @@ class Status:
         return [*painted, (theme.MUTED, plugins)] if plugins else painted
 
 
-def _interrupted() -> bool:
-    """Whether the current task was itself cancelled while it waited on the animation task."""
-    current = asyncio.current_task()
-    return current is not None and current.cancelling() > 0
-
-
 class StatusLine:
     """Keep the prompt frame and status visible below streamed output during a run."""
 
-    def __init__(self, console: Console, status: Status, *, enabled: bool = True) -> None:
-        """Bind the footer to the same output stream as the renderer."""
+    def __init__(
+        self,
+        console: Console,
+        status: Status,
+        *,
+        enabled: bool = True,
+        spinner: Callable[[], Spinner] = lambda: BUILTIN_SPINNERS[DEFAULT_SPINNER],
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Bind the footer to the same output stream as the renderer; `spinner` is read on every frame."""
         self.console = console
         self.status = status
         self.enabled = enabled
+        self.spinner = spinner
+        self.clock = clock
         self._task: asyncio.Task[None] | None = None
         self._height = 0
         self._rows = 0
@@ -148,11 +162,11 @@ class StatusLine:
         if task is not None:
             task.cancel()
             try:
+                # `asyncio.wait` never forwards our cancellation to the animation, so a
+                # `CancelledError` here is ours and propagates: Ctrl-C must still abort.
+                await asyncio.wait({task})
                 with contextlib.suppress(asyncio.CancelledError):
-                    await task
-                if _interrupted():
-                    # The CancelledError was ours, not the animation's: Ctrl-C must still abort.
-                    raise asyncio.CancelledError
+                    task.result()  # Surface an animation failure; its cancellation was ours.
             finally:
                 self._clear()
                 self.console.show_cursor(True)
@@ -198,7 +212,8 @@ class StatusLine:
         painted = ''.join(paint(index) + char for index, char in enumerate(text))
         if rows == 4:
             inner_width = width - 3
-            hint = '> Working... Ctrl-C to interrupt'[:inner_width].ljust(inner_width)
+            glyph = self.spinner().frame(self.clock())
+            hint = set_cell_size(f'> Working {glyph} Ctrl-C to interrupt', inner_width)
             border = '─' * inner_width
             for row, line in enumerate((f'┌{border}┐', f'│{hint}│', f'└{border}┘'), start=height - 3):
                 prefix += f'\x1b[{row};1H\x1b[2K{theme.sgr(theme.MUTED)}{line}\x1b[0m'
@@ -206,11 +221,18 @@ class StatusLine:
         self.console.file.flush()
 
     async def _animate(self) -> None:
-        frame = 0
         while True:
-            self._draw(frame)
-            frame += 1
-            await asyncio.sleep(0.1)
+            # The shimmer keeps its ten steps a second whatever the spinner's speed.
+            self._draw(int(self.clock() * 10))
+            await asyncio.sleep(min(0.1, self.spinner().interval))
+
+
+def _short_path(path: str, limit: int = 40) -> str:
+    """Abbreviate the home directory, then keep the path's tail, the part that tells worktrees apart."""
+    # `Path.home()` raises `RuntimeError` when the account has no resolvable home directory.
+    with contextlib.suppress(ValueError, RuntimeError):
+        path = str(Path('~', Path(path).relative_to(Path.home())))
+    return path if len(path) <= limit else '…' + path[-(limit - 1) :]
 
 
 def _printable(text: str) -> str:

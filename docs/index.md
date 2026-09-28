@@ -1,6 +1,6 @@
 ---
 title: Pydantic AI Harness
-description: "Your agent's favorite harness, built on Pydantic AI: 30+ capabilities and complete agents assembled from them, from a coding agent to your own custom stack."
+description: "Pydantic AI Harness is the official capability library for Pydantic AI: a coding agent, file and shell tools, memory, subagents, and context management."
 ---
 
 # Pydantic AI Harness
@@ -32,7 +32,7 @@ print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus repository context and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
+Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus `delegate_task` to hand a sub-task to a fresh run of the same agent, repository context, and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
 
 ```bash
 uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
@@ -64,7 +64,7 @@ agent = Agent(
 
 ## No magic: it's capabilities all the way down
 
-`Coder` is a regular combined capability: [`FileSystem`](filesystem.md) with five of its tools and content hashes off, [`Shell`](shell.md) with its persistent `shell` tool and no allowlist, [`RepoContext`](repo-context.md), [`ClearToolResults` and `WarnNearLimits`](compaction.md), and a bounded [`ToolOutputLimits`](tool-output-limits.md), plus its default instructions and JSON argument repair. Use it whole, or build the same agent from those capabilities to change any setting; the [Coder page](coder.md) lists the exact configuration.
+`Coder` is a regular combined capability: [`FileSystem`](filesystem.md) with five of its tools and content hashes off, [`Shell`](shell.md) with its persistent `shell` tool and no allowlist, [`RepoContext`](repo-context.md), [`SubAgents`](subagents.md) delegating to the agent itself, [`ClearToolResults` and `WarnNearLimits`](compaction.md), and a bounded [`ToolOutputLimits`](tool-output-limits.md), plus its default instructions and JSON argument repair. Use it whole, or build the same agent from those capabilities to change any setting; the [Coder page](coder.md) lists the exact configuration.
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
@@ -79,7 +79,7 @@ agent = Agent(
 )
 ```
 
-See the Coder documentation for tool signatures, persistent shell lifecycle, and migration from the previous planning/delegation composition.
+See the Coder documentation for tool signatures, persistent shell lifecycle, and delegation.
 
 ## Capabilities
 
@@ -91,7 +91,7 @@ Complete agent stacks as regular combined capabilities: one import gives you a w
 
 | Harness | Package | What it provides |
 |---|---|---|
-| [Coder](coder.md) | Harness | Six coding tools, persistent shell commands, autonomous guidance, and context controls |
+| [Coder](coder.md) | Harness | Six coding tools, persistent shell commands, delegation to itself, autonomous guidance, and context controls |
 | [Researcher](researcher.md) | Harness | A complete web-research stack: search, page fetching, a delegated sub-researcher, and bounded tool output |
 
 ### Execution environments
@@ -112,7 +112,17 @@ Connections to systems outside the agent's workspace, and abilities the provider
 |---|---|---|
 | [MCP](/ai/capabilities/mcp/) | Core | Connect any MCP server's tools; local by default, provider-native connectors opt-in |
 | [Image Generation](/ai/capabilities/image-generation/) | Core | Generate and edit images; provider-native where supported, sub-agent fallback elsewhere |
+| [GitHub](github.md) | Harness | Read and change GitHub repositories, issues, pull requests, and other accessible resources. |
+| [Linear](linear.md) | Harness | Read and change Linear issues, projects, teams, and comments. |
+| [Notion](notion.md) | Harness | Search and change Notion workspace content. |
+| [Google Workspace](google-workspace.md) | Harness | Use Gmail, Calendar, Drive, and other Google Workspace tools. |
 | [StackOne](stackone.md) | Harness | Act on linked SaaS accounts (HRIS, ATS, CRM, …) via [StackOne](https://www.stackone.com) |
+| [Slack](slack.md) | Harness | Give an agent Slack messages, channels, and canvas tools. |
+| [Ordinal](ordinal.md) | Harness | Draft, schedule, and analyze social posts through [Ordinal](https://www.tryordinal.com)'s hosted MCP server |
+| [Grain](grain.md) | Harness | Search meetings, transcripts, and notes through [Grain](https://grain.com)'s hosted MCP server |
+| [Day AI](day-ai.md) | Harness | Search and update CRM records and meeting context through [Day AI](https://day.ai)'s hosted MCP server |
+| [PostHog](posthog.md) | Harness | Query product analytics and manage feature flags, experiments, and dashboards through [PostHog](https://posthog.com)'s hosted MCP server |
+| [Pylon](pylon.md) | Harness | Work with support issues, accounts, and contacts through [Pylon](https://www.usepylon.com)'s hosted MCP server |
 | [LocalStack](localstack.md) | Harness | An emulated AWS environment with AWS CLI tools |
 | [Macroscope](macroscope.md) | Harness | Run a local [Macroscope](https://docs.macroscope.com/cli) code review and hand the findings to the agent |
 
@@ -202,6 +212,7 @@ Outside the loop: how runs persist, survive failures, and get observed and confi
 | [AWS Lambda durability](aws-lambda.md) | Harness | Checkpoint model requests and tool calls into AWS Lambda durable function steps |
 | [Step Persistence](step-persistence.md) | Harness | Save, restore, resume (`continue_run`), and fork (`fork_run`) runs; file/SQLite/Mongo backends |
 | [Instrumentation](/ai/capabilities/instrumentation/) | Core | OpenTelemetry GenAI spans for every model and tool call; the raw material for [Logfire](https://pydantic.dev/logfire) traces |
+| [Logfire MCP](logfire-mcp.md) | Harness | Query Logfire telemetry and manage observability resources. |
 | [Managed Prompt](managed-prompt.md) | Harness | Back instructions with a [Logfire](https://pydantic.dev/logfire)-managed prompt; version and roll out without redeploying |
 | [Thread Executor](/ai/capabilities/thread-executor/) | Core | Run sync tools on a shared thread pool |
 
