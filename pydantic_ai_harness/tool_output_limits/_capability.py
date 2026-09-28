@@ -122,6 +122,9 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         ```
     """
 
+    id: str | None = field(default='tool_output_limits', kw_only=True)
+    """Stable capability and toolset ID."""
+
     bands: Sequence[Band] = field(default_factory=_default_bands)
     """Ordered size bands. The first band whose `over` threshold is met wins."""
 
@@ -201,7 +204,7 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
             """
             return await _read_slice(store, handle, offset, limit, from_end, pattern)
 
-        return FunctionToolset([read_tool_result])
+        return FunctionToolset([read_tool_result], id=self.id)
 
     # --- reduction ---
 

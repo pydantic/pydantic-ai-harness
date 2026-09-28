@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -40,6 +40,9 @@ class Macroscope(AbstractCapability[AgentDepsT]):
     never starts, the tool reports that the user needs to run `macroscope` once.
     """
 
+    id: str | None = field(default='macroscope', kw_only=True)
+    """Stable capability and toolset ID."""
+
     base: str | None = None
     """Git ref to diff against. When `None`, `--base` is omitted and the CLI
     auto-detects the base branch itself (and creates its own review worktree)."""
@@ -63,6 +66,7 @@ class Macroscope(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> MacroscopeToolset[AgentDepsT]:
         """Build the toolset that provides the `run_macroscope_review` tool."""
         return MacroscopeToolset[AgentDepsT](
+            id=self.id,
             command=self.command,
             cwd=Path(self.cwd),
             base=self.base,

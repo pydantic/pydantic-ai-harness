@@ -122,6 +122,9 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     ```
     """
 
+    id: str | None = field(default='sub_agents', kw_only=True)
+    """Stable capability and toolset ID."""
+
     agents: Sequence[SubAgent[AgentDepsT]] = ()
     """The sub-agents to expose, each a `SubAgent` pairing an agent with its
     per-delegate run controls. See `SubAgent`. These take precedence over any
@@ -441,6 +444,7 @@ class SubAgents(AbstractCapability[AgentDepsT]):
         if self._delegation_off or (not self._by_name and not self.include_self):
             return None
         return SubAgentToolset(
+            id=self.id,
             agents=self._by_name,
             forward_usage=self.forward_usage,
             inherit_tools=self.inherit_tools,

@@ -89,6 +89,7 @@ class YouResearchToolset(FunctionToolset[AgentDepsT]):
     def __init__(
         self,
         *,
+        id: str | None = None,
         client: YouClient | None,
         research_effort: ResearchEffortName,
         finance_effort: FinanceEffortName,
@@ -100,7 +101,7 @@ class YouResearchToolset(FunctionToolset[AgentDepsT]):
         output_schema: Mapping[str, object] | None = None,
         timeout_ms: int = DEFAULT_RESEARCH_TIMEOUT_MS,
     ) -> None:
-        super().__init__()
+        super().__init__(id=id)
         self._client = client if client is not None else default_client(timeout_ms)
         self._effort = models.ResearchEffort(research_effort)
         self._finance_effort = models.FinanceResearchEffort(finance_effort)
@@ -226,6 +227,9 @@ class YouResearch(AbstractCapability[AgentDepsT]):
 
     _: KW_ONLY
 
+    id: str | None = 'you_research'
+    """Stable capability and toolset ID."""
+
     research_effort: ResearchEffortName = 'standard'
     """How hard `research` works: `lite`, `standard`, `deep`, or `exhaustive`.
 
@@ -291,6 +295,7 @@ class YouResearch(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> YouResearchToolset[AgentDepsT]:
         """Build the toolset providing `answer`, `research`, and `finance_research`."""
         return YouResearchToolset[AgentDepsT](
+            id=self.id,
             client=self.client,
             research_effort=self.research_effort,
             finance_effort=self.finance_effort,

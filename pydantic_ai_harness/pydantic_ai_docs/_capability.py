@@ -55,6 +55,9 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
     ```
     """
 
+    id: str | None = field(default='pydantic_ai_docs', kw_only=True)
+    """Stable capability and toolset ID."""
+
     local_docs_path: Path | None = None
     """Local pyai docs checkout to read first. When `None`, falls back to the
     `PYDANTIC_AI_HARNESS_DOCS_PATH` env var, then to the remote source."""
@@ -87,6 +90,7 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> AgentToolset[AgentDepsT] | None:
         """Toolset providing `read_pyai_docs` over the resolved local path and shared cache."""
         return PydanticAIDocsToolset[AgentDepsT](
+            id=self.id,
             local_docs_path=self._resolved_local_path(),
             cache=self._cache if self.cache else None,
         )

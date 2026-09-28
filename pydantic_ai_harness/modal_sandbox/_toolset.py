@@ -33,6 +33,7 @@ class ModalSandboxToolset(FunctionToolset[AgentDepsT]):
     def __init__(
         self,
         *,
+        id: str | None = None,
         image: str,
         sandbox_id: str | None,
         app_name: str,
@@ -48,7 +49,7 @@ class ModalSandboxToolset(FunctionToolset[AgentDepsT]):
         session: ModalSandboxSession | None = None,
         _run_scoped: bool = False,
     ) -> None:
-        super().__init__()
+        super().__init__(id=id)
         self._image = image
         self._sandbox_id = sandbox_id
         self._app_name = app_name
@@ -84,6 +85,7 @@ class ModalSandboxToolset(FunctionToolset[AgentDepsT]):
         whose `__aexit__` requests that sandbox's termination.
         """
         return ModalSandboxToolset[AgentDepsT](
+            id=self.id,
             image=self._image,
             sandbox_id=self._sandbox_id,
             app_name=self._app_name,
