@@ -94,8 +94,8 @@ jobs:
           fi
 
       # A third step for the same reason the MongoDB one is separate: the three
-      # capabilities need independent answers, and this one's paths are the spend
-      # store rather than the Mongo-backed capabilities.
+      # capabilities need independent answers, and this one's paths are the two
+      # Redis-backed stores rather than the Mongo-backed capabilities.
       - id: detect-redis
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
@@ -104,6 +104,8 @@ jobs:
           if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
             pydantic_ai_harness/spend \
             tests/spend \
+            pydantic_ai_harness/step_persistence \
+            tests/step_persistence \
             integration_tests/redis \
             Makefile \
             pyproject.toml \

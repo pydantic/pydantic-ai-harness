@@ -2,7 +2,8 @@
 
 `MongoStepStore` needs the `mongodb` extra (`pip install
 pydantic-ai-harness[mongodb]`); it is imported lazily so the rest of this
-module stays usable without `pymongo` installed.
+module stays usable without `pymongo` installed. `RedisStepStore` needs no
+extra: it takes a caller-owned client through the `RedisClient` protocol.
 """
 
 from typing import TYPE_CHECKING
@@ -15,6 +16,7 @@ from pydantic_ai_harness.step_persistence._helpers import (
     fork_run,
     is_provider_valid,
 )
+from pydantic_ai_harness.step_persistence._redis import RedisClient, RedisStepStore
 from pydantic_ai_harness.step_persistence._store import (
     FileStepStore,
     InMemoryStepStore,
@@ -40,6 +42,8 @@ __all__ = [
     'FileStepStore',
     'InMemoryStepStore',
     'MongoStepStore',
+    'RedisClient',
+    'RedisStepStore',
     'RunRecord',
     'SnapshotSaved',
     'SnapshotState',
