@@ -13,6 +13,7 @@ from typing import Generic
 
 from anyio import CancelScope, fail_after
 from anyio.lowlevel import checkpoint
+from pydantic import ValidationError
 from pydantic_ai import AgentStreamEvent
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from rich.console import Console
@@ -231,6 +232,9 @@ class PluginLoader(Generic[DepsT]):
             full_screen=self._full_screen,
             conversation=self._conversation,
             status=self._status,
+            save_settings=lambda settings: self._store.save_plugin(
+                entry.declaration.model_copy(update={'settings': settings, 'enabled': True})
+            ),
         )
         try:
             module = self._import(entry, fresh=fresh)
@@ -338,6 +342,29 @@ class PluginLoader(Generic[DepsT]):
         await self.unload(name)
         await self.load(name, fresh=True)
 
+    async def configure(self, name: str) -> str:
+        """Open the plugin's settings menu, then load it again if its saved settings changed."""
+        host = self._entry(name).host
+        if host is None:
+            raise ValueError(f'Plugin {name} is not loaded; enable it before configuring.')
+        if host.configurer is None:
+            raise ValueError(f'Plugin {name} has no settings menu; replace its declaration with /plugins add.')
+        before = self._entry(name).declaration.settings
+        try:
+            return await host.configurer()
+        finally:
+            # Edits are saved as they are made, so a menu that fails or is cancelled still needs them applied.
+            if self._entry(name).declaration.settings != before:
+                await self.unload(name)
+                await self.load(name)
+
+    async def _configure_new(self, name: str, message: str) -> str:
+        """After enable or add, open a newly loaded plugin's settings menu, if it has one."""
+        host = self._entry(name).host
+        if host is None or host.configurer is None:
+            return message
+        return f'{message}\n{await self.configure(name)}'
+
     async def command(self, args: list[str]) -> str:
         """Back `/plugins` with arguments; changes apply now and are saved."""
         if not args or args == ['list']:
@@ -349,20 +376,40 @@ class PluginLoader(Generic[DepsT]):
             existing = next((entry for entry in self.entries() if rest and entry.name == rest[0]), None)
             if existing is not None and not existing.shipped:
                 raise ValueError(f'Plugin {rest[0]} already exists; remove its declaration before replacing it.')
+            loaded = existing is not None and existing.host is not None
             if existing is not None:
                 await self.unload(rest[0])
+            previous = next((plugin for plugin in self._store.plugins() if plugin.id == rest[0]), None)
             plugins_command(self._store, args)
-            await self.load(rest[0])
+            try:
+                await self.load(rest[0])
+            except PluginError as exc:
+                if isinstance(exc.error, ValidationError):
+                    # Settings are plaintext, so settings the plugin rejects, perhaps a pasted secret, are not kept.
+                    if previous is None:
+                        self._store.delete_plugin(rest[0])
+                    else:
+                        self._store.save_plugin(previous)
+                    if loaded:
+                        await self.load(rest[0])
+                raise
             if existing is None:
-                return f'Added and loaded {rest[0]}.'
-            return f'Replaced {"project" if existing.project else "built-in"} {rest[0]}.'
+                return await self._configure_new(rest[0], f'Added and loaded {rest[0]}.')
+            kind = 'project' if existing.project else 'built-in'
+            return await self._configure_new(rest[0], f'Replaced {kind} {rest[0]}.')
         if len(rest) != 1:
             raise ValueError(
-                'Usage: /plugins [list|add ID MODULE[:ATTR] [JSON]|enable ID|disable ID|remove ID|reload ID]'
+                'Usage: /plugins [list|add ID MODULE[:ATTR] [JSON]|enable ID|disable ID|remove ID|reload ID'
+                '|configure ID]'
             )
         name = rest[0]
         if action == 'remove':
             return await self.remove(name)
+        if action == 'configure':
+            return await self.configure(name)
+        if action == 'enable' and self._entry(name).host is None:
+            await self.enable(name)
+            return await self._configure_new(name, f'Enabled {name}.')
         actions = {
             'enable': (self.enable, 'Enabled'),
             'disable': (self.disable, 'Disabled'),
