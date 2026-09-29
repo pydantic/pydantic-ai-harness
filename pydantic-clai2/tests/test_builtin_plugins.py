@@ -19,6 +19,8 @@ from pydantic_clai2.plugins import SessionStart
 from pydantic_clai2.settings_store import SettingsStore
 
 CURATED = {'coder', 'ask_user', 'repo_context', 'compaction', 'persistence', 'logfire', 'notifications', 'mcp'}
+OPT_IN = {'linear'}
+"""Built-ins that need a credential first, so they start disabled."""
 
 
 class Menu:
@@ -41,13 +43,13 @@ def _apply(action: Coroutine[object, object, object]) -> None:
 
 
 def test_builtins_are_the_curated_enabled_set() -> None:
-    assert sorted(plugin.id for plugin in DEFAULT_PLUGINS) == sorted(CURATED)
-    assert all(plugin.enabled for plugin in DEFAULT_PLUGINS)
+    assert sorted(plugin.id for plugin in DEFAULT_PLUGINS) == sorted(CURATED | OPT_IN)
+    assert {plugin.id for plugin in DEFAULT_PLUGINS if plugin.enabled} == CURATED
 
 
 def test_menu_offers_no_uncurated_harness_capabilities(tmp_path: Path) -> None:
     menu = PluginMenu(_loader(SettingsStore(tmp_path / 'settings.db'), DEFAULT_PLUGINS), apply=_apply)
-    assert {item.value for item in menu.items()} == CURATED
+    assert {item.value for item in menu.items()} == CURATED | OPT_IN
 
 
 def test_capability_saved_from_the_old_catalog_still_loads(tmp_path: Path) -> None:

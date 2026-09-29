@@ -12,12 +12,20 @@ from rich.console import Console
 from termflow.tui import MenuItem  # pyright: ignore[reportMissingTypeStubs]
 
 from pydantic_clai2.commands import Commands
-from pydantic_clai2.plugin_loader import PluginLoader
+from pydantic_clai2.plugin_loader import PluginError, PluginLoader
 from pydantic_clai2.plugin_menu import PluginMenu, open_plugins_menu
 from pydantic_clai2.plugins import SessionStart
 from pydantic_clai2.settings_store import SettingsStore
 
 PLUGIN = 'from pydantic_clai2.plugins import PluginHost\ndef activate(host: PluginHost) -> None:\n    pass\n'
+TUNED = PLUGIN + (
+    'async def configure(config):\n'
+    "    config.save({'runs': int(config.settings().get('runs', 0)) + 1})\n"
+    "    return f'configured {config.name}'\n"
+)
+SYNC = PLUGIN + "def configure(config):\n    return 'sync'\n"
+BAD = PLUGIN + 'def configure(config):\n    return 1\n'
+RAISES = PLUGIN + "async def configure(config):\n    raise RuntimeError('menu broke')\n"
 
 
 class FakeMenu:
@@ -28,11 +36,13 @@ class FakeMenu:
         self.redraws.append(items)
 
 
-def make_loader(tmp_path: Path, *names: str) -> PluginLoader[None]:
+def make_loader(tmp_path: Path, *names: str, sources: dict[str, str] | None = None) -> PluginLoader[None]:
     store = SettingsStore(tmp_path / 'config.db')
     store.plugins_dir.mkdir()
     for name in names:
         (store.plugins_dir / f'{name}.py').write_text(PLUGIN)
+    for name, source in (sources or {}).items():
+        (store.plugins_dir / f'{name}.py').write_text(source)
     return PluginLoader(
         store=store,
         console=Console(file=io.StringIO()),
@@ -114,6 +124,71 @@ async def test_open_menu_closes_quietly_without_changes(tmp_path: Path, names: t
 
     assert await open_plugins_menu(loader, run=run) == ''
     assert all(entry.host is None for entry in loader.entries())
+
+
+def settings(loader: PluginLoader[None], name: str) -> object:
+    return next(entry for entry in loader.entries() if entry.name == name).declaration.settings
+
+
+async def test_configure_hook_through_commands(tmp_path: Path) -> None:
+    loader = make_loader(tmp_path, 'plain', sources={'tuned': TUNED, 'sync': SYNC, 'bad': BAD, 'raises': RAISES})
+    with pytest.raises(PluginError, match="Plugin 'raises': RuntimeError: menu broke"):
+        await loader.command(['enable', 'raises'])
+    assert next(entry for entry in loader.entries() if entry.name == 'raises').host is None
+    with pytest.raises(ValueError, match='Plugin plain has no settings menu'):
+        await loader.command(['configure', 'plain'])
+    assert await loader.command(['enable', 'plain']) == 'Enabled plain.'
+    assert await loader.command(['enable', 'tuned']) == 'configured tuned\nEnabled tuned.'
+    assert settings(loader, 'tuned') == {'runs': 1}
+    [first] = [entry.host for entry in loader.entries() if entry.name == 'tuned']
+    assert first is not None
+
+    assert await loader.command(['configure', 'tuned']) == 'configured tuned'
+    [tuned] = [entry for entry in loader.entries() if entry.name == 'tuned']
+    assert tuned.declaration.settings == {'runs': 2}
+    assert tuned.host is not None and tuned.host is not first, 'reactivated with the new settings'
+    second = tuned.host
+    assert await loader.command(['enable', 'tuned']) == 'configured tuned\nEnabled tuned.'
+    [again] = [entry for entry in loader.entries() if entry.name == 'tuned']
+    assert again.declaration.settings == {'runs': 3}
+    assert again.host is not None and again.host is not second, 'enabling a loaded plugin applies its new settings'
+
+    assert await loader.command(['configure', 'sync']) == 'sync'
+    assert next(entry for entry in loader.entries() if entry.name == 'sync').host is None, 'still disabled'
+    with pytest.raises(PluginError, match='configure must return the message to show'):
+        await loader.command(['configure', 'bad'])
+
+
+async def test_menu_opens_settings_before_enabling_and_on_c(tmp_path: Path) -> None:
+    loader = make_loader(tmp_path, 'plain', sources={'tuned': TUNED, 'bad': BAD})
+    shown: list[str | None] = []
+
+    def by_name(menu: PluginMenu[None], name: str) -> MenuItem:
+        return next(item for item in menu.items() if item.value == name)
+
+    def run(menu: PluginMenu[None]) -> None:
+        fake = FakeMenu()
+        step = len(shown)
+        shown.append(menu.notice)
+        if step == 0:
+            assert menu.toggle(fake, by_name(menu, 'tuned')) is not None, 'closes to open the settings'
+        elif step == 1:
+            assert menu.configure(fake, by_name(menu, 'plain')) is None
+            assert menu.notice == 'Plugin plain has no settings menu.' and fake.redraws
+            assert menu.configure(fake, MenuItem('stray', value=None)) is None
+            assert menu.configure(fake, by_name(menu, 'tuned')) is not None
+        elif step == 2:
+            assert menu.configure(fake, by_name(menu, 'bad')) is not None
+
+    message = await open_plugins_menu(loader, run=run)
+    assert len(shown) == 4, 'the list opens again after each settings menu'
+    assert message.splitlines() == [
+        'configured tuned',
+        'configured tuned',
+        "Plugin 'bad': TypeError: configure must return the message to show",
+    ]
+    assert settings(loader, 'tuned') == {'runs': 2}
+    assert next(entry for entry in loader.entries() if entry.name == 'tuned').host is not None
 
 
 @pytest.fixture
