@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterable, Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import AbstractToolset
@@ -13,7 +13,7 @@ from pydantic_ai.capabilities._tool_search import ToolSearch as _ToolSearch
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import AgentStreamEvent, ModelResponse, NativeToolSearchReturnPart, SystemPromptPart
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from pydantic_ai_harness.code_mode._eager import EagerCodeModeToolset
 from pydantic_ai_harness.code_mode._speculation import (
@@ -40,6 +40,52 @@ _DISCOVERY_ANNOUNCEMENT_PREFIX = (
     'New functions are now available inside `run_code`. Their signatures have been '
     'added to the available-functions catalog in the system prompt'
 )
+
+
+class CodeModeMountSpec(TypedDict):
+    """One `mount` entry as an agent spec expresses it: `MountDir`'s keyword arguments.
+
+    `MountDir` is a compiled class with no JSON representation of its own, so specs
+    describe mounts with this shape and `CodeMode.from_spec` constructs the real
+    `MountDir` instances. Omitted keys keep `MountDir`'s own defaults. An empty list means
+    no mount, since the toolset advertises host file access for any non-`None` mount.
+    """
+
+    host_path: str
+    virtual_path: str
+    mode: NotRequired[Literal['read-only', 'read-write', 'overlay']]
+    write_bytes_limit: NotRequired[int | None]
+    memory_usage_limit: NotRequired[int]
+
+
+_MOUNT_SPEC_ADAPTER: TypeAdapter[CodeModeMountSpec | list[CodeModeMountSpec]] = TypeAdapter(
+    CodeModeMountSpec | list[CodeModeMountSpec]
+)
+
+
+def _mount_from_spec(mount: CodeModeMountSpec | Sequence[CodeModeMountSpec] | None) -> CodeModeMount | None:
+    """Build `MountDir` instances from spec mount entries, validating the entry shape first.
+
+    Validation happens here rather than in `MountDir` so a misspelled key fails with the
+    entry that carries it instead of an opaque constructor error.
+    """
+    if mount is None:
+        return None
+    # Deferred so a missing `pydantic-monty` still fails through `_toolset`'s install hint.
+    from pydantic_monty import MountDir
+
+    entries = cast(Sequence[object], mount if isinstance(mount, Sequence) else [mount])
+    allowed_keys = CodeModeMountSpec.__annotations__.keys()
+    for entry in entries:
+        if isinstance(entry, dict):
+            entry_dict = cast(dict[str, object], entry)
+            unknown_keys = entry_dict.keys() - allowed_keys
+            if unknown_keys:
+                raise ValueError(f'Unknown mount spec key(s): {sorted(unknown_keys)}')
+    validated = _MOUNT_SPEC_ADAPTER.validate_python(mount)
+    if isinstance(validated, list):
+        return [MountDir(**entry) for entry in validated] or None
+    return MountDir(**validated)
 
 
 @dataclass
@@ -325,6 +371,58 @@ class CodeMode(AbstractCapability[AgentDepsT]):
                 if isinstance(part, NativeToolSearchReturnPart):
                     self._announce_newly_discovered(ctx, _extract_discovered_names(part.content))
         return response
+
+    @classmethod
+    def from_spec(
+        cls,
+        tools: Literal['all'] | Sequence[str] | dict[str, Any] = 'all',
+        max_retries: int = 3,
+        *,
+        max_tool_calls: int = 100,
+        mount: CodeModeMountSpec | Sequence[CodeModeMountSpec] | None = None,
+        resource_limits: CodeModeResourceLimits | Literal['unlimited'] | None = None,
+        eager: bool = False,
+        speculate: Sequence[str] | Literal['declared'] | None = None,
+        monty_sandbox_url: str | None = None,
+        dynamic_catalog: bool = False,
+        id: str | None = None,
+        description: str | None = None,
+        defer_loading: bool = False,
+        **unsupported: object,
+    ) -> CodeMode[Any]:
+        """Build from an agent spec, covering the fields a spec can express.
+
+        Every parameter is named because this signature is what core reads to generate the
+        spec's JSON schema, and a field whose type has no JSON representation would
+        otherwise erase the whole `CodeMode` entry from that schema.
+
+        `mount` arrives as `CodeModeMountSpec` mappings and becomes `MountDir` instances.
+        `os_access` takes a live OS implementation or a callback, which no spec can carry,
+        so a spec naming it is rejected rather than dropped. The callable form of `tools`
+        is likewise construction-only; the `'all'`, name-list, and metadata-match forms
+        all serialize.
+        """
+        if 'os_access' in unsupported:
+            raise UserError(
+                'CodeMode cannot be built from a spec with `os_access`: it takes a live OS '
+                'implementation or a callback. Construct the capability in code to use it.'
+            )
+        if unsupported:
+            raise UserError(f'CodeMode has no spec field(s) {sorted(unsupported)}.')
+        return cls(
+            tools=tools,
+            max_retries=max_retries,
+            max_tool_calls=max_tool_calls,
+            mount=_mount_from_spec(mount),
+            resource_limits=resource_limits,
+            eager=eager,
+            speculate=speculate,
+            monty_sandbox_url=monty_sandbox_url,
+            dynamic_catalog=dynamic_catalog,
+            id=id,
+            description=description,
+            defer_loading=defer_loading,
+        )
 
     def _announce_newly_discovered(self, ctx: RunContext[AgentDepsT], names: Sequence[str]) -> None:
         """Enqueue a system-prompt announcement for any names we haven't already announced."""
