@@ -7,7 +7,7 @@ import sys
 import warnings
 
 import pytest
-from pydantic_ai import Agent
+from pydantic_ai import Agent, AgentSpec
 
 from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness.pydantic_ai_docs import PydanticAIDocs, PydanticAIDocsToolset, PydanticAIDocsTopic
@@ -58,6 +58,18 @@ class TestPreRenameSpecCompatibility:
         )
         loaded = [c for c in agent.root_capability.capabilities if isinstance(c, PydanticAIDocs)]
         assert len(loaded) == 1
+
+    def test_spec_schema_publishes_init_fields(self) -> None:
+        # Regression for #552: `@dataclass` rebuilds `__init__` in `_deprecated.py`,
+        # so the inherited `Path` annotation must resolve there at runtime for the
+        # spec schema to publish any fields.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            from pydantic_ai_harness.docs import PyaiDocs  # noqa: PLC0415  # the shim warns at import time
+
+        schema = AgentSpec.model_json_schema_with_capabilities([PyaiDocs])
+        params = schema['$defs']['spec_params_PyaiDocs']
+        assert set(params['properties']) == {'cache', 'defer_loading', 'description', 'id', 'local_docs_path'}
 
     def test_experimental_shim_exposes_the_same_class(self) -> None:
         with warnings.catch_warnings():

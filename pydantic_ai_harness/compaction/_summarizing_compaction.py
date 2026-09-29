@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterable, Callable, Sequence
+from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic_ai._run_context import AgentDepsT
-from pydantic_ai.agent import EventStreamHandler
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
+    AgentStreamEvent,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -53,7 +53,7 @@ from pydantic_ai_harness.compaction._shared import (
 )
 
 if TYPE_CHECKING:
-    from pydantic_ai.messages import AgentStreamEvent, ModelRequestPart, UserContent
+    from pydantic_ai.messages import ModelRequestPart, UserContent
     from pydantic_ai.models import AbstractModel, ModelRequestContext
 
 _DEFAULT_SUMMARY_PROMPT = """\
@@ -330,7 +330,11 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     policy that differs from the running agent without mutating the model.
     """
 
-    event_stream_handler: EventStreamHandler[object] | None = field(default=None, kw_only=True)
+    # Spelled out rather than core's `EventStreamHandler`: that alias embeds a string forward reference
+    # the agent-spec schema builder cannot resolve against this module's globals (#552).
+    event_stream_handler: Callable[[RunContext[object], AsyncIterable[AgentStreamEvent]], Awaitable[None]] | None = (
+        field(default=None, kw_only=True)
+    )
     """If set, this handler is passed to the nested summary run, so the summarizer's own
     model-streaming events surface to the caller.
 
