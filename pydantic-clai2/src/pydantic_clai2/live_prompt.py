@@ -1,6 +1,7 @@
 """Pinned editor and scrollback ownership, without a PromptSession renderer."""
 
 import asyncio
+import sys
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
@@ -30,6 +31,11 @@ from .prompt_transcript import TranscriptBuffer
 from .shell_passthrough import shell_command
 from .spinners import BUILTIN_SPINNERS, DEFAULT_SPINNER, Spinner
 from .tool_output import terminal_text
+
+
+def steer_key() -> str:
+    """Name the steer chord the way the user's keyboard labels it."""
+    return 'Option+Enter' if sys.platform == 'darwin' else 'Alt+Enter'
 
 
 @dataclass(eq=False)
@@ -175,13 +181,13 @@ class LivePrompt:
                 self.buffer.edit('delete')
             else:
                 self.submit(EOFError())
-        elif key in ('paste', 'ctrl-v', 'alt-v'):
+        elif key in ('paste', 'ctrl-v', 'ctrl-shift-v', 'alt-v'):
             self.paste(data if key == 'paste' else None)
         elif key == 'ctrl-r' or self.buffer.search is not None:
             self.search(key)
         elif key in ('tab', 'backtab'):
             self.complete(backwards=key == 'backtab')
-        elif key == 'enter':
+        elif key in ('enter', 'ctrl-enter'):
             self.accept()
         elif key == 'alt-enter':
             self.steer_queued()
@@ -397,7 +403,7 @@ class LivePrompt:
         if self.interrupts.active:
             head, glyph = ' Working ', self.spinner().frame(self.clock())
             # Queue and steer hints only matter once something is queued, matching pi and Claude Code.
-            hints = '| Enter: queue | Alt+Enter: steer queued ' if self.queued_messages else ''
+            hints = f'| Enter: queue | {steer_key()}: steer queued ' if self.queued_messages else ''
             title = truncate(f'{head}{glyph} {hints}', width)
             if title.startswith(head + glyph):
                 title = f'{head}{theme.sgr(theme.ACCENT)}{glyph}{reset}{muted}{title[len(head + glyph) :]}'

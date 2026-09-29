@@ -41,6 +41,7 @@ async def test_streaming_does_not_touch_editor(tty: bool) -> None:
     output = Output()
     surface = PromptSurface(output=output, size=lambda: (80, 24))
     surface.paint(ROWS)
+    assert '\x1b[>4;2m' in output.getvalue()
     start = len(output.getvalue())
     for text in ('one', ' two', '\n', 'next'):
         surface.write(text)
@@ -50,6 +51,7 @@ async def test_streaming_does_not_touch_editor(tty: bool) -> None:
     assert output.getvalue()[start:] == ('one two\r\nnext\r\n' if tty else 'one two\nnext\n')
     assert surface.isatty() is tty
     surface.release()
+    assert '\x1b[>4;0m' in output.getvalue()[start:]
     start = len(output.getvalue())
     surface.release()
     assert output.getvalue()[start:] == ''

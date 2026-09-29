@@ -41,7 +41,7 @@ def test_empty_edges_and_single_word_deletion() -> None:
     assert buffer.text == ''
 
 
-@pytest.mark.parametrize('key', ['ctrl-w', 'alt-backspace'])
+@pytest.mark.parametrize('key', ['ctrl-w', 'alt-backspace', 'ctrl-backspace'])
 @pytest.mark.parametrize(
     ('text', 'cursor', 'expected', 'expected_cursor'),
     [
