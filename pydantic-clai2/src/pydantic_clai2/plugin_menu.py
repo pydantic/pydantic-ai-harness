@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable, Coroutine, Sequence
+from dataclasses import dataclass
 from typing import Generic, Protocol
 
 from termflow.tui import MenuBuilder, MenuItem  # pyright: ignore[reportMissingTypeStubs]
@@ -13,7 +14,14 @@ from .plugin_loader import PluginEntry, PluginError, PluginLoader
 from .plugins import DepsT
 
 Apply = Callable[[Coroutine[object, object, object]], None]
-_HINT = 'Up/Down move - Space enable/disable - R reload - D remove - Enter/Q close'
+_HINT = 'Up/Down move - Space enable/disable - C configure - R reload - D remove - Enter/Q close'
+
+
+@dataclass(frozen=True)
+class Configure:
+    """What `C` hands back: the menu closes so the plugin's own settings menu can own the screen."""
+
+    name: str
 
 
 class Redrawable(Protocol):
@@ -65,6 +73,9 @@ class PluginMenu(Generic[DepsT]):
         if entry is not None:
             action = self._loader.disable if entry.host else self._loader.enable
             self._run(action(entry.name))
+            loaded = self._find(item)
+            if self.notice is None and loaded is not None and loaded.host and loaded.host.configurer:
+                self.notice = f'Press C to configure {entry.name}.'
         menu.replace_items(self.items())
 
     def reload(self, menu: Redrawable, item: MenuItem) -> None:
@@ -81,6 +92,13 @@ class PluginMenu(Generic[DepsT]):
             self._run(self._loader.remove(entry.name))
         menu.replace_items(self.items())
 
+    def configure(self, menu: Redrawable, item: MenuItem) -> MenuResult | None:
+        """C: close and open the highlighted plugin's settings menu."""
+        entry = self._find(item)
+        if entry is None:
+            return None
+        return MenuResult(item=MenuItem(item.label, value=Configure(entry.name)))
+
     def close(self, menu: Redrawable, item: MenuItem) -> MenuResult:
         """Q: close; every change was already applied."""
         return MenuResult(item=item)
@@ -93,6 +111,7 @@ class PluginMenu(Generic[DepsT]):
             .items(self.items())
             .preview(self.details)
             .on_key(' ', self.toggle)
+            .on_key('c', self.configure)
             .on_key('r', self.reload)
             .on_key('d', self.remove)
             .on_key('q', self.close)
@@ -125,9 +144,15 @@ async def open_plugins_menu(
         asyncio.run_coroutine_threadsafe(action, loop).result()
 
     menu = PluginMenu(loader, apply=apply)
-    await run_worker(lambda: (run or _run_menu)(menu))
-    return ''
+    result = await run_worker(lambda: (run or _run_menu)(menu))
+    chosen = result.item.value if isinstance(result, MenuResult) and result.item is not None else None
+    if not isinstance(chosen, Configure):
+        return ''
+    try:
+        return await loader.configure(chosen.name)
+    except (PluginError, ValueError) as exc:
+        return str(exc)
 
 
-def _run_menu(menu: PluginMenu[DepsT]) -> None:  # pragma: no cover -- needs a real terminal.
-    menu.build().run()
+def _run_menu(menu: PluginMenu[DepsT]) -> MenuResult:  # pragma: no cover -- needs a real terminal.
+    return menu.build().run()
