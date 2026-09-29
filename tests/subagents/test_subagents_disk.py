@@ -171,11 +171,37 @@ class TestResolveFolders:
 
 
 class TestDiskLoading:
-    def test_auto_loads_from_convention_by_default(self) -> None:
-        # The isolation fixture points the home root at an empty dir; populate its
-        # conventional folder and the default `SubAgents()` picks it up with no config.
+    @pytest.mark.parametrize('explicit', [False, True])
+    def test_no_folder_access_without_opt_in(self, monkeypatch: pytest.MonkeyPatch, explicit: bool) -> None:
+        def unexpected_access(cls: type[Path]) -> Path:  # pragma: no cover
+            pytest.fail('Folder discovery was not requested')
+
+        monkeypatch.setattr(Path, 'home', classmethod(unexpected_access))
+        monkeypatch.setattr(Path, 'cwd', classmethod(unexpected_access))
+        worker = Agent(TestModel(), name='worker')
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            capability = SubAgents(agents=[SubAgent(worker)]) if explicit else SubAgents[object]()
+        assert (capability.get_toolset() is not None) is explicit
+
+    def test_empty_roster_does_not_discover_agents(self) -> None:
         _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
-        cap: SubAgents[object] = SubAgents()
+        assert SubAgents(agents=[]).get_toolset() is None
+
+    def test_explicit_agents_combine_with_requested_folders(self) -> None:
+        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        worker = Agent(TestModel(), name='worker')
+        capability = SubAgents(agents=[SubAgent(worker)], agent_folders='agents')
+        instructions = capability.get_instructions()
+        assert isinstance(instructions, str)
+        assert '- worker' in instructions
+        assert '- planner' in instructions
+
+    def test_loads_from_convention_when_requested(self) -> None:
+        # The isolation fixture points the home root at an empty dir; populate its
+        # conventional folder and the explicit `agent_folders='agents'` loads it.
+        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        cap: SubAgents[object] = SubAgents(agent_folders='agents')
         assert 'planner' in cap._by_name
 
     def test_cwd_equal_home_loads_once_without_shadow_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,7 +217,7 @@ class TestDiskLoading:
         _write_agent(root / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            cap: SubAgents[object] = SubAgents()
+            cap: SubAgents[object] = SubAgents(agent_folders='agents')
         assert 'planner' in cap._by_name
 
     def test_none_disables_loading(self) -> None:
