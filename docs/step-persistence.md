@@ -356,7 +356,7 @@ Bounded retention discards older per-step snapshots, including pre-compaction on
 
 ## Persisting media
 
-`BinaryContent` payloads (images, audio, documents, video) inlined as base64 inside a snapshot would balloon every file or row containing the message; a large text part (e.g. a big tool-return string) does the same and can push a `MongoStepStore` snapshot past MongoDB's 16 MiB document cap ([#440](https://github.com/pydantic/pydantic-ai-harness/issues/440)). The file, sqlite, and mongo backends externalize any `BinaryContent.data`, and any part whose string `content` is at or above **64 KiB**, through a configured `MediaStore`, leaving a URI reference in the snapshot. The same `media_threshold_bytes` governs binary and text alike; there is no separate text knob. Round-trip is transparent: `latest_snapshot(...).messages[*]` returns the original `BinaryContent` bytes and text.
+`BinaryContent` payloads (images, audio, documents, video) inlined as base64 inside a snapshot would balloon every file or row containing the message; a large text part (e.g. a big tool-return string) does the same and can push a `MongoStepStore` snapshot past MongoDB's 16 MiB document cap. The file, sqlite, and mongo backends externalize any `BinaryContent.data`, and any part whose string `content` is at or above **64 KiB**, through a configured `MediaStore`, leaving a URI reference in the snapshot. The same `media_threshold_bytes` governs binary and text alike; there is no separate text knob. Round-trip is transparent: `latest_snapshot(...).messages[*]` returns the original `BinaryContent` bytes and text.
 
 Text externalization is not Mongo-only and has no opt-out short of `media_store=None`: the walker is shared, so an existing `FileStepStore` or `SqliteStepStore` deployment starts writing blobs for large text parts as well as binary ones from this release on. Snapshots written before it still restore -- the reader recognises the older binary marker shape. This compatibility is upgrade-only: a release that predates text externalization treats every marker as binary, so it cannot validate a snapshot containing an externalized text marker. Keep a current reader for persisted snapshots that contain those markers.
 
@@ -406,7 +406,7 @@ URIs are `media+sha256://<hex>`, content-addressed. The same blob written throug
 
 ### Exposing externalized bytes as URLs
 
-Each store accepts a `public_url=` callable that turns the canonical `media+sha256://<hex>` URI into a URL the model can fetch directly. The forthcoming `MediaExternalizer` capability will use this to swap `BinaryContent` parts for `ImageUrl` / `AudioUrl` / other URL parts before the model sees the message, letting providers fetch big media over the wire without re-encoding bytes into the request body.
+Each store accepts a `public_url=` callable that `store.public_url(uri)` uses to turn a canonical `media+sha256://<hex>` URI into a fetchable URL. `StepPersistence` does not call it and does not rewrite persisted message parts into URL parts, so externalized media is restored inline on load. To send the model a URL instead of bytes, call `store.public_url(uri)` yourself and build the URL-based part.
 
 Static base URL (public R2 bucket, CDN):
 
@@ -483,16 +483,13 @@ store = DiskMediaStore('runs', key_strategy=by_media_type)
 
 `DiskMediaStore` rejects strategies that produce absolute paths or paths containing `..` segments, to prevent escaping the store directory.
 
-Separately, all four stores accept a `public_url=` resolver, useful when a CDN, local HTTP server, or signed-URL service fronts the bytes. Without it `public_url(...)` returns `None` (the model never sees a URL unless a resolver is configured and it returns a string).
+Separately, all four stores accept a `public_url=` resolver, useful when a CDN, local HTTP server, or signed-URL service fronts the bytes. Without it `public_url(...)` returns `None`.
 
-pydantic_ai providers transparently download bytes from a URL when the target model does not natively accept that URL type, so emitting a URL is always safe: you only ever lose wire savings, never correctness.
-
-!!! note "The future `MediaExternalizer` capability"
-    When it lands, the composition will be `Agent(capabilities=[MediaExternalizer(store), StepPersistence(...)])` and `StepPersistence` will see already-URL-ified messages, so the externalize walk becomes a no-op. The existing API does not change.
+If you send the model a URL part, Pydantic AI providers download the bytes themselves when the target model does not accept that URL type natively, so a URL part costs wire savings on those models rather than correctness.
 
 ### Persisting to unsupported backends
 
-DynamoDB, Postgres, Redis, GCS, and other backends are out of scope for this release. Write your own `StepStore` (about ten methods on a Protocol) or your own `MediaStore` (five methods: `put`, `get`, `exists`, `public_url`, `get_metadata`) and pass it via `store=` / `media_store=`. Please open an issue if you ship one -- we want to feed the eventual shared adapter layer with N >= 3 real implementations before abstracting.
+DynamoDB, Postgres, Redis, GCS, and other backends are out of scope for this release. Write your own `StepStore` (about ten methods on a Protocol) or your own `MediaStore` (five methods: `put`, `get`, `exists`, `public_url`, `get_metadata`) and pass it via `store=` / `media_store=`.
 
 ## Conversation heads and background names
 
