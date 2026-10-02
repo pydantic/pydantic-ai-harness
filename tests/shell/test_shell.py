@@ -697,6 +697,81 @@ class TestRunCommand:
         result = await ts.run_command('sleep 10', timeout_seconds=0.5)
         assert 'timed out after 0.5s' in result
 
+    @pytest.mark.skipif(sys.platform == 'win32', reason='process-group kill is POSIX-only')
+    async def test_cancelled_run_command_returns_promptly_and_reraises(self, shell_dir: Path) -> None:
+        shell = Shell(
+            cwd=shell_dir,
+            allowed_commands=[],
+            denied_commands=[],
+            denied_operators=[],
+            default_timeout=30.0,
+            allow_interactive=False,
+        )
+        ts = shell.get_toolset()
+        start = anyio.current_time()
+        with anyio.move_on_after(1.5) as scope:
+            await ts.run_command('sleep 4')
+        assert scope.cancelled_caught
+        # Natural exit is at 4s, so only a prompt cancellation return passes.
+        assert anyio.current_time() - start < 3.0
+
+    @pytest.mark.skipif(sys.platform == 'win32', reason='process-group kill is POSIX-only')
+    async def test_cancelled_run_command_kills_process_group(self, shell_dir: Path) -> None:
+        shell = Shell(
+            cwd=shell_dir,
+            allowed_commands=[],
+            denied_commands=[],
+            denied_operators=[],
+            default_timeout=30.0,
+            allow_interactive=False,
+        )
+        ts = shell.get_toolset()
+        pid_file = shell_dir / 'pid.txt'
+        script = shell_dir / 'writer.py'
+        script.write_text(f"import os, time\nopen({str(pid_file)!r}, 'w').write(str(os.getpgrp()))\ntime.sleep(10)\n")
+
+        async def call() -> None:
+            await ts.run_command(f'{sys.executable} {script}')
+
+        with anyio.move_on_after(15.0) as bound:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(call)
+                while not pid_file.exists():
+                    await anyio.sleep(0.02)
+                tg.cancel_scope.cancel()
+        assert not bound.cancelled_caught
+        # Assert after a settle delay so the check is not racy at the kill boundary.
+        await anyio.sleep(0.7)
+        pid = int(pid_file.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    @pytest.mark.skipif(sys.platform == 'win32', reason='process-group kill is POSIX-only')
+    async def test_cancelled_run_command_stops_writing(self, shell_dir: Path) -> None:
+        shell = Shell(
+            cwd=shell_dir,
+            allowed_commands=[],
+            denied_commands=[],
+            denied_operators=[],
+            default_timeout=30.0,
+            allow_interactive=False,
+        )
+        ts = shell.get_toolset()
+        count_file = shell_dir / 'counts.txt'
+        script = shell_dir / 'writer.py'
+        script.write_text(
+            f"import time\nfor _ in range(100):\n    open({str(count_file)!r}, 'a').write('x')\n    time.sleep(0.1)\n"
+        )
+        start = anyio.current_time()
+        with anyio.move_on_after(2.0) as scope:
+            await ts.run_command(f'{sys.executable} {script}')
+        assert scope.cancelled_caught
+        # Natural end is at 10s, so only a prompt cancellation return passes.
+        assert anyio.current_time() - start < 4.0
+        before = len(count_file.read_text())
+        await anyio.sleep(1.2)
+        assert len(count_file.read_text()) == before
+
     async def test_persist_cwd_disabled_no_update(self, shell_dir: Path) -> None:
         ts = ShellToolset(
             cwd=shell_dir,

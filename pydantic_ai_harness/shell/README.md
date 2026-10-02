@@ -35,7 +35,7 @@ print(result.output)
 
 | Tool | Purpose |
 |---|---|
-| `run_command` | Run a command synchronously and return labelled stdout/stderr plus exit code. Honors a per-call or default timeout. |
+| `run_command` | Run a command synchronously and return labelled stdout/stderr plus exit code. Honors a per-call or default timeout. A cancelled call kills the command's process group before re-raising (POSIX). |
 | `start_command` | Launch a long-running command (server, watcher) in the background; returns an ID. |
 | `check_command` | Report the status and accumulated output of a background command. |
 | `stop_command` | Terminate a background command and return its final output. |
