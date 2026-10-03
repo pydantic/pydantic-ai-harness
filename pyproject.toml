@@ -133,6 +133,9 @@ slack = [
 coder = [
     "ripgrep==14.1.0 ; sys_platform != 'android'",
 ]
+mcp = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
+]
 logfire-mcp = [
     "pydantic-ai-slim[mcp]>=2.44.0",
 ]
