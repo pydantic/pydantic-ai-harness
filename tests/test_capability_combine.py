@@ -285,6 +285,7 @@ COMBINE_POLICY: dict[str, Policy] = {
         lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
     ),
     'RepoContext': Anonymous('one per workspace root'),
+    'RetryPolicy': Anonymous('independent nested retry wrappers; retry budgets multiply for overlapping tools'),
     'ReportContextUsage': Anonymous('a passive observer; several callbacks compose'),
     'Skills': Anonymous('a factory: one deferred capability per skill, each named after the skill'),
     'SlidingWindowCompaction': Anonymous('composes as a tier under `TieredCompaction`'),
