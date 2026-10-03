@@ -5,7 +5,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Generic, Literal, Protocol, TypeVar, get_args, overload
 
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, JsonValue, TypeAdapter
 from pydantic_ai import AgentRunResult, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability, Hooks
@@ -224,8 +224,12 @@ class PluginHost(Generic[DepsT]):
         full_screen: FullScreen = bare_screen,
         conversation: Conversation | None = None,
         status: Status | None = None,
+        persist: Callable[[dict[str, JsonValue]], None] | None = None,
     ) -> None:
         """`settings` is the raw JSON from `plugins add`; validate it with `settings(Model)`.
+
+        `persist` writes changed settings back to the plugin's declaration; without it they
+        last until the plugin unloads.
 
         The shell passes its own `conversation` and `status`; a host built elsewhere gets a
         `Transcript` and a detached status row, so a plugin needs no special case for either.
@@ -243,6 +247,7 @@ class PluginHost(Generic[DepsT]):
         self.status = status if status is not None else Status()
         self.commands = Commands()
         self._settings = settings
+        self._persist = persist
         self._hooks: Hooks[DepsT] = Hooks()
         self._hooks_used = False
         self._capabilities: list[AgentCapability[DepsT]] = []
@@ -287,6 +292,19 @@ class PluginHost(Generic[DepsT]):
     def settings(self, model: type[ModelT], /) -> ModelT:
         """Validate the JSON given to `plugins add` against the plugin's own model."""
         return model.model_validate(self._settings)
+
+    def save_settings(self, settings: BaseModel, /) -> None:
+        """Save edited settings now; `settings(Model)` returns them from here on.
+
+        Only values that differ from the model's defaults are stored, so a built-in
+        edited back to its defaults is the built-in again.
+        """
+        values = TypeAdapter(dict[str, JsonValue]).validate_python(
+            settings.model_dump(mode='json', exclude_defaults=True)
+        )
+        if self._persist is not None:
+            self._persist(values)
+        self._settings = values
 
     def add(self, capability: AgentCapability[DepsT], /) -> None:
         """Give the agent tools, instructions, or a capability chosen per run."""
