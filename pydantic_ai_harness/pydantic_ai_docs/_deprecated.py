@@ -9,7 +9,9 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai_harness.pydantic_ai_docs._capability import PydanticAIDocs
 
 
-@dataclass
+# `init=False` inherits `PydanticAIDocs.__init__`, whose annotations resolve against that module's
+# globals when the agent-spec schema is built; a regenerated `__init__` would resolve them here (#552).
+@dataclass(init=False)
 class PyaiDocs(PydanticAIDocs[AgentDepsT]):
     """Deprecated name for `PydanticAIDocs`.
 
