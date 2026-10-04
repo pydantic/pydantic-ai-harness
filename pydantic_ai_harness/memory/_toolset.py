@@ -281,7 +281,9 @@ class MemoryToolset(FunctionToolset[AgentDepsT]):
     """
 
     def __init__(self, capability: Memory[AgentDepsT]) -> None:
-        super().__init__(id='memory')
+        # `Memory` keeps `id=None` because multiple scoped memories are a supported
+        # composition; a custom id still stamps the toolset when the caller supplies one.
+        super().__init__(id=capability.id or 'memory')
         self._capability = capability
         self.add_function(self.write_memory, name='write_memory')
         self.add_function(self.read_memory, name='read_memory')

@@ -135,6 +135,9 @@ class PlaywrightBrowser(AbstractCapability[AgentDepsT]):
     at agent construction.
     """
 
+    id: str | None = field(default='playwright', kw_only=True)
+    """Stable capability and toolset ID."""
+
     headless: bool = True
     """Run Chromium without a visible window. `True` suits servers and CI."""
 
@@ -266,6 +269,7 @@ class PlaywrightBrowser(AbstractCapability[AgentDepsT]):
             launch_timeout_ms=self.navigation_timeout_ms,
         )
         self._toolset = PlaywrightBrowserToolset[AgentDepsT](
+            id=self.id or 'playwright',
             session=self._session,
             screenshot_on_navigate=self.screenshot_on_navigate,
             max_content_tokens=self.max_content_tokens,

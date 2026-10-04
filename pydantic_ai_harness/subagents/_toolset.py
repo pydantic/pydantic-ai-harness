@@ -222,6 +222,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
     def __init__(
         self,
         *,
+        id: str | None = None,
         agents: Mapping[str, SubAgent[AgentDepsT]],
         forward_usage: bool,
         inherit_tools: bool,
@@ -235,7 +236,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         include_self: bool = False,
         max_depth: int = DEFAULT_MAX_DEPTH,
     ) -> None:
-        super().__init__()
+        super().__init__(id=id)
         self._agents: dict[str, SubAgent[AgentDepsT]] = dict(agents)
         self._forward_usage = forward_usage
         self._inherit_tools = inherit_tools
