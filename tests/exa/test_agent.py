@@ -1,6 +1,5 @@
 """Tests for the ExaAgent capability, ExaAgentToolset, and agent_run_result."""
 
-import json
 from pathlib import Path
 
 import httpx
@@ -430,7 +429,8 @@ class TestExaAgent:
 class TestAgentSpec:
     def test_spec_schema_includes_exa_agent(self) -> None:
         schema = AgentSpec.model_json_schema_with_capabilities([ExaAgent])
-        assert 'ExaAgent' in json.dumps(schema)
+        params = schema['$defs']['spec_params_ExaAgent']
+        assert {'id', 'description', 'defer_loading'} <= params['properties'].keys()
 
     def test_from_spec_builds_capability(self) -> None:
         schema: dict[str, object] = {'type': 'object', 'properties': {'name': {'type': 'string'}}}
@@ -442,6 +442,9 @@ class TestAgentSpec:
             poll_interval=500,
             timeout_ms=120_000,
             guidance='Delegate.',
+            id='research-agent',
+            description='Use for delegated research.',
+            defer_loading=True,
         )
         assert capability.effort == 'low'
         assert capability.execution == 'external'
@@ -450,6 +453,9 @@ class TestAgentSpec:
         assert capability.poll_interval == 500
         assert capability.timeout_ms == 120_000
         assert capability.guidance == 'Delegate.'
+        assert capability.id == 'research-agent'
+        assert capability.description == 'Use for delegated research.'
+        assert capability.defer_loading is True
         assert capability.runs is None
 
     def test_agent_loads_from_spec_file(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
