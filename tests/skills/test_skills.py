@@ -4,9 +4,10 @@ import inspect
 import warnings
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
-from pydantic_ai import Agent
+from pydantic_ai import Agent, AgentSpec
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.capabilities.abstract import leaf_capabilities
 from pydantic_ai.exceptions import UserError
@@ -257,6 +258,15 @@ class TestSkillValidation:
         with pytest.raises(ValueError, match='include and exclude cannot be used together'):
             Skills.from_spec(library, include=include, exclude=exclude)
 
+    def test_the_constructor_rejects_include_and_exclude_together(self, tmp_path: Path) -> None:
+        """The constructor keeps its own guard: `from_spec` raises before reaching it, so
+        this is the only path that exercises the `__init__` check the overloads mirror."""
+        library = tmp_path / 'skills'
+        library.mkdir()
+
+        with pytest.raises(ValueError, match='include and exclude cannot be used together'):
+            Skills(library, include=['alpha'], exclude=['alpha'])  # pyright: ignore[reportCallIssue, reportArgumentType]
+
     @pytest.mark.parametrize('selector', ['include', 'exclude'])
     def test_unknown_selected_skill_is_rejected(self, tmp_path: Path, selector: str) -> None:
         library = tmp_path / 'skills'
@@ -284,7 +294,7 @@ class TestSkillValidation:
         _write_skill(library, 'alpha')
 
         with pytest.raises(TypeError, match='include must contain only skill names as strings'):
-            Skills.from_spec(library, include=[1])
+            Skills.from_spec(library, include=[1])  # pyright: ignore[reportArgumentType]
 
     def test_multiple_unknown_skills_report_an_empty_library(self, tmp_path: Path) -> None:
         library = tmp_path / 'skills'
@@ -528,3 +538,38 @@ class TestSkillValidation:
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             Skills(library)
+
+
+class TestSpecSchema:
+    """The `include`/`exclude` types must not erase the long form from the spec schema.
+
+    `__init__` annotates them as `Collection[str]`, which has no JSON representation;
+    `Skills.from_spec` publishes them as string sequences instead.
+    """
+
+    def test_long_form_is_published(self) -> None:
+        schema = AgentSpec.model_json_schema_with_capabilities([Skills])
+        params: dict[str, Any] = schema['$defs']['spec_params_Skills']['properties']
+        assert {'directories', 'include', 'exclude'} <= set(params)
+
+    def test_short_form_still_takes_the_directories(self) -> None:
+        schema = AgentSpec.model_json_schema_with_capabilities([Skills])
+        assert 'Skills' in schema['$defs']['short_spec_Skills']['properties']
+
+    def test_from_spec_forwards_include(self, tmp_path: Path) -> None:
+        library = tmp_path / 'skills'
+        _write_skill(library, 'alpha')
+        _write_skill(library, 'beta')
+
+        skills = Skills.from_spec(library, include=['alpha'])
+
+        assert [leaf.id for leaf in _leaves(skills)] == ['alpha']
+
+    def test_from_spec_forwards_exclude(self, tmp_path: Path) -> None:
+        library = tmp_path / 'skills'
+        _write_skill(library, 'alpha')
+        _write_skill(library, 'beta')
+
+        skills = Skills.from_spec(library, exclude=['alpha'])
+
+        assert [leaf.id for leaf in _leaves(skills)] == ['beta']
