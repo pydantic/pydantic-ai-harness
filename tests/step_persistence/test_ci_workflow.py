@@ -1,4 +1,4 @@
-"""Guards on the `mongodb-integration` CI job.
+"""Guards on the `mongodb-integration` and `redis-integration` CI jobs.
 
 Imports no pymongo on purpose: `conftest.collect_ignore` drops `test_mongo.py`
 where the extra is absent, and these assertions must hold on every matrix leg.
@@ -96,3 +96,17 @@ def test_mongodb_integration_runs_against_a_real_server() -> None:
     assert any('--health-cmd' in line for line in job_block)
     assert "      MONGODB_REQUIRE_LIVE: '1'" in job_block
     assert '      - run: make integration-mongodb' in job_block
+
+
+def test_redis_detection_covers_both_redis_backed_stores() -> None:
+    lines = _workflow_lines()
+
+    detect_index = lines.index('      - id: detect-redis')
+    lint_index = lines.index('  lint:')
+    detect_block = lines[detect_index:lint_index]
+
+    # The job is shared by `RedisSpendStore` and `RedisStepStore`, so a change to
+    # either module can break the live path.
+    assert '            pydantic_ai_harness/spend \\' in detect_block
+    assert '            pydantic_ai_harness/step_persistence \\' in detect_block
+    assert '            integration_tests/redis \\' in detect_block
