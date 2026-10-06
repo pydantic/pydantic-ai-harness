@@ -8,7 +8,7 @@ from termflow.tui import MenuItem  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.menu import MenuResult  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.textinput import TextInputResult  # pyright: ignore[reportMissingTypeStubs]
 
-from pydantic_clai2.field_menu import FieldMenu, run_flow
+from pydantic_clai2.field_menu import FieldMenu, run_flow, run_flow_async
 from pydantic_clai2.project_settings import ProjectSettings
 from pydantic_clai2.set_menu import SettingsSource, open_settings_menu
 
@@ -98,6 +98,15 @@ def test_flow_stops_on_cancel(tmp_path: Path) -> None:
         lists=[pick('run.request_limit'), MenuResult(item=None)], choices=[], texts=[TextInputResult(cancelled=True)]
     )
     assert run_flow(FieldMenu(SettingsSource(context)), script.runners) == []
+
+
+async def test_async_flow_matches_the_sync_one_without_submenus(tmp_path: Path) -> None:
+    context, _ = make_context(tmp_path)
+    script = Script(
+        lists=[pick('run.request_limit'), MenuResult(item=None)], choices=[], texts=[TextInputResult(cancelled=True)]
+    )
+    assert await run_flow_async(FieldMenu(SettingsSource(context)), script.runners) == []
+    assert script.opened == ['list', 'text', 'list']
 
 
 async def test_open_menu_runs_in_a_thread(tmp_path: Path) -> None:

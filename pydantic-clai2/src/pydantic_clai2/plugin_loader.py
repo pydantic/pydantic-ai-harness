@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import importlib
 import importlib.util
+import inspect
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from typing import Generic
 
 from anyio import CancelScope, fail_after
 from anyio.lowlevel import checkpoint
+from pydantic import JsonValue
 from pydantic_ai import AgentStreamEvent
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from rich.console import Console
@@ -20,6 +22,8 @@ from rich.console import Console
 from . import theme
 from .commands import Commands, plugins_command
 from .config import PluginSettings
+from .field_menu import TERMINAL, Runners
+from .plugin_config import PluginConfig
 from .plugins import (
     Conversation,
     DepsT,
@@ -105,12 +109,15 @@ class PluginLoader(Generic[DepsT]):
         conversation: Conversation | None = None,
         status: Status | None = None,
         full_screen: FullScreen = bare_screen,
+        runners: Runners = TERMINAL,
     ) -> None:
         """`builtin` ships with CLAI, `project` comes from `.clai/settings.json`; the store overrides both.
 
         `full_screen` is handed to every host; the shell binds it to the live renderer per prompt.
         `conversation` and `status` are handed to every host; see `PluginHost` for the defaults.
+        `runners` shows plugin settings menus; tests pass scripted ones.
         """
+        self._runners = runners
         self._store = store
         self._console = console
         self._commands = commands
@@ -331,6 +338,51 @@ class PluginLoader(Generic[DepsT]):
         origin = 'declared by the project' if name in self._project else 'built in'
         return f'{name} is {origin}; restored its defaults. Use /plugins disable {name} to turn it off.'
 
+    def configurable(self, name: str) -> bool:
+        """Whether the plugin has a settings menu. A module that fails to import has none; loading reports why."""
+        try:
+            return self._hook(self._entry(name)) is not None
+        except PluginError:
+            return False
+
+    async def configure(self, name: str, *, enable: bool = False) -> str:
+        """Open the plugin's settings menu; every edit is saved as made. Then enable, or reactivate if loaded.
+
+        Reactivating runs `activate` again with the new settings without re-importing the module.
+        """
+        entry = self._entry(name)
+        hook = self._hook(entry)
+        if hook is None:
+            raise ValueError(f'Plugin {name} has no settings menu.')
+
+        def settings() -> dict[str, JsonValue]:
+            return dict(self._entry(name).declaration.settings)
+
+        def save(value: dict[str, JsonValue]) -> None:
+            self._store.save_plugin(self._entry(name).declaration.model_copy(update={'settings': value}))
+
+        try:
+            result = hook(PluginConfig(name=name, settings=settings, save=save, runners=self._runners))
+            message = await result if inspect.isawaitable(result) else result
+        except Exception as exc:
+            raise PluginError(name, exc) from exc
+        if not isinstance(message, str):
+            raise PluginError(name, TypeError('configure must return the message to show'))
+        if self._entry(name).host is not None:
+            await self.unload(name)
+            await self.load(name)
+        if enable:
+            await self.enable(name)
+        return message
+
+    def _hook(self, entry: PluginEntry[DepsT]) -> Callable[..., object] | None:
+        try:
+            module = self._import(entry, fresh=False)
+        except Exception as exc:
+            raise PluginError(entry.name, exc) from exc
+        hook: object = getattr(module, 'configure', None)
+        return hook if callable(hook) else None
+
     async def reload(self, name: str) -> None:
         """Unload, re-import the module, and load again."""
         if not self._entry(name).declaration.enabled:
@@ -352,17 +404,22 @@ class PluginLoader(Generic[DepsT]):
             if existing is not None:
                 await self.unload(rest[0])
             plugins_command(self._store, args)
+            configured = await self.configure(rest[0]) + '\n' if self.configurable(rest[0]) else ''
             await self.load(rest[0])
             if existing is None:
-                return f'Added and loaded {rest[0]}.'
-            return f'Replaced {"project" if existing.project else "built-in"} {rest[0]}.'
+                return f'{configured}Added and loaded {rest[0]}.'
+            return f'{configured}Replaced {"project" if existing.project else "built-in"} {rest[0]}.'
         if len(rest) != 1:
             raise ValueError(
-                'Usage: /plugins [list|add ID MODULE[:ATTR] [JSON]|enable ID|disable ID|remove ID|reload ID]'
+                'Usage: /plugins [list|add ID MODULE[:ATTR] [JSON]|enable ID|disable ID|configure ID|remove ID|reload ID]'
             )
         name = rest[0]
         if action == 'remove':
             return await self.remove(name)
+        if action == 'configure':
+            return await self.configure(name)
+        if action == 'enable' and self.configurable(name):
+            return f'{await self.configure(name, enable=True)}\nEnabled {name}.'
         actions = {
             'enable': (self.enable, 'Enabled'),
             'disable': (self.disable, 'Disabled'),
