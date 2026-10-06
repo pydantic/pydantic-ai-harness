@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import get_args
 
 import pytest
-from pydantic import BaseModel, JsonValue, ValidationError
+from pydantic import BaseModel, Field, JsonValue, RootModel, ValidationError, computed_field
 from pydantic_ai import (
     Agent,
     CapabilityEvent,
@@ -58,6 +58,43 @@ def test_settings_validate_against_plugin_model() -> None:
     assert host(greeting='hi').settings(Options) == Options(greeting='hi')
     with pytest.raises(ValidationError):
         host().settings(Options)
+
+
+def test_save_settings_persists_non_default_values() -> None:
+    saved: list[dict[str, JsonValue]] = []
+    plugin = PluginHost[None](name='test', console=Console(file=io.StringIO()), settings={}, persist=saved.append)
+    plugin.save_settings(Options(greeting='hi', loud=False))
+    assert saved == [{'greeting': 'hi'}], 'defaults are left out'
+    assert plugin.settings(Options) == Options(greeting='hi')
+    detached = host(greeting='hi')
+    detached.save_settings(Options(greeting='yo', loud=True))
+    assert detached.settings(Options) == Options(greeting='yo', loud=True), 'without persist, only the host changes'
+
+
+class Aliased(BaseModel):
+    greeting: str = Field(alias='hello')
+    loud: bool = False
+
+    @computed_field
+    @property
+    def shout(self) -> str:
+        return self.greeting.upper()
+
+
+def test_save_settings_round_trips_aliases_and_skips_computed_fields() -> None:
+    saved: list[dict[str, JsonValue]] = []
+    plugin = PluginHost[None](name='test', console=Console(file=io.StringIO()), settings={}, persist=saved.append)
+    plugin.save_settings(Aliased(hello='hi'))
+    assert saved == [{'hello': 'hi'}]
+    assert plugin.settings(Aliased) == Aliased(hello='hi')
+
+
+def test_save_settings_rejects_models_that_are_not_json_objects() -> None:
+    saved: list[dict[str, JsonValue]] = []
+    plugin = PluginHost[None](name='test', console=Console(file=io.StringIO()), settings={}, persist=saved.append)
+    with pytest.raises(TypeError, match='must dump to a JSON object'):
+        plugin.save_settings(RootModel[list[str]](['a']))
+    assert saved == []
 
 
 async def test_host_hooks_dispatch_by_event_type() -> None:

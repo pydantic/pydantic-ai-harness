@@ -588,3 +588,31 @@ async def test_failed_load_cleanup_is_bounded_and_continues_after_timeout(
     assert stopped.is_set() and remaining.is_set()
     assert 'TimeoutError' in harness.text
     assert harness.loader.entries()[0].host is None
+
+
+SAVER = """
+from pydantic import BaseModel
+from pydantic_clai2.plugins import PluginHost
+
+
+class Options(BaseModel):
+    count: int = 0
+
+
+def activate(host: PluginHost) -> None:
+    host.save_settings(Options(count=host.settings(Options).count + 1))
+"""
+
+
+async def test_saving_settings_during_activation_keeps_the_host_attached(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    (harness.store.plugins_dir / 'saver.py').write_text(SAVER)
+    await harness.loader.load_all()
+    [saved] = harness.store.plugins()
+    assert saved.id == 'saver' and saved.settings == {'count': 1}
+    [entry] = harness.loader.entries()
+    assert entry.host is not None and entry.declaration.settings == {'count': 1}
+    await harness.loader.disable('saver')
+    assert harness.loader.entries()[0].host is None, 'the live host can still be unloaded'
+    await harness.loader.enable('saver')
+    assert harness.store.plugins()[0].settings == {'count': 2}, 'the next load reads what was saved'
