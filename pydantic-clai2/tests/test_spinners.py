@@ -27,7 +27,7 @@ from pydantic_clai2.config import Settings
 from pydantic_clai2.field_menu import Runners
 from pydantic_clai2.image_input import ImageInput
 from pydantic_clai2.interrupts import Interrupts
-from pydantic_clai2.live_prompt import LivePrompt
+from pydantic_clai2.live_prompt import LivePrompt, steer_key
 from pydantic_clai2.plugins import PluginHost
 from pydantic_clai2.settings_store import SettingsStore
 from pydantic_clai2.spinner_picker import SpinnerPicker, spinner_command, spinner_completions
@@ -418,7 +418,7 @@ async def test_prompt_title_follows_the_selection(width: int) -> None:
             live.submit('follow up')
             follow_up, plain = (Text.from_ansi(row).plain for row in live.frame()[:2])
             assert follow_up == 'Follow-up: follow up'
-            assert plain.startswith(f' Working {frame} | Enter: queue | Alt+Enter: steer queued ')
+            assert plain.startswith(f' Working {frame} | Enter: queue | {steer_key()}: steer queued ')
         else:
             # Too narrow to show the whole frame: nothing is highlighted rather than half a frame.
             assert plain.startswith(' Working') and accent not in title
