@@ -224,6 +224,7 @@ class PluginHost(Generic[DepsT]):
         full_screen: FullScreen = bare_screen,
         conversation: Conversation | None = None,
         status: Status | None = None,
+        save_settings: Callable[[dict[str, JsonValue]], None] = lambda _settings: None,
     ) -> None:
         """`settings` is the raw JSON from `plugins add`; validate it with `settings(Model)`.
 
@@ -243,6 +244,7 @@ class PluginHost(Generic[DepsT]):
         self.status = status if status is not None else Status()
         self.commands = Commands()
         self._settings = settings
+        self._persist = save_settings
         self._hooks: Hooks[DepsT] = Hooks()
         self._hooks_used = False
         self._capabilities: list[AgentCapability[DepsT]] = []
@@ -287,6 +289,15 @@ class PluginHost(Generic[DepsT]):
     def settings(self, model: type[ModelT], /) -> ModelT:
         """Validate the JSON given to `plugins add` against the plugin's own model."""
         return model.model_validate(self._settings)
+
+    def save_settings(self, settings: BaseModel, /) -> None:
+        """Remember new settings for this plugin, as `plugins add` would; they are stored in plaintext.
+
+        Never save a secret: keep it in `/keys` and save a `KeyReference` naming it. A host built
+        outside the loader keeps the change for this load only.
+        """
+        self._settings = settings.model_dump(mode='json', by_alias=True)
+        self._persist(self._settings)
 
     def add(self, capability: AgentCapability[DepsT], /) -> None:
         """Give the agent tools, instructions, or a capability chosen per run."""

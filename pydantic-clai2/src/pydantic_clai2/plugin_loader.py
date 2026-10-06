@@ -231,6 +231,9 @@ class PluginLoader(Generic[DepsT]):
             full_screen=self._full_screen,
             conversation=self._conversation,
             status=self._status,
+            save_settings=lambda settings: self._store.save_plugin(
+                entry.declaration.model_copy(update={'settings': settings, 'enabled': True})
+            ),
         )
         try:
             module = self._import(entry, fresh=fresh)
