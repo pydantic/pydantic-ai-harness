@@ -14,7 +14,7 @@ pre-agent-steps:
       # reach the agent. The floor is 2.44.0 for a second reason: it is the first
       # release where `Agent.from_spec()` accepts a spec that names no model, so a
       # `PAI_AGENT` spec file no longer has to carry a `model:` that the engine's
-      # own `-m` immediately replaces.
+      # own `-m` immediately replaces. This floor also includes GitHubCopilotProvider.
       #
       # The anthropic extra is what an `anthropic/` model runs on: that backend of
       # the api-proxy serves the Messages API, not Chat Completions.
@@ -33,6 +33,7 @@ engine:
   display-name: Pydantic AI
   description: Pydantic AI CLI (pai) running the pydantic-ai-harness coder agent with MCP tool support
   mcp: true
+  detection-engine: copilot
   provider:
     name: github
   behaviors:
@@ -68,8 +69,8 @@ engine:
       provider-env-mode: universal-llm-consumer
     harness-script: |
       const { spawnSync } = require("child_process");
-      const { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } = require("fs");
-      const { homedir, tmpdir } = require("os");
+      const { existsSync, readFileSync } = require("fs");
+      const { homedir } = require("os");
       const { join } = require("path");
       const { fetchAWFReflect, resolveProviderEndpointFromReflect, deriveBaseUrlFromModelsURL } = require("./awf_reflect.cjs");
 
@@ -80,24 +81,9 @@ engine:
       const commandArgs = process.argv.slice(3);
       const log = message => process.stderr.write(`[pydantic-ai] ${message}\n`);
 
-      // `pai -a` takes one target, either an import path or a JSON/YAML agent
-      // spec, and the spec format resolves capability names through a closed
-      // registry that the harness capabilities are not part of, so the coder
-      // composition cannot be expressed as a spec. It is written as a Python
-      // module instead: `Coder()` supplies six filesystem and shell tools,
-      // repository context and context management.
-      //
-      // The gateway's MCP servers are deliberately not part of the module.
-      // `pai --mcp-config` reads the same Claude-shaped config file through the
-      // same `pydantic_ai.mcp.load_mcp_toolsets`, `${VAR}` expansion included, so
-      // routing them through the CLI is what lets a `PAI_AGENT` agent receive
-      // them on identical terms.
-      const AGENT_MODULE = `from pydantic_ai import Agent
-      from pydantic_ai_harness import Coder
-
-      agent = Agent(name="coder", capabilities=[Coder()])
-      `;
-      const DEFAULT_AGENT = "gh_aw_agent:agent";
+      // The packaged agent supplies Coder; the CLI adds the gateway's MCP servers
+      // through `--mcp-config`, just as it does for a `PAI_AGENT` target.
+      const DEFAULT_AGENT = "pydantic_ai_harness.coder:coder_agent";
 
       // The CLI runs inside the interpreter that owns the install rather than as a
       // separate `pai` process, so the agent module is imported once, in the process
@@ -191,27 +177,10 @@ engine:
         const promptFile = process.env.GH_AW_PROMPT;
         if (!promptFile) throw new Error("GH_AW_PROMPT is required");
 
-        // Neither the generated module nor the gateway's MCP config is written into
-        // the checkout. A file committed at a path the engine reads is
-        // repository-controlled input to a process that runs with the gateway's
-        // credentials: an `mcp.json` there can name a stdio server for the CLI to
-        // spawn, and a package there shadows an installed one for the whole run. The
-        // module goes to a private directory created inside the sandbox; the config
-        // adapter writes on the host into the `${RUNNER_TEMP}/gh-aw` tree that the
-        // agent step mounts read-only, where gh-aw's own Claude and Codex converters
-        // write theirs.
-        //
-        // `PAI_AGENT` runs an agent the repository defines, in whichever form
-        // `pai -a` accepts. The generated module is not written in that case:
-        // nothing would load it, and a stale copy on disk is worse than none.
+        // Repository code is importable only with an explicit PAI_AGENT target.
+        // The default agent is installed; no module is written into the sandbox.
         const configuredAgent = process.env.PAI_AGENT;
         const agentTarget = configuredAgent || DEFAULT_AGENT;
-        const moduleDir = configuredAgent ? "" : mkdtempSync(join(tmpdir(), "gh-aw-pydantic-ai-"));
-        if (moduleDir) {
-          const agentModulePath = join(moduleDir, "gh_aw_agent.py");
-          writeFileSync(agentModulePath, AGENT_MODULE, { mode: 0o600 });
-          chmodSync(agentModulePath, 0o600);
-        }
 
         const env = { ...process.env };
         // `pip install --user` puts `pai` here. The runner tool cache that holds
@@ -230,14 +199,13 @@ engine:
         const pythonBin = process.env.pythonLocation ? join(process.env.pythonLocation, "bin") : "";
         const python = pythonBin ? join(pythonBin, "python3") : "python3";
         env.PATH = [join(homedir(), ".local", "bin"), pythonBin, process.env.PATH || ""].filter(Boolean).join(":");
-        // The module is reached through PYTHONPATH rather than by importing it as a
-        // package, and prepending keeps a caller-supplied PYTHONPATH usable.
-        //
         // The checkout itself joins the path only under `PAI_AGENT`. That is the
         // opt-in: it makes repository code importable, which is the whole point
         // of running your own agent, and it is exactly what `-P` on the install
         // step keeps off the path for the default composition.
-        env.PYTHONPATH = [moduleDir, configuredAgent ? workspace : "", process.env.PYTHONPATH || ""].filter(Boolean).join(":");
+        const pythonPath = configuredAgent ? [workspace, process.env.PYTHONPATH || ""].filter(Boolean).join(":") : "";
+        if (pythonPath) env.PYTHONPATH = pythonPath;
+        else delete env.PYTHONPATH;
         if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
           // Traces-only backends return 404 noise for metrics and logs. A workflow
           // can override either default when its backend accepts those signals.
@@ -268,6 +236,7 @@ engine:
         // Chat Completions, and `PAI_BASE_URL` names a Chat Completions endpoint by
         // definition, so it keeps every provider there too.
         const useMessagesAPI = !configuredBaseUrl && modelProvider === "anthropic";
+        const useCopilotAPI = !configuredBaseUrl && modelProvider === "copilot";
         // The dotted-alias rewrite describes the api-proxy's Copilot backend,
         // which publishes Copilot's Claude models under dotted IDs. Every other
         // destination — the anthropic and openai backends, or an endpoint named
@@ -344,6 +313,10 @@ engine:
         if (useMessagesAPI) {
           env.ANTHROPIC_BASE_URL = baseUrl;
           env.ANTHROPIC_API_KEY = "awf-anthropic-proxy";
+        } else if (useCopilotAPI) {
+          delete env.OPENAI_API_KEY;
+          env.GITHUB_COPILOT_BASE_URL = baseUrl;
+          env.GITHUB_COPILOT_API_KEY = "awf-copilot-proxy";
         } else {
           env.OPENAI_BASE_URL = baseUrl;
           env.OPENAI_API_KEY = "awf-copilot-proxy";
@@ -366,7 +339,7 @@ engine:
         // the adapter resolves this path by the same expression.
         const mcpConfig = join(process.env.RUNNER_TEMP || "/tmp", "gh-aw", "mcp-config", "mcp-servers.json");
         if (existsSync(mcpConfig)) cliArgs.push("--mcp-config", mcpConfig);
-        cliArgs.push("-m", `${useMessagesAPI ? "anthropic" : "openai-chat"}:${model}`, readFileSync(promptFile, "utf8"));
+        cliArgs.push("-m", `${useMessagesAPI ? "anthropic" : useCopilotAPI ? "github-copilot" : "openai-chat"}:${model}`, readFileSync(promptFile, "utf8"));
         // Log only the origin because endpoint userinfo and query parameters can
         // contain credentials, and workflow run logs are not private.
         const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
@@ -554,13 +527,9 @@ engine:
 
 The agent is a `pydantic_ai.Agent` composed from the harness `Coder`
 capability: six filesystem and shell tools, repository context and context
-management. Shell commands are unrestricted inside the sandbox. `pai -a` accepts
-a single target and its JSON agent-spec format cannot name harness capabilities,
-so the harness script writes that composition as `gh_aw_agent.py` in a private
-directory it creates inside the sandbox, puts that directory on `PYTHONPATH`, and
-passes `-a gh_aw_agent:agent`. The module is deliberately not written into the
-checkout: a directory the engine puts on `PYTHONPATH` would otherwise let a
-package committed to the repository shadow an installed one for the whole run.
+management. Shell commands are unrestricted inside the sandbox. The engine passes
+`-a pydantic_ai_harness.coder:coder_agent` to load the packaged model-less agent.
+It writes no agent module and adds no default directory to `PYTHONPATH`.
 
 The CLI is started by the interpreter that owns the install -- `python -P -c`
 importing the target and then `runpy.run_module("pydantic_ai")` -- rather than as
@@ -573,8 +542,8 @@ the same name. That insert still applies to everything imported after it, which
 is the CLI's documented behavior for its own users.
 
 `PAI_AGENT` in `engine.env` replaces that target with an agent the repository
-defines, in the same `module:variable` or spec-file form `pai -a` takes. The
-generated module is then not written, and `GITHUB_WORKSPACE` joins `PYTHONPATH` so
+defines, in the same `module:variable` or spec-file form `pai -a` takes.
+`GITHUB_WORKSPACE` joins `PYTHONPATH` so
 a module in the repository imports. That is opt-in because it puts repository code
 on the import path. `-m` is still passed, so the agent runs on the workflow's
 `engine.model` rather than any model it was constructed with. See `README.md` next
@@ -586,9 +555,8 @@ runner, into the tree the agent step mounts read-only, so a file committed to th
 repository cannot stand in for it -- and reach the agent through
 `pai --mcp-config`, which loads them with `pydantic_ai.mcp.load_mcp_toolsets`
 (including `${VAR}` expansion of header values) and passes the toolsets into the
-run. Routing them through the CLI rather than the generated module is what gives a
-`PAI_AGENT` agent the same servers. That flag arrived in pydantic-ai 2.36.0, which
-is the floor on the install line. Tools are prefixed with their server name, so
+run. Routing them through the CLI gives a `PAI_AGENT` agent the same servers.
+That flag arrived in pydantic-ai 2.36.0; the install floor is 2.44.0. Tools are prefixed with their server name, so
 safe outputs are reachable as `safeoutputs_create_issue` and the like. Only HTTP
 servers are carried over; CLI-mounted servers stay available to the agent's shell
 as executables on `PATH`.
@@ -601,7 +569,10 @@ first segment is dropped and the rest of the model ID is passed with `-m`, under
 the marker for the wire API that backend serves: `anthropic:<model>` against
 `ANTHROPIC_BASE_URL` for `anthropic/`, whose backend forwards the path to
 api.anthropic.com unchanged and does not translate Chat Completions into
-Messages, and `openai-chat:<model>` against `OPENAI_BASE_URL` for the rest. The
+Messages; `github-copilot:<model>` against `GITHUB_COPILOT_BASE_URL` for
+`copilot/`; and `openai-chat:<model>` against `OPENAI_BASE_URL` for the rest.
+Copilot uses a placeholder `GITHUB_COPILOT_API_KEY`, with `COPILOT_GITHUB_TOKEN`
+removed from the child environment. The existing 2.44.0 floor includes the provider. The
 marker selects a Pydantic AI client and is not part of the model name sent
 upstream. The two base URLs differ by a segment: the Anthropic client appends
 `/v1/messages` to the endpoint's origin, the OpenAI-compatible client appends
@@ -625,9 +596,16 @@ agent sandbox, so the endpoint has to accept the placeholder bearer token or sit
 behind something that adds the real credential. See `README.md` next to this file
 for the whole picture.
 
-Responses are streamed. The proxy's aggregated non-streaming body omits
-`object` and `choices[].index`, which Pydantic AI rejects during response
-validation, so `--no-stream` is deliberately not passed.
+Responses are streamed; `--no-stream` is not passed. The Copilot provider repairs
+missing `object` and choice `index` fields, reads `reasoning_text`, and applies
+model-family profiles.
+
+This definition requires gh-aw CLI and runtime v0.89.0 or newer because it declares
+`detection-engine: copilot`. Threat detection uses the built-in Copilot engine and
+its credential, independently of the agent's provider. Without that declaration,
+v0.89.0 falls back to Copilot with a compile-time warning. To disable AI analysis,
+set `safe-outputs.threat-detection.engine: false`; detection processing still runs. Recompile workflows after upgrading;
+v0.88.x rejects the detection-engine key.
 
 `pai` renders its output as Markdown for a terminal and has no structured output
 mode today, so the log parser reconstructs turns from that text and reads token

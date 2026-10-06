@@ -47,10 +47,9 @@ import-based engine like this one, so it is not part of the configuration below.
 - The [`gh` CLI](https://cli.github.com), authenticated with the `repo` and `workflow`
   scopes: `gh auth login --scopes repo,workflow`.
 - The gh-aw extension: `gh extension install github/gh-aw`. Append `@vX.Y.Z` to pin it.
-- gh-aw runtime v0.86.3 or newer. The engine definition needs
-  `deriveBaseUrlFromModelsURL`, which
-  [v0.86.3](https://github.com/github/gh-aw/releases/tag/v0.86.3) is the first release to
-  export. An older pin in an already committed lockfile stays in force until you recompile.
+- gh-aw CLI and runtime [v0.89.0](https://github.com/github/gh-aw/releases/tag/v0.89.0)
+  or newer. The engine declares `detection-engine: copilot`, which v0.88.x rejects.
+  An older pin in an already committed lockfile stays in force until you recompile.
 - Linux runners. gh-aw's sandbox needs Linux and Docker, so the `macos-*` and `windows-*`
   runner labels are
   [not supported](https://github.github.com/gh-aw/reference/frontmatter/).
@@ -292,10 +291,9 @@ Key by key:
   the form its [templating reference](https://github.github.com/gh-aw/reference/templating/)
   documents for prompts (`.title` and `.body` expose the two halves separately).
 
-The compile error you get from a missing `imports:` line carries a tip naming
-`github/gh-aw/.github/workflows/shared/pydantic.md@<version>`. That is gh-aw's own older
-copy of the definition. Ignore it and write the `pydantic/pydantic-ai-harness` line above;
-the definition in this repository is the one that is maintained.
+The gh-aw engine catalog points to `pydantic/pydantic-ai-harness/gh-aw/pydantic.md`.
+Keep the explicit `imports:` line above; the catalog suggests an import rather than
+loading the definition automatically.
 
 **Freezing the definition.** `@main` is re-resolved on every compile, so a change to the
 definition reaches you the next time you run `gh aw compile`. To hold a fixed version,
@@ -421,6 +419,45 @@ keyed endpoint of your own, point `PAI_BASE_URL` at a gateway you run that holds
 the engine's
 [README](https://github.com/pydantic/pydantic-ai-harness/blob/main/gh-aw/README.md)
 covers that path.
+
+## Model routing and the default agent
+
+Without `PAI_AGENT`, the engine loads the packaged
+`pydantic_ai_harness.coder:coder_agent`, a model-less
+`Agent(name="coder", capabilities=[Coder()])`. It writes no Python module into the
+sandbox. The CLI adds the gateway's MCP tools with `--mcp-config` for both this
+agent and a custom target.
+
+`copilot/<model>` uses Pydantic AI's `github-copilot:<model>` provider, with
+`GITHUB_COPILOT_BASE_URL` set to the discovered api-proxy endpoint and a placeholder
+`GITHUB_COPILOT_API_KEY`. The child environment excludes `COPILOT_GITHUB_TOKEN`;
+the proxy authenticates upstream. The provider repairs Copilot response envelopes,
+reads `reasoning_text`, and applies model-family profiles. Claude aliases retain
+the dotted-ID rewrite, for example `claude-sonnet-4-5` becomes `claude-sonnet-4.5`.
+The existing `pydantic-ai-slim>=2.44.0` install floor includes this provider.
+
+`anthropic/` uses the Messages API; `openai/` and `codex/` use Chat Completions.
+An explicit `PAI_BASE_URL` keeps every provider on `openai-chat:` and passes the
+model ID unchanged, so Copilot-specific behavior does not affect a custom endpoint.
+
+## Threat detection
+
+The definition declares `engine.detection-engine: copilot`. Safe-output threat
+detection runs on the built-in Copilot engine, separately from the agent, and needs
+that engine's `COPILOT_GITHUB_TOKEN` credential even when the agent uses another
+provider. gh-aw v0.89.0 falls back to Copilot with a compile-time warning for custom
+engines that omit a detection engine; the explicit declaration avoids that warning.
+
+To disable AI analysis while retaining the detection job's other processing, use:
+
+```yaml
+safe-outputs:
+  threat-detection:
+    engine: false
+```
+
+A demo using that workaround can remove it after upgrading both CLI and runtime to
+v0.89.0 or newer, configuring Copilot credentials, and recompiling its workflows.
 
 ## Repository settings
 

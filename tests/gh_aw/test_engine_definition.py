@@ -110,7 +110,7 @@ REFLECT_PAYLOAD = json.dumps(
         'endpoints': [
             {'provider': 'anthropic', 'configured': True, 'models_url': 'http://host.docker.internal:10001/v1/models'},
             {'provider': 'openai', 'configured': True, 'models_url': 'http://host.docker.internal:10000/v1/models'},
-            {'provider': 'github', 'configured': True, 'models_url': 'http://host.docker.internal:10002/v1/models'},
+            {'provider': 'github', 'configured': True, 'models_url': 'http://host.docker.internal:10002/models'},
         ]
     }
 )
@@ -127,6 +127,7 @@ class _Engine(BaseModel):
     model_config = ConfigDict(extra='ignore')
 
     behaviors: _Behaviors
+    detection_engine: str = Field(alias='detection-engine')
 
 
 class _PreAgentStep(BaseModel):
@@ -163,7 +164,7 @@ class _Invocation(BaseModel):
 
     @property
     def python_path(self) -> list[Path]:
-        return [Path(entry) for entry in self.env['PYTHONPATH'].split(':')]
+        return [Path(entry) for entry in self.env.get('PYTHONPATH', '').split(':') if entry]
 
 
 class _Block(BaseModel):
@@ -215,6 +216,10 @@ def definition() -> _Frontmatter:
 def behaviors() -> _Behaviors:
     """The `engine.behaviors` block, read from the definition gh-aw consumes."""
     return definition().engine.behaviors
+
+
+def test_threat_detection_uses_the_builtin_copilot_engine() -> None:
+    assert definition().engine.detection_engine == 'copilot'
 
 
 def test_install_includes_spec_extra_for_yaml_agents() -> None:
@@ -321,25 +326,55 @@ def proxy_env(provider: str, model: str) -> dict[str, str]:
     }
 
 
-def test_the_default_target_is_the_generated_module(tmp_path: Path) -> None:
+def test_the_default_target_is_the_packaged_agent(tmp_path: Path) -> None:
     invocation = launch(
         tmp_path,
-        {**proxy_env('github', 'copilot/claude-sonnet-4-5'), 'COPILOT_GITHUB_TOKEN': 'a-token'},
+        {
+            **proxy_env('github', 'copilot/claude-sonnet-4-5'),
+            'COPILOT_GITHUB_TOKEN': 'a-token',
+            'OPENAI_API_KEY': 'inherited-openai-key',
+            'GITHUB_COPILOT_BASE_URL': 'https://unused.example.com',
+            'GITHUB_COPILOT_API_KEY': 'inherited-key',
+            'PYTHONPATH': str(tmp_path / 'workspace'),
+        },
     )
 
     assert invocation.argv[:2] == ['-P', '-c']
-    assert invocation.target == 'gh_aw_agent:agent'
-    assert invocation.cli_args == ['-a', 'gh_aw_agent:agent', '-m', 'openai-chat:claude-sonnet-4.5', PROMPT]
-    # The module is written to a private directory under `os.tmpdir()`, never into the
-    # checkout: a package committed under a directory the engine puts on PYTHONPATH
-    # would shadow an installed one for the whole run.
-    (module_dir,) = invocation.python_path
-    assert module_dir.parent == tmp_path / 'sandbox-tmp'
-    assert (module_dir / 'gh_aw_agent.py').read_text().startswith('from pydantic_ai')
+    assert invocation.target == 'pydantic_ai_harness.coder:coder_agent'
+    assert invocation.cli_args == [
+        '-a',
+        'pydantic_ai_harness.coder:coder_agent',
+        '-m',
+        'github-copilot:claude-sonnet-4.5',
+        PROMPT,
+    ]
+    assert invocation.python_path == []
+    assert 'PYTHONPATH' not in invocation.env
+    assert list((tmp_path / 'sandbox-tmp').iterdir()) == []
     assert not (tmp_path / 'workspace' / '.pydantic-ai').exists()
     # gh-aw sets this for the copilot backend; the proxy holds the real credential,
     # so the agent has no use for it.
     assert 'COPILOT_GITHUB_TOKEN' not in invocation.env
+    assert invocation.env['GITHUB_COPILOT_BASE_URL'] == 'http://host.docker.internal:10002'
+    assert invocation.env['GITHUB_COPILOT_API_KEY'] == 'awf-copilot-proxy'
+    assert 'OPENAI_API_KEY' not in invocation.env
+
+
+def test_copilot_uses_the_proxy_environment_without_reflect(tmp_path: Path) -> None:
+    invocation = launch(
+        tmp_path,
+        {
+            'GH_AW_LLM_PROVIDER': 'github',
+            'PAI_MODEL': 'copilot/gpt-5',
+            'OPENAI_BASE_URL': 'http://host.docker.internal:12345',
+            'GITHUB_COPILOT_BASE_URL': 'https://unused.example.com',
+            'GITHUB_COPILOT_API_KEY': 'inherited-key',
+        },
+    )
+
+    assert invocation.cli_args[-2] == 'github-copilot:gpt-5'
+    assert invocation.env['GITHUB_COPILOT_BASE_URL'] == 'http://host.docker.internal:12345'
+    assert invocation.env['GITHUB_COPILOT_API_KEY'] == 'awf-copilot-proxy'
 
 
 def test_the_checkout_is_off_the_import_path_without_pai_agent(tmp_path: Path) -> None:
@@ -411,7 +446,7 @@ def test_the_anthropic_backend_is_addressed_with_the_messages_api(tmp_path: Path
 
 @pytest.mark.parametrize(
     ('provider', 'model', 'port'),
-    [('github', 'copilot/gpt-5', 10002), ('openai', 'openai/gpt-5', 10000)],
+    [('openai', 'openai/gpt-5', 10000), ('openai', 'codex/gpt-5', 10000)],
 )
 def test_openai_shaped_backends_stay_on_chat_completions(tmp_path: Path, provider: str, model: str, port: int) -> None:
     invocation = launch(tmp_path, proxy_env(provider, model))
@@ -421,14 +456,16 @@ def test_openai_shaped_backends_stay_on_chat_completions(tmp_path: Path, provide
     assert 'ANTHROPIC_BASE_URL' not in invocation.env
 
 
-@pytest.mark.parametrize('model', ['anthropic/claude-sonnet-4-5', 'copilot/gpt-5', 'openai/gpt-5'])
+@pytest.mark.parametrize('model', ['anthropic/claude-sonnet-4-5', 'copilot/claude-sonnet-4-5', 'openai/gpt-5'])
 def test_pai_base_url_keeps_every_provider_on_chat_completions(tmp_path: Path, model: str) -> None:
     invocation = launch(
         tmp_path,
         {'GH_AW_LLM_PROVIDER': 'openai', 'PAI_MODEL': model, 'PAI_BASE_URL': 'https://endpoint.example.com/v1'},
     )
 
-    assert invocation.cli_args[-2].startswith('openai-chat:')
+    assert invocation.cli_args[-2] == f'openai-chat:{model.split("/", 1)[1]}'
+    assert 'GITHUB_COPILOT_BASE_URL' not in invocation.env
+    assert 'GITHUB_COPILOT_API_KEY' not in invocation.env
     assert invocation.env['OPENAI_BASE_URL'] == 'https://endpoint.example.com/v1'
     assert 'ANTHROPIC_BASE_URL' not in invocation.env
 
