@@ -30,7 +30,7 @@ def run(*, splash: Splash | None = None) -> None:
     )
     parser.add_argument('--request-limit', type=int)
     parser.add_argument('--database', type=Path, help='Settings database location')
-    parser.add_argument('command', nargs='?', choices=('config', 'plugins'))
+    parser.add_argument('command', nargs='?', choices=('config', 'plugins', 'logfire'))
     parser.add_argument('arguments', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     _validate_args(args, parser)
@@ -40,6 +40,7 @@ def run(*, splash: Splash | None = None) -> None:
         from ._app import DEFAULT_PLUGINS, chat, create_agent
         from .commands import config_command, plugins_command
         from .config import resolve_settings
+        from .logfire_onboarding import logfire_command, onboard_logfire
         from .project_settings import load_project_settings
         from .settings_store import SettingsStore
         from .worktrees import create_worktree, offer_worktree_cleanup
@@ -50,7 +51,7 @@ def run(*, splash: Splash | None = None) -> None:
         store = SettingsStore(args.database)
         store.path = store.path.resolve()
         if args.command:
-            handler = config_command if args.command == 'config' else plugins_command
+            handler = {'config': config_command, 'plugins': plugins_command, 'logfire': logfire_command}[args.command]
             print(handler(store, args.arguments))
             return
         if args.worktree is not None:
@@ -81,6 +82,7 @@ def run(*, splash: Splash | None = None) -> None:
                     )
                 )
             )
+        onboard_logfire(store=store, project_plugins=project.plugins)
         asyncio.run(
             chat(
                 create_agent(),
@@ -103,12 +105,12 @@ def run(*, splash: Splash | None = None) -> None:
 
 def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command and (args.resume is not None or args.worktree is not None):
-        parser.error('--resume and --worktree cannot be combined with config or plugins')
+        parser.error('--resume and --worktree cannot be combined with config, plugins, or logfire')
     if args.worktree is not None and args.resume is not None:
         parser.error('--worktree cannot be combined with --resume; resume from an existing worktree directory')
     if args.prompt is not None:
         if args.command:
-            parser.error('--prompt cannot be combined with config or plugins')
+            parser.error('--prompt cannot be combined with config, plugins, or logfire')
         if not args.prompt.strip():
             parser.error('--prompt requires non-empty text')
         if args.resume == '':
