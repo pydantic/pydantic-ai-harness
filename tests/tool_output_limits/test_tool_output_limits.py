@@ -36,6 +36,8 @@ from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage, UsageLimits
 from pydantic_core import to_json
 
+import pydantic_ai_harness.compaction as compaction
+import pydantic_ai_harness.tool_output_limits as tool_output_limits
 from pydantic_ai_harness.tool_output_limits import (
     Band,
     LocalFileStore,
@@ -923,6 +925,10 @@ class TestSummarize:
         )
         out = await _run(cap, 'x' * 100)
         assert out == 'STREAMED SUMMARY'
+
+    def test_drain_summary_events_is_reused_from_compaction(self):
+        """One public handler re-exported from both modules, not a second copy (#9249)."""
+        assert tool_output_limits.drain_summary_events is compaction.drain_summary_events
 
     async def test_summary_events_reach_a_caller_supplied_handler(self):
         deltas: list[str] = []
